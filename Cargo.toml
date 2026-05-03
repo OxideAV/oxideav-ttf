@@ -1,0 +1,16 @@
+[package]
+name = "oxideav-ttf"
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.80"
+license = "MIT"
+repository = "https://github.com/OxideAV/oxideav-ttf"
+homepage = "https://github.com/OxideAV/oxideav-ttf"
+authors = ["Mark Karpeles"]
+description = "Pure-Rust TrueType font parser for the oxideav framework — sfnt + cmap + glyf + hmtx + GSUB ligatures + GPOS kerning"
+readme = "README.md"
+keywords = ["truetype", "ttf", "opentype", "font", "pure-rust"]
+categories = ["graphics", "rendering", "parsing"]
+
+[dependencies]
+oxideav-core = "0.1"
