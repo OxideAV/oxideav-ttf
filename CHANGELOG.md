@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1](https://github.com/OxideAV/oxideav-ttf/compare/v0.1.0...v0.1.1) - 2026-05-03
+
+### Fixed
+
+- *(clippy)* collapse 1|2|3 into 1..=3 + reword doc continuation
+
+### Other
+
+- color bitmap glyph tables (PNG-payload formats 17/18/19)
+- TTC ('ttcf') header + Font::from_collection_bytes
+- LookupType 6 mark-to-mark attachment for stacked diacritics
+- LookupType 4 mark-to-base attachment for diacritics
+- release v0.1.0
+
 ### Added — CBDT/CBLC color bitmap glyphs (2026-05-04)
 
 - New `tables::cblc` module — Color Bitmap Location Table parser. Walks
