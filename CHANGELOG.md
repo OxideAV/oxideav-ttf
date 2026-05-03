@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — GPOS LookupType 4 (mark-to-base) (2026-05-04)
+
+- `Font::lookup_mark_to_base(base, mark) -> Option<(i16, i16)>` — walks
+  GPOS LookupType 4 (Mark-to-Base Attachment) sub-tables for a `(base,
+  mark)` glyph pair and returns the `(dx, dy)` offset (font units, TT
+  Y-up) to add to the mark's pen origin so its anchor lands on the
+  base's anchor for the mark's class. Used by consumer-crate shapers
+  to position diacritics above / below their base glyph (essential
+  for European Latin extended, Vietnamese, polytonic Greek).
+- `Font::is_mark_glyph(glyph_id) -> bool` — convenience wrapper around
+  `GdefTable::is_mark` so the consumer crate doesn't have to peek at
+  GDEF directly. Returns `false` if the font has no GDEF.
+- `GposTable::lookup_mark_to_base` — internal walker that handles
+  MarkBasePosFormat1 directly and unwraps ExtensionPos (LookupType 9)
+  transparently. Anchor formats 1, 2 and 3 are accepted; format 2's
+  anchor-point and format 3's device tables are silently ignored
+  (we don't run the TT bytecode and there's no LCD device map).
+
 ## [0.1.0](https://github.com/OxideAV/oxideav-ttf/compare/v0.0.1...v0.1.0) - 2026-05-03
 
 ### Other

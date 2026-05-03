@@ -6,7 +6,8 @@
 //!   `name`, `OS/2`, `hmtx`, `loca`, `glyf` (simple + composite), `post`.
 //! - Legacy `kern` table (format 0 subtable).
 //! - `GSUB` LookupType 4 (ligature substitution).
-//! - `GPOS` LookupType 2 (pair-adjustment / kerning).
+//! - `GPOS` LookupType 2 (pair-adjustment / kerning) and
+//!   LookupType 4 (mark-to-base attachment for diacritics).
 //! - `GDEF` (glyph class definitions).
 //!
 //! The crate is read-only (parsing-only) and dependency-light: only
@@ -288,5 +289,37 @@ impl<'a> Font<'a> {
             return kern.lookup(left, right);
         }
         0
+    }
+
+    /// Look up a mark-to-base attachment offset for a `(base, mark)`
+    /// glyph pair. Returns `(dx, dy)` in font units (TT Y-up convention)
+    /// to add to the mark's pen origin so its anchor lands on the
+    /// base's anchor for the mark's class.
+    ///
+    /// Walks GPOS LookupType 4 sub-tables; returns `None` if no
+    /// matching MarkBasePos rule covers both glyphs (or if the font has
+    /// no GPOS table). Used by the consumer crate's shaper to position
+    /// diacritics above / below their base glyph (essential for
+    /// European Latin extended, Vietnamese, polytonic Greek).
+    ///
+    /// Whether `mark` is actually a mark glyph (per `GDEF`) is the
+    /// caller's responsibility — typically the shaper checks
+    /// [`Font::is_mark_glyph`] before calling this. The lookup itself
+    /// works for any pair the font's MarkBasePos coverage tables
+    /// list, regardless of GDEF.
+    pub fn lookup_mark_to_base(&self, base: u16, mark: u16) -> Option<(i16, i16)> {
+        self.gpos.as_ref()?.lookup_mark_to_base(base, mark)
+    }
+
+    /// Is this glyph classified as a mark by the font's `GDEF` table?
+    /// Returns `false` if the font has no GDEF or the glyph isn't
+    /// enumerated. Used by the consumer crate's shaper to decide
+    /// whether to attempt mark-to-base attachment for an adjacent
+    /// glyph pair.
+    pub fn is_mark_glyph(&self, glyph_id: u16) -> bool {
+        self.gdef
+            .as_ref()
+            .map(|g| g.is_mark(glyph_id))
+            .unwrap_or(false)
     }
 }
