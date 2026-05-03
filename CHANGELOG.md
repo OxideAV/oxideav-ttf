@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — CBDT/CBLC color bitmap glyphs (2026-05-04)
+
+- New `tables::cblc` module — Color Bitmap Location Table parser. Walks
+  the CBLC header (major 2 = EBLC / 3 = CBLC), per-strike `BitmapSize`
+  records (48 bytes including the two 12-byte `SbitLineMetrics`), the
+  `IndexSubtableList`, and `IndexSubtable` formats 1/2/3/4/5. Resolves
+  `(glyph_id, target_ppem)` to a `CblcEntry { image_format,
+  image_data_offset, data_len, ppem_x, ppem_y, fixed_metrics }`.
+  Strike picking is closest-ppem with larger-ppem tie-break (per the
+  CBDT spec's "Scaling behavior" recommendation).
+- `tables::cbdt` module — Color Bitmap Data Table parser. Decodes
+  CBDT entry formats 17 (small metrics + PNG), 18 (big metrics + PNG),
+  and 19 (raw PNG with metrics from CBLC). Returns a `ColorBitmap`
+  with raw `png_bytes` for the consumer crate to decode via
+  `oxideav-png`. Other CBDT formats (BGRA, monochrome, grayscale)
+  return `Ok(None)`.
+- `Font::has_color_bitmaps()`, `Font::color_strike_sizes()`,
+  `Font::glyph_color_bitmap(gid, target_ppem) -> Option<ColorBitmap>`
+  — public glue. The PNG byte stream is borrowed from the font input
+  with the same `'a` lifetime; no allocation in the lookup path.
+- `loca` and `glyf` are now jointly optional. CBDT/CBLC-only colour-
+  emoji fonts (e.g. `NotoColorEmoji.ttf`) ship without either table;
+  `from_bytes` no longer rejects them. `glyph_outline` returns an
+  empty outline + `glyph_bounding_box` returns `None` when the pair
+  is absent. Half-pair (only one of the two) is still rejected as
+  malformed.
+- `parser::read_i8` (was missing) added for the CBDT/CBLC byte readers.
+- New public types: `ColorBitmap`, `BigGlyphMetrics`, `SmallGlyphMetrics`.
+
+Spec: Microsoft OpenType §"CBLC" + §"CBDT" + §"EBLC" (CBLC inherits
+the IndexSubtable layout). Microsoft "Color Bitmap Glyphs (CBDT/CBLC)
+font format" / OpenType 1.9.1.
+
 ### Added — TrueType Collection (`ttcf`) support (2026-05-04)
 
 - New `collection` module exposing `CollectionHeader::parse(bytes) ->

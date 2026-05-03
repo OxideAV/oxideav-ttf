@@ -111,6 +111,11 @@ pub(crate) fn read_u8(bytes: &[u8], off: usize) -> Result<u8, Error> {
 }
 
 #[inline]
+pub(crate) fn read_i8(bytes: &[u8], off: usize) -> Result<i8, Error> {
+    Ok(read_u8(bytes, off)? as i8)
+}
+
+#[inline]
 pub(crate) fn read_u16(bytes: &[u8], off: usize) -> Result<u16, Error> {
     let s = bytes.get(off..off + 2).ok_or(Error::UnexpectedEof)?;
     Ok(u16::from_be_bytes([s[0], s[1]]))

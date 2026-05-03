@@ -5,6 +5,8 @@
 //! own I/O. The four-byte ASCII table tags (`b"head"`, `b"glyf"`, …)
 //! are documented per-module.
 
+pub mod cbdt;
+pub mod cblc;
 pub mod cmap;
 pub mod gdef;
 pub mod glyf;

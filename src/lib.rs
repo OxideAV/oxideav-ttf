@@ -30,12 +30,15 @@ pub use collection::{is_collection, CollectionHeader, TTC_MAGIC};
 
 use crate::parser::TableDirectory;
 use crate::tables::{
-    cmap::CmapTable, gdef::GdefTable, glyf::GlyfTable, gpos::GposTable, gsub::GsubTable,
-    head::HeadTable, hhea::HheaTable, hmtx::HmtxTable, kern::KernTable, loca::LocaTable,
-    maxp::MaxpTable, name::NameTable, os2::Os2Table, post::PostTable,
+    cbdt::CbdtTable, cblc::CblcTable, cmap::CmapTable, gdef::GdefTable, glyf::GlyfTable,
+    gpos::GposTable, gsub::GsubTable, head::HeadTable, hhea::HheaTable, hmtx::HmtxTable,
+    kern::KernTable, loca::LocaTable, maxp::MaxpTable, name::NameTable, os2::Os2Table,
+    post::PostTable,
 };
 
 pub use outline::{BBox, Contour, Point, TtOutline};
+pub use tables::cbdt::ColorBitmap;
+pub use tables::cblc::{BigGlyphMetrics, SmallGlyphMetrics};
 
 /// Errors emitted during font parsing or glyph lookup.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -104,13 +107,19 @@ pub struct Font<'a> {
     name: NameTable<'a>,
     os2: Option<Os2Table>,
     hmtx: HmtxTable<'a>,
-    loca: LocaTable<'a>,
-    glyf: GlyfTable<'a>,
+    /// Glyph-location offsets into `glyf`. Optional because CBDT/CBLC-only
+    /// colour-emoji fonts (e.g. NotoColorEmoji.ttf) ship without `loca`
+    /// + `glyf` — every glyph is a colour bitmap and there are no
+    /// outlines to address.
+    loca: Option<LocaTable<'a>>,
+    glyf: Option<GlyfTable<'a>>,
     post: Option<PostTable>,
     kern: Option<KernTable<'a>>,
     gsub: Option<GsubTable<'a>>,
     gpos: Option<GposTable<'a>>,
     gdef: Option<GdefTable<'a>>,
+    cblc: Option<CblcTable<'a>>,
+    cbdt: Option<CbdtTable<'a>>,
 }
 
 impl<'a> Font<'a> {
@@ -156,12 +165,24 @@ impl<'a> Font<'a> {
             hhea.num_long_hor_metrics,
             maxp.num_glyphs,
         )?;
-        let loca = LocaTable::parse(
-            dir.required(b"loca", bytes)?,
-            maxp.num_glyphs,
-            head.index_to_loc_format,
-        )?;
-        let glyf = GlyfTable::new(dir.required(b"glyf", bytes)?);
+        // `loca` + `glyf` are jointly optional: CBDT/CBLC-only colour-
+        // emoji fonts (e.g. NotoColorEmoji.ttf) ship without either.
+        // When loca is present we still require glyf (and vice versa)
+        // because a half-pair would be malformed.
+        let loca = match (dir.find(b"loca", bytes), dir.find(b"glyf", bytes)) {
+            (Some(l), Some(_g)) => Some(LocaTable::parse(
+                l,
+                maxp.num_glyphs,
+                head.index_to_loc_format,
+            )?),
+            (None, None) => None,
+            _ => {
+                return Err(Error::BadStructure(
+                    "loca/glyf must both be present or both absent",
+                ))
+            }
+        };
+        let glyf = dir.find(b"glyf", bytes).map(GlyfTable::new);
 
         let os2 = dir.find(b"OS/2", bytes).map(Os2Table::parse).transpose()?;
         let post = dir.find(b"post", bytes).map(PostTable::parse).transpose()?;
@@ -169,6 +190,8 @@ impl<'a> Font<'a> {
         let gsub = dir.find(b"GSUB", bytes).map(GsubTable::parse).transpose()?;
         let gpos = dir.find(b"GPOS", bytes).map(GposTable::parse).transpose()?;
         let gdef = dir.find(b"GDEF", bytes).map(GdefTable::parse).transpose()?;
+        let cblc = dir.find(b"CBLC", bytes).map(CblcTable::parse).transpose()?;
+        let cbdt = dir.find(b"CBDT", bytes).map(CbdtTable::parse).transpose()?;
 
         Ok(Self {
             bytes,
@@ -186,6 +209,8 @@ impl<'a> Font<'a> {
             gsub,
             gpos,
             gdef,
+            cblc,
+            cbdt,
         })
     }
 
@@ -264,15 +289,23 @@ impl<'a> Font<'a> {
 
     /// Decode the TrueType outline for `glyph_id`. Empty / blank glyphs
     /// (e.g. the space glyph) return an outline with zero contours.
+    ///
+    /// Returns an empty outline when the font has no `glyf`/`loca`
+    /// (CBDT/CBLC-only colour-emoji fonts). Callers that care should
+    /// check [`Font::has_color_bitmaps`] first.
     pub fn glyph_outline(&self, glyph_id: u16) -> Result<TtOutline, Error> {
         if glyph_id >= self.maxp.num_glyphs {
             return Err(Error::GlyphOutOfRange(glyph_id));
         }
-        let range = self.loca.glyph_range(glyph_id)?;
+        let (loca, glyf) = match (self.loca.as_ref(), self.glyf.as_ref()) {
+            (Some(l), Some(g)) => (l, g),
+            _ => return Ok(TtOutline::default()),
+        };
+        let range = loca.glyph_range(glyph_id)?;
         if range.is_empty() {
             return Ok(TtOutline::default());
         }
-        self.glyf.glyph_outline(range, &self.loca, 0)
+        glyf.glyph_outline(range, loca, 0)
     }
 
     /// Per-glyph advance width in font units.
@@ -286,16 +319,18 @@ impl<'a> Font<'a> {
     }
 
     /// Glyph bounding box from the `glyf` header (xMin/yMin/xMax/yMax).
-    /// Returns `None` for empty / blank glyphs.
+    /// Returns `None` for empty / blank glyphs and for fonts that lack
+    /// a `glyf`/`loca` pair (CBDT-only colour-emoji fonts).
     pub fn glyph_bounding_box(&self, glyph_id: u16) -> Option<BBox> {
         if glyph_id >= self.maxp.num_glyphs {
             return None;
         }
-        let range = self.loca.glyph_range(glyph_id).ok()?;
+        let (loca, glyf) = (self.loca.as_ref()?, self.glyf.as_ref()?);
+        let range = loca.glyph_range(glyph_id).ok()?;
         if range.is_empty() {
             return None;
         }
-        self.glyf.bbox(range)
+        glyf.bbox(range)
     }
 
     // ---- shaping support ---------------------------------------------------
@@ -374,5 +409,42 @@ impl<'a> Font<'a> {
             .as_ref()
             .map(|g| g.is_mark(glyph_id))
             .unwrap_or(false)
+    }
+
+    // ---- color bitmap glyphs (CBDT/CBLC) ---------------------------------
+
+    /// `true` if this font ships a CBDT/CBLC pair — i.e. carries
+    /// embedded colour bitmap glyphs (Noto Color Emoji, Apple Color
+    /// Emoji's Google-format counterparts, and most Android emoji
+    /// fonts). Returns `false` for plain outline-only fonts.
+    pub fn has_color_bitmaps(&self) -> bool {
+        self.cblc.is_some() && self.cbdt.is_some()
+    }
+
+    /// All `(ppem_x, ppem_y)` strikes the colour-bitmap tables ship.
+    /// Returns an empty iterator when the font lacks CBDT/CBLC.
+    /// Useful for picking a strike before calling
+    /// [`Font::glyph_color_bitmap`].
+    pub fn color_strike_sizes(&self) -> Vec<(u8, u8)> {
+        self.cblc
+            .as_ref()
+            .map(|c| c.ppem_sizes().collect())
+            .unwrap_or_default()
+    }
+
+    /// Resolve `glyph_id`'s colour bitmap at the strike whose `ppem_y`
+    /// is closest to `target_ppem`. Returns `None` if the font has no
+    /// CBDT/CBLC tables OR no strike contains `glyph_id` OR the strike's
+    /// per-glyph entry is in a CBDT format we don't decode (anything
+    /// other than 17/18/19 — the three PNG-payload formats).
+    ///
+    /// On success returns a [`ColorBitmap`] with raw `png_bytes` ready
+    /// to feed into `oxideav-png` in the consumer crate. We deliberately
+    /// don't decode the PNG here so this crate stays dependency-light.
+    pub fn glyph_color_bitmap(&self, glyph_id: u16, target_ppem: u8) -> Option<ColorBitmap<'a>> {
+        let cblc = self.cblc.as_ref()?;
+        let cbdt = self.cbdt.as_ref()?;
+        let entry = cblc.lookup_glyph(glyph_id, target_ppem)?;
+        cbdt.lookup(&entry).ok().flatten()
     }
 }
