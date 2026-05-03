@@ -513,7 +513,7 @@ fn parse_anchor(bytes: &[u8]) -> Option<(i16, i16)> {
     let x = read_i16(bytes, 2).ok()?;
     let y = read_i16(bytes, 4).ok()?;
     match format {
-        1 | 2 | 3 => Some((x, y)),
+        1..=3 => Some((x, y)),
         _ => None,
     }
 }

@@ -109,7 +109,7 @@ pub struct Font<'a> {
     hmtx: HmtxTable<'a>,
     /// Glyph-location offsets into `glyf`. Optional because CBDT/CBLC-only
     /// colour-emoji fonts (e.g. NotoColorEmoji.ttf) ship without `loca`
-    /// + `glyf` — every glyph is a colour bitmap and there are no
+    /// and `glyf` — every glyph is a colour bitmap and there are no
     /// outlines to address.
     loca: Option<LocaTable<'a>>,
     glyf: Option<GlyfTable<'a>>,
