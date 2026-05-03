@@ -14,9 +14,15 @@
 //!   (plain x/y) and format 3 (x/y + device offsets, which we ignore)
 //!   are accepted. Format 2 (anchor point) is treated as format 1
 //!   because we don't run the TT bytecode.
+//! - **LookupType 6** (Mark-to-Mark Attachment) — mark-on-mark stacking
+//!   used when a base glyph already carries one diacritic and a second
+//!   diacritic must sit on top of (or below) the first. Layout-wise the
+//!   sub-table is identical to MarkBasePos but interprets coverage 2 as
+//!   the *previous mark* rather than the base. Returns `(dx, dy)` in
+//!   font units to add to the second mark's pen origin.
 //!
-//! ExtensionPos (LookupType 9) is unwrapped transparently for both
-//! types.
+//! ExtensionPos (LookupType 9) is unwrapped transparently for all
+//! supported sub-types.
 
 use crate::parser::{read_i16, read_u16, read_u32};
 use crate::tables::gdef::{
@@ -26,6 +32,7 @@ use crate::Error;
 
 const LOOKUP_PAIR_POS: u16 = 2;
 const LOOKUP_MARK_BASE_POS: u16 = 4;
+const LOOKUP_MARK_MARK_POS: u16 = 6;
 const LOOKUP_EXTENSION_POS: u16 = 9;
 
 // ValueFormat bits (low byte holds the four geometric flags).
@@ -101,6 +108,56 @@ impl<'a> GposTable<'a> {
                     continue;
                 }
                 if let Some(v) = mark_base_pos_lookup(effective_sub, base, mark) {
+                    return Some(v);
+                }
+            }
+        }
+        None
+    }
+
+    /// Look up the mark-to-mark attachment offset for a `(mark1, mark2)`
+    /// glyph pair, where `mark1` is the *previous* (already-attached)
+    /// mark and `mark2` is the new mark we want to stack on top of (or
+    /// below) it. Returns `(dx, dy)` in font units (TT Y-up convention)
+    /// to add to `mark2`'s pen origin so its anchor lands on `mark1`'s
+    /// anchor for `mark2`'s class.
+    ///
+    /// Returns `None` if no MarkMarkPosFormat1 sub-table covers both
+    /// glyphs, or if the mark2's class has no anchor on mark1.
+    ///
+    /// Walks every LookupType 6 sub-table; the first hit wins (matches
+    /// the OpenType "first matching subtable in lookup order" rule).
+    pub fn lookup_mark_to_mark(&self, mark1: u16, mark2: u16) -> Option<(i16, i16)> {
+        let lookup_list = self.bytes.get(self.lookup_list_off as usize..)?;
+        if lookup_list.len() < 2 {
+            return None;
+        }
+        let lookup_count = read_u16(lookup_list, 0).ok()?;
+        for i in 0..lookup_count {
+            let lookup = lookup_table_slice(self.bytes, self.lookup_list_off, i)?;
+            if lookup.len() < 6 {
+                continue;
+            }
+            let kind = read_u16(lookup, 0).ok()?;
+            let sub_count = read_u16(lookup, 4).ok()? as usize;
+            for s in 0..sub_count {
+                let sub_off = read_u16(lookup, 6 + s * 2).ok()? as usize;
+                let sub = lookup.get(sub_off..)?;
+                let (effective_kind, effective_sub) = if kind == LOOKUP_EXTENSION_POS {
+                    if sub.len() < 8 {
+                        continue;
+                    }
+                    let ext_type = read_u16(sub, 2).ok()?;
+                    let ext_off = read_u32(sub, 4).ok()? as usize;
+                    let ext = sub.get(ext_off..)?;
+                    (ext_type, ext)
+                } else {
+                    (kind, sub)
+                };
+                if effective_kind != LOOKUP_MARK_MARK_POS {
+                    continue;
+                }
+                if let Some(v) = mark_mark_pos_lookup(effective_sub, mark1, mark2) {
                     return Some(v);
                 }
             }
@@ -367,6 +424,83 @@ fn mark_base_pos_lookup(sub: &[u8], base: u16, mark: u16) -> Option<(i16, i16)> 
     Some((bx.wrapping_sub(mx), by.wrapping_sub(my)))
 }
 
+/// Walk a MarkMarkPosFormat1 subtable looking for `(mark1, mark2)` and
+/// return the `(dx, dy)` mark-on-mark attachment offset in font units.
+///
+/// MarkMarkPosFormat1 layout (OpenType spec § GPOS LookupType 6) is
+/// structurally identical to MarkBasePosFormat1 — only the role of
+/// "second glyph" differs (it's a previous mark, not a base). Same
+/// MarkArray (mark1 records: class + anchor) and same outer Mark2Array
+/// (mark2 records: anchor per class). We share `parse_anchor` and the
+/// arithmetic with the mark-to-base path.
+fn mark_mark_pos_lookup(sub: &[u8], mark1: u16, mark2: u16) -> Option<(i16, i16)> {
+    if sub.len() < 12 {
+        return None;
+    }
+    let format = read_u16(sub, 0).ok()?;
+    if format != 1 {
+        return None;
+    }
+    let mark1_cov_off = read_u16(sub, 2).ok()? as usize;
+    let mark2_cov_off = read_u16(sub, 4).ok()? as usize;
+    let mark_class_count = read_u16(sub, 6).ok()? as usize;
+    let mark1_array_off = read_u16(sub, 8).ok()? as usize;
+    let mark2_array_off = read_u16(sub, 10).ok()? as usize;
+
+    // Per the OpenType spec the *attaching* mark is mark1 (which we
+    // emit as the second mark in source order — the spec uses "mark1"
+    // for the to-be-attached glyph); the *attached-to* mark is mark2
+    // (the previous, already-positioned mark). The MarkArray covers
+    // mark1 (the new glyph) and Mark2Array covers mark2 (the previous
+    // glyph). Our argument naming follows source order: `mark1` here
+    // is the previous mark, `mark2` is the new one. Map accordingly.
+    let mark2_cov = sub.get(mark1_cov_off..)?; // covers the new attaching mark
+    let mark1_cov = sub.get(mark2_cov_off..)?; // covers the already-placed mark
+    let mark2_idx = coverage_lookup(mark2_cov, mark2)? as usize;
+    let mark1_idx = coverage_lookup(mark1_cov, mark1)? as usize;
+
+    // MarkArray (mark1 records — really "the new mark" per spec):
+    // markCount + markRecord[mark2_idx] = (class u16, anchor_off u16).
+    let new_mark_array = sub.get(mark1_array_off..)?;
+    if new_mark_array.len() < 2 {
+        return None;
+    }
+    let new_mark_count = read_u16(new_mark_array, 0).ok()? as usize;
+    if mark2_idx >= new_mark_count {
+        return None;
+    }
+    let nr_off = 2 + mark2_idx * 4;
+    let new_mark_class = read_u16(new_mark_array, nr_off).ok()? as usize;
+    let new_anchor_off_local = read_u16(new_mark_array, nr_off + 2).ok()? as usize;
+    if new_mark_class >= mark_class_count {
+        return None;
+    }
+    let new_mark_anchor = new_mark_array.get(new_anchor_off_local..)?;
+    let (mx, my) = parse_anchor(new_mark_anchor)?;
+
+    // Mark2Array: mark2Count + mark2Record[mark1_idx] =
+    // mark2AnchorOffset[mark_class_count].
+    let prev_array = sub.get(mark2_array_off..)?;
+    if prev_array.len() < 2 {
+        return None;
+    }
+    let prev_count = read_u16(prev_array, 0).ok()? as usize;
+    if mark1_idx >= prev_count {
+        return None;
+    }
+    let pr_off = 2 + mark1_idx * mark_class_count * 2;
+    let prev_anchor_off_local = read_u16(prev_array, pr_off + new_mark_class * 2).ok()? as usize;
+    if prev_anchor_off_local == 0 {
+        return None;
+    }
+    let prev_anchor = prev_array.get(prev_anchor_off_local..)?;
+    let (bx, by) = parse_anchor(prev_anchor)?;
+
+    // Same arithmetic as mark-to-base: pull the attaching mark from its
+    // own anchor onto the previous mark's anchor for that class.
+    Some((bx.wrapping_sub(mx), by.wrapping_sub(my)))
+}
+
 /// Parse an Anchor table. Supports format 1 (plain x/y) and format 3
 /// (x/y + device tables which we ignore — not relevant without TT
 /// hinting). Format 2 (x/y + anchor point) is read like format 1 since
@@ -580,5 +714,117 @@ mod tests {
         let bytes = build_simple_pp1();
         let g = GposTable::parse(&bytes).unwrap();
         assert_eq!(g.lookup_mark_to_base(50, 60), None);
+    }
+
+    /// Build a tiny GPOS with one MarkMarkPosFormat1 subtable: previous
+    /// mark glyph 30 (anchor 60, 1200) and new mark glyph 40 (mark
+    /// class 0, anchor 30, 0). Expected delta when stacking new on
+    /// previous: `(60 - 30, 1200 - 0) = (30, 1200)`.
+    fn build_simple_mark_mark() -> Vec<u8> {
+        // ---- Anchor tables (format 1: u16 format + i16 x + i16 y) ----
+        let mut prev_anchor = Vec::new();
+        prev_anchor.extend_from_slice(&1u16.to_be_bytes());
+        prev_anchor.extend_from_slice(&60i16.to_be_bytes());
+        prev_anchor.extend_from_slice(&1200i16.to_be_bytes());
+
+        let mut new_anchor = Vec::new();
+        new_anchor.extend_from_slice(&1u16.to_be_bytes());
+        new_anchor.extend_from_slice(&30i16.to_be_bytes());
+        new_anchor.extend_from_slice(&0i16.to_be_bytes());
+
+        // ---- New-mark MarkArray (sub.mark1_array, the *attaching*
+        // mark) — covers mark2 (the new glyph in our shaper API).
+        // markCount=1 + record (class=0, off=6) + anchor at offset 6.
+        let mut new_mark_array = Vec::new();
+        new_mark_array.extend_from_slice(&1u16.to_be_bytes());
+        new_mark_array.extend_from_slice(&0u16.to_be_bytes()); // class 0
+        new_mark_array.extend_from_slice(&6u16.to_be_bytes()); // anchor offset
+        new_mark_array.extend_from_slice(&new_anchor);
+
+        // ---- Previous-mark Mark2Array (sub.mark2_array, the
+        // already-placed mark) — covers mark1 in our shaper API.
+        // mark2Count=1 + record (1 anchor offset = 2 bytes) + anchor
+        // at offset 4.
+        let mut prev_array = Vec::new();
+        prev_array.extend_from_slice(&1u16.to_be_bytes());
+        prev_array.extend_from_slice(&4u16.to_be_bytes()); // anchor off
+        prev_array.extend_from_slice(&prev_anchor);
+
+        // ---- Coverage tables (format 1) ----
+        // sub.mark1_cov covers the new attaching mark (gid 40).
+        let mut new_cov = Vec::new();
+        new_cov.extend_from_slice(&1u16.to_be_bytes());
+        new_cov.extend_from_slice(&1u16.to_be_bytes());
+        new_cov.extend_from_slice(&40u16.to_be_bytes());
+
+        // sub.mark2_cov covers the already-placed mark (gid 30).
+        let mut prev_cov = Vec::new();
+        prev_cov.extend_from_slice(&1u16.to_be_bytes());
+        prev_cov.extend_from_slice(&1u16.to_be_bytes());
+        prev_cov.extend_from_slice(&30u16.to_be_bytes());
+
+        // ---- MarkMarkPosFormat1 subtable (12-byte header) ----
+        let header = 12usize;
+        let new_cov_off = header;
+        let prev_cov_off = new_cov_off + new_cov.len();
+        let new_mark_array_off = prev_cov_off + prev_cov.len();
+        let prev_array_off = new_mark_array_off + new_mark_array.len();
+        let mut mmp = Vec::new();
+        mmp.extend_from_slice(&1u16.to_be_bytes()); // format
+        mmp.extend_from_slice(&(new_cov_off as u16).to_be_bytes()); // mark1Cov
+        mmp.extend_from_slice(&(prev_cov_off as u16).to_be_bytes()); // mark2Cov
+        mmp.extend_from_slice(&1u16.to_be_bytes()); // markClassCount
+        mmp.extend_from_slice(&(new_mark_array_off as u16).to_be_bytes());
+        mmp.extend_from_slice(&(prev_array_off as u16).to_be_bytes());
+        mmp.extend_from_slice(&new_cov);
+        mmp.extend_from_slice(&prev_cov);
+        mmp.extend_from_slice(&new_mark_array);
+        mmp.extend_from_slice(&prev_array);
+
+        // ---- Lookup: type=6, flag=0, subCount=1, subOffsets=[8] ----
+        let mut lookup = Vec::new();
+        lookup.extend_from_slice(&6u16.to_be_bytes());
+        lookup.extend_from_slice(&0u16.to_be_bytes());
+        lookup.extend_from_slice(&1u16.to_be_bytes());
+        lookup.extend_from_slice(&8u16.to_be_bytes());
+        lookup.extend_from_slice(&mmp);
+
+        let mut lookup_list = Vec::new();
+        lookup_list.extend_from_slice(&1u16.to_be_bytes());
+        lookup_list.extend_from_slice(&4u16.to_be_bytes());
+        lookup_list.extend_from_slice(&lookup);
+
+        let mut gpos = Vec::new();
+        gpos.extend_from_slice(&1u16.to_be_bytes());
+        gpos.extend_from_slice(&0u16.to_be_bytes());
+        gpos.extend_from_slice(&0u16.to_be_bytes());
+        gpos.extend_from_slice(&0u16.to_be_bytes());
+        gpos.extend_from_slice(&10u16.to_be_bytes());
+        gpos.extend_from_slice(&lookup_list);
+        gpos
+    }
+
+    #[test]
+    fn mark_to_mark_round_trip() {
+        let bytes = build_simple_mark_mark();
+        let g = GposTable::parse(&bytes).unwrap();
+        // Expected: prev_anchor (60, 1200) - new_anchor (30, 0) = (30, 1200).
+        assert_eq!(g.lookup_mark_to_mark(30, 40), Some((30, 1200)));
+        // Pair not in coverage → None.
+        assert_eq!(g.lookup_mark_to_mark(31, 40), None);
+        assert_eq!(g.lookup_mark_to_mark(30, 41), None);
+    }
+
+    #[test]
+    fn mark_to_mark_missing_table_returns_none() {
+        // Reuse the kerning-only fixture: no LookupType 6, so
+        // lookup_mark_to_mark must return None for any pair.
+        let bytes = build_simple_pp1();
+        let g = GposTable::parse(&bytes).unwrap();
+        assert_eq!(g.lookup_mark_to_mark(50, 60), None);
+        // Mark-to-base fixture also has no LookupType 6.
+        let bytes = build_simple_mark_base();
+        let g = GposTable::parse(&bytes).unwrap();
+        assert_eq!(g.lookup_mark_to_mark(10, 200), None);
     }
 }

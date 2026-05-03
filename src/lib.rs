@@ -6,8 +6,9 @@
 //!   `name`, `OS/2`, `hmtx`, `loca`, `glyf` (simple + composite), `post`.
 //! - Legacy `kern` table (format 0 subtable).
 //! - `GSUB` LookupType 4 (ligature substitution).
-//! - `GPOS` LookupType 2 (pair-adjustment / kerning) and
-//!   LookupType 4 (mark-to-base attachment for diacritics).
+//! - `GPOS` LookupType 2 (pair-adjustment / kerning),
+//!   LookupType 4 (mark-to-base attachment for diacritics), and
+//!   LookupType 6 (mark-to-mark attachment for stacked diacritics).
 //! - `GDEF` (glyph class definitions).
 //!
 //! The crate is read-only (parsing-only) and dependency-light: only
@@ -309,6 +310,23 @@ impl<'a> Font<'a> {
     /// list, regardless of GDEF.
     pub fn lookup_mark_to_base(&self, base: u16, mark: u16) -> Option<(i16, i16)> {
         self.gpos.as_ref()?.lookup_mark_to_base(base, mark)
+    }
+
+    /// Look up a mark-to-mark attachment offset for a `(mark1, mark2)`
+    /// glyph pair, where `mark1` is the previously-positioned mark
+    /// (already attached to a base via a prior mark-to-base lookup) and
+    /// `mark2` is the mark we want to stack on top of (or below) it.
+    /// Returns `(dx, dy)` in font units (TT Y-up convention) to add to
+    /// `mark2`'s pen origin so its anchor lands on `mark1`'s anchor for
+    /// `mark2`'s class.
+    ///
+    /// Walks GPOS LookupType 6 sub-tables; returns `None` if no
+    /// matching MarkMarkPos rule covers both glyphs (or if the font
+    /// has no GPOS table). Used by the consumer crate's shaper to
+    /// build multi-mark stacks (e.g. polytonic Greek `α + tonos +
+    /// dialytika`, Vietnamese `a + circumflex + acute`).
+    pub fn lookup_mark_to_mark(&self, mark1: u16, mark2: u16) -> Option<(i16, i16)> {
+        self.gpos.as_ref()?.lookup_mark_to_mark(mark1, mark2)
     }
 
     /// Is this glyph classified as a mark by the font's `GDEF` table?

@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — GPOS LookupType 6 (mark-to-mark) (2026-05-04)
+
+- `Font::lookup_mark_to_mark(mark1, mark2) -> Option<(i16, i16)>` —
+  walks GPOS LookupType 6 (Mark-to-Mark Attachment) sub-tables for a
+  `(mark1, mark2)` glyph pair where `mark1` is the previously-placed
+  mark and `mark2` is the new mark to stack on top of (or below) it.
+  Returns the `(dx, dy)` offset (font units, TT Y-up) to add to
+  `mark2`'s pen origin so its anchor snaps onto `mark1`'s anchor for
+  `mark2`'s class. Used by consumer-crate shapers to build multi-mark
+  stacks (polytonic Greek `α + tonos + dialytika`, Vietnamese
+  `a + circumflex + acute`).
+- `GposTable::lookup_mark_to_mark` — internal walker that handles
+  MarkMarkPosFormat1 directly and unwraps ExtensionPos (LookupType 9)
+  transparently. Same Anchor format support as the mark-to-base path
+  (formats 1, 2 and 3 accepted; device tables / anchor points
+  ignored). Layout is structurally identical to MarkBasePosFormat1
+  except mark2Coverage replaces baseCoverage.
+
 ### Added — GPOS LookupType 4 (mark-to-base) (2026-05-04)
 
 - `Font::lookup_mark_to_base(base, mark) -> Option<(i16, i16)>` — walks
