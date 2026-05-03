@@ -21,9 +21,12 @@
 #![deny(missing_debug_implementations)]
 #![warn(rust_2018_idioms)]
 
+pub mod collection;
 pub mod outline;
 pub mod parser;
 pub mod tables;
+
+pub use collection::{is_collection, CollectionHeader, TTC_MAGIC};
 
 use crate::parser::TableDirectory;
 use crate::tables::{
@@ -57,6 +60,9 @@ pub enum Error {
     BadLocaOffset,
     /// A varying-length structure was malformed.
     BadStructure(&'static str),
+    /// A `from_collection_bytes` call asked for a subfont index that
+    /// the TTC header does not contain. Carries the requested index.
+    SubfontOutOfRange(u32),
 }
 
 impl core::fmt::Display for Error {
@@ -74,6 +80,7 @@ impl core::fmt::Display for Error {
             Self::CompositeTooDeep => f.write_str("composite glyph recursion too deep"),
             Self::BadLocaOffset => f.write_str("loca offset past end of glyf"),
             Self::BadStructure(s) => write!(f, "malformed structure: {s}"),
+            Self::SubfontOutOfRange(i) => write!(f, "subfont index {i} not in collection"),
         }
     }
 }
@@ -107,6 +114,34 @@ pub struct Font<'a> {
 }
 
 impl<'a> Font<'a> {
+    /// Parse the `index`-th subfont out of a TrueType Collection (`.ttc` /
+    /// `'ttcf'`) byte slice.
+    ///
+    /// TTC files start with a `'ttcf'` magic followed by a list of byte
+    /// offsets pointing at per-subfont sfnt headers. This entry point
+    /// reads the TTC header, then runs the regular sfnt parse path
+    /// against the slice rooted at the chosen subfont. The returned
+    /// `Font<'a>` borrows from the original `bytes` (sub-slicing is
+    /// done internally; the lifetime stays tied to the input).
+    ///
+    /// Returns:
+    /// - `Error::BadMagic` if `bytes` is not a TTC.
+    /// - `Error::SubfontOutOfRange(index)` if the chosen index exceeds
+    ///   `numFonts`.
+    /// - Whatever the underlying sfnt path emits otherwise (typically
+    ///   `MissingTable` / `BadOffset` for a malformed subfont).
+    ///
+    /// Spec: Microsoft OpenType §"Font Collections", Apple TrueType
+    /// Reference / "TrueType Collections".
+    pub fn from_collection_bytes(bytes: &'a [u8], index: u32) -> Result<Self, Error> {
+        let header = CollectionHeader::parse(bytes)?;
+        let offset = header
+            .font_offset(index)
+            .ok_or(Error::SubfontOutOfRange(index))? as usize;
+        let sub = bytes.get(offset..).ok_or(Error::BadOffset)?;
+        Self::from_bytes(sub)
+    }
+
     /// Parse a font from a borrowed byte slice.
     pub fn from_bytes(bytes: &'a [u8]) -> Result<Self, Error> {
         let dir = TableDirectory::parse(bytes)?;

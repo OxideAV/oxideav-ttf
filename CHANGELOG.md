@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — TrueType Collection (`ttcf`) support (2026-05-04)
+
+- New `collection` module exposing `CollectionHeader::parse(bytes) ->
+  Result<Self, Error>` for the leading 12-byte TTC header + per-subfont
+  offset table (`'ttcf'` magic, version 1.0 or 2.0, `numFonts: u32`,
+  `offsetTable[numFonts]`). The version-2-only DSIG trailer is parsed
+  (only insofar as we accept the header) but not validated.
+- `Font::from_collection_bytes(bytes, index) -> Result<Font<'_>, Error>`
+  — convenience constructor that reads the TTC header, picks the
+  `index`-th subfont, and runs the regular sfnt parse path against
+  `&bytes[offset..]`. Returns `Error::SubfontOutOfRange(index)` if the
+  index exceeds `numFonts`.
+- `is_collection(bytes) -> bool` — quick magic-only probe so callers
+  can dispatch between TTC and plain sfnt without try-then-catch.
+- New error variant `Error::SubfontOutOfRange(u32)`.
+
 ### Added — GPOS LookupType 6 (mark-to-mark) (2026-05-04)
 
 - `Font::lookup_mark_to_mark(mark1, mark2) -> Option<(i16, i16)>` —
