@@ -80,13 +80,32 @@ if font.has_sbix() {
 // TTC (TrueType Collection) — pick one subfont from a `.ttc` file.
 let _ = oxideav_ttf::is_collection(&bytes);
 let _ = Font::from_collection_bytes(&bytes, /* index */ 0);
+
+// Variable fonts (fvar / avar / gvar). Pick a coord vector in
+// user-space units (e.g. wght 100..900); glyph_outline() then
+// returns the gvar-deltad outline.
+let mut vfont = Font::from_bytes(&bytes)?;
+if vfont.is_variable() {
+    for axis in vfont.variation_axes() {
+        // axis.tag, axis.min, axis.default, axis.max, axis.name_id
+    }
+    for inst in vfont.named_instances() {
+        // inst.subfamily_name_id + inst.coords
+    }
+    let mut coords = vfont.variation_coords().to_vec();
+    if let Some(i) = vfont.variation_axes().iter().position(|a| &a.tag == b"wght") {
+        coords[i] = 700.0;
+    }
+    vfont.set_variation_coords(&coords);
+    let bold = vfont.glyph_outline(vfont.glyph_index('A').unwrap())?;
+    let _ = bold;
+}
 ```
 
 ## Out of scope (round 2+)
 
 - CFF / Type 2 charstrings — moves to a sibling `oxideav-otf` crate.
 - Bidi, Arabic shaping, Indic conjuncts, complex contextual GSUB/GPOS.
-- Variable fonts (`fvar` / `gvar` / `MVAR`).
 - TrueType bytecode hinting (modern AA at ≥ 16 px does not need it).
 - cmap formats 2, 8, 10, 13.
 - GSUB lookup types 1/2/3/5/6/7/8 and GPOS lookup types 1/3..9.
@@ -94,11 +113,20 @@ let _ = Font::from_collection_bytes(&bytes, /* index */ 0);
   the v0 flat layer stack is supported.
 - sbix `'dupe'` chasing (the indirection sentinel is surfaced
   as-is; consumers chase it with their own cycle detection).
+- avar **v2** delta-set index map (variable-axis remap).
+- HVAR / VVAR / MVAR (per-glyph horizontal-metrics / vertical-metrics
+  / per-table metric variations).
+- gvar delta propagation into composite-glyph component offsets and
+  the four phantom points.
 
-## Test fixture
+## Test fixtures
 
-`tests/fixtures/DejaVuSansMono.ttf` is the upstream DejaVu Sans Mono 2.37
-under the Bitstream Vera license (see `tests/fixtures/DEJAVU-LICENSE`).
+- `tests/fixtures/DejaVuSansMono.ttf` is the upstream DejaVu Sans
+  Mono 2.37 under the Bitstream Vera license
+  (see `tests/fixtures/DEJAVU-LICENSE`).
+- `tests/fixtures/InterVariable.ttf` is Inter 4.0 (variable font,
+  `wght` + `opsz` axes) under the SIL Open Font License 1.1
+  (see `tests/fixtures/INTER-OFL-LICENSE.txt`).
 
 ## License
 

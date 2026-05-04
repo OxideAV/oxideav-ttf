@@ -7,6 +7,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — variable fonts: fvar / avar / gvar parsers + delta-applied outlines (2026-05-04)
+
+- New `tables::fvar::FvarTable` parser for the Font Variations Header.
+  Decodes the version-1 axes array (4-byte tag, Fixed 16.16
+  min/default/max, 16-bit flags + nameID) and the named-instance array
+  (subfamily nameID + flags + per-axis coordinates + optional
+  postScriptNameID). Both short and long instance encodings are
+  recognised; out-of-bounds / disordered min/default/max combinations
+  are rejected.
+- New `tables::avar::AvarTable` parser for the Axis Variations Table.
+  Decodes the per-axis piecewise-linear segment-map list (F2DOT14
+  pairs); `remap_normalised(axis_index, value)` performs the bracket-
+  and-interpolate lookup. v2 (variable-axis remap with delta-set
+  index map) is accepted at the header but falls back to identity —
+  v2 only matters when its delta-sets are applied, which we don't.
+- New `tables::gvar::GvarTable` walker for the Glyph Variations Table.
+  Handles both short and long per-glyph offset arrays; per-glyph data
+  blocks decode the TupleVariationStore (embedded peak tuples vs
+  shared-tuple references; intermediate-region start/end tuples;
+  shared and PRIVATE_POINT_NUMBERS point-number sets;
+  packed-points run-length stream; packed-deltas zero/byte/word
+  run-length stream). The tuple-scalar product (default-region or
+  intermediate-region) is computed against the caller's normalised
+  coord vector and the per-point dx/dy deltas are accumulated into
+  the static glyph outline.
+- Public `Font` API:
+  - `Font::is_variable() -> bool`
+  - `Font::variation_axes() -> &[VariationAxis]`
+  - `Font::named_instances() -> &[NamedInstance]`
+  - `Font::variation_coords() -> &[f32]`
+  - `Font::set_variation_coords(&mut self, coords: &[f32])` (clamps
+    each value to its axis `[min, max]`; over-long vectors are
+    truncated, shorter vectors leave trailing axes unchanged)
+  - `Font::normalised_coords() -> Vec<f32>` (each entry in `[-1, +1]`,
+    after the fvar normalisation rule + the avar remap)
+- `Font::glyph_outline(glyph_id)` now applies gvar deltas when the
+  current variation coords differ from the axis defaults. Static-font
+  callers see no behaviour change. Composite glyphs are returned in
+  static form (per-component variation propagation is deferred).
+- Public re-exports: `oxideav_ttf::VariationAxis { tag, min, default,
+  max, flags, name_id }` and `oxideav_ttf::NamedInstance {
+  subfamily_name_id, flags, coords, post_script_name_id }`.
+- New integration test fixture `tests/fixtures/InterVariable.ttf` —
+  Inter 4.0 (OFL/SIL, see `INTER-OFL-LICENSE.txt`). 2 axes (`opsz`,
+  `wght`) + 9 named instances; the avar table bends the wght axis
+  non-linearly and gvar carries delta sets for every glyph. The new
+  `tests/inter_variable.rs` walks `'A'` at wght=400 vs wght=900 vs
+  wght=100, asserting topology preservation + per-point divergence.
+
+Spec: Microsoft OpenType §"fvar — Font Variations Table" / §"avar
+— Axis Variations Table" / §"gvar — Glyph Variations Table" /
+§"GlyphVariationData table" / §"Tuple Variation Header" / §"Packed
+Point Numbers" / §"Packed Deltas". Apple TrueType Reference §"fvar"
+/ §"avar" / §"gvar".
+
 ### Added — sbix table parser (Apple Color Emoji bitmap strikes) (2026-05-04)
 
 - New `tables::sbix::SbixTable` walker for Apple's Standard Bitmap

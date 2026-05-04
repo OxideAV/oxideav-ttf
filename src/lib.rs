@@ -13,9 +13,14 @@
 //! - `GDEF` (glyph class definitions).
 //!
 //! The crate is read-only (parsing-only) and dependency-light: only
-//! `oxideav-core` for shared types. CFF/Type 2 charstrings, variable
-//! fonts, TrueType hinting, bidi, and complex shaping are deferred to
-//! later rounds and to the sibling `oxideav-otf` crate.
+//! `oxideav-core` for shared types. CFF/Type 2 charstrings live in the
+//! sibling `oxideav-otf` crate. TrueType hinting, bidi, and complex
+//! shaping are deferred to later rounds.
+//!
+//! Variable fonts (`fvar`/`avar`/`gvar`) are supported as of round
+//! 4: see [`Font::variation_axes`], [`Font::named_instances`],
+//! [`Font::set_variation_coords`], and [`Font::glyph_outline`] (which
+//! applies gvar deltas via the current axis-coord vector when set).
 //!
 //! See `README.md` for the public API tour.
 
@@ -31,16 +36,18 @@ pub use collection::{is_collection, CollectionHeader, TTC_MAGIC};
 
 use crate::parser::TableDirectory;
 use crate::tables::{
-    cbdt::CbdtTable, cblc::CblcTable, cmap::CmapTable, colr::ColrTable, cpal::CpalTable,
-    gdef::GdefTable, glyf::GlyfTable, gpos::GposTable, gsub::GsubTable, head::HeadTable,
-    hhea::HheaTable, hmtx::HmtxTable, kern::KernTable, loca::LocaTable, maxp::MaxpTable,
-    name::NameTable, os2::Os2Table, post::PostTable, sbix::SbixTable,
+    avar::AvarTable, cbdt::CbdtTable, cblc::CblcTable, cmap::CmapTable, colr::ColrTable,
+    cpal::CpalTable, fvar::FvarTable, gdef::GdefTable, glyf::GlyfTable, gpos::GposTable,
+    gsub::GsubTable, gvar::GvarTable, head::HeadTable, hhea::HheaTable, hmtx::HmtxTable,
+    kern::KernTable, loca::LocaTable, maxp::MaxpTable, name::NameTable, os2::Os2Table,
+    post::PostTable, sbix::SbixTable,
 };
 
 pub use outline::{BBox, Contour, Point, TtOutline};
 pub use tables::cbdt::ColorBitmap;
 pub use tables::cblc::{BigGlyphMetrics, SmallGlyphMetrics};
 pub use tables::colr::ColorLayer;
+pub use tables::fvar::{NamedInstance, VariationAxis};
 pub use tables::sbix::SbixGlyph;
 
 /// Errors emitted during font parsing or glyph lookup.
@@ -126,6 +133,22 @@ pub struct Font<'a> {
     colr: Option<ColrTable<'a>>,
     cpal: Option<CpalTable<'a>>,
     sbix: Option<SbixTable<'a>>,
+    /// Variable-font axes header (`fvar`). Absent for static fonts.
+    fvar: Option<FvarTable>,
+    /// Per-axis non-linear remap (`avar`). Absent unless the font
+    /// publishes one (most variable fonts do, identity for axes that
+    /// don't need bending).
+    avar: Option<AvarTable>,
+    /// Per-glyph TupleVariationStore (`gvar`). Required when `fvar`
+    /// is present and the outline kind is TrueType; not populated for
+    /// CFF2 (which uses `cvar` instead — out of scope here).
+    gvar: Option<GvarTable<'a>>,
+    /// Current user-space coordinate vector, one per axis (defaults
+    /// to each axis's `default` value when `fvar` is present, empty
+    /// vec otherwise). `set_variation_coords` updates this; the
+    /// outline accessor consults [`Self::normalised_coords`] to
+    /// derive the per-axis weight applied to gvar deltas.
+    var_coords: Vec<f32>,
 }
 
 impl<'a> Font<'a> {
@@ -216,6 +239,19 @@ impl<'a> Font<'a> {
             .map(|s| SbixTable::parse(s, maxp.num_glyphs))
             .transpose()?;
 
+        // Variable-font tables. `fvar` is the gate: if it's absent the
+        // font is static and we skip the rest. If it's present we still
+        // try to load `gvar` (TrueType deltas) and `avar` (axis remap)
+        // but a missing `gvar` is acceptable for non-outline (CBDT-only)
+        // variable fonts.
+        let fvar = dir.find(b"fvar", bytes).map(FvarTable::parse).transpose()?;
+        let avar = dir.find(b"avar", bytes).map(AvarTable::parse).transpose()?;
+        let gvar = dir.find(b"gvar", bytes).map(GvarTable::parse).transpose()?;
+        let var_coords = match fvar.as_ref() {
+            Some(f) => f.axes().iter().map(|a| a.default).collect(),
+            None => Vec::new(),
+        };
+
         Ok(Self {
             bytes,
             head,
@@ -237,6 +273,10 @@ impl<'a> Font<'a> {
             colr,
             cpal,
             sbix,
+            fvar,
+            avar,
+            gvar,
+            var_coords,
         })
     }
 
@@ -344,6 +384,16 @@ impl<'a> Font<'a> {
     /// Returns an empty outline when the font has no `glyf`/`loca`
     /// (CBDT/CBLC-only colour-emoji fonts). Callers that care should
     /// check [`Font::has_color_bitmaps`] first.
+    ///
+    /// **Variable fonts:** if the font ships `fvar`/`gvar` and the
+    /// caller has set non-default coordinates via
+    /// [`Font::set_variation_coords`], the static outline returned
+    /// here has gvar deltas applied (with avar remap on the input
+    /// coords first). Composite glyphs do not currently propagate
+    /// per-component variation deltas — only simple glyphs are
+    /// retargeted; this is sufficient for nearly all Latin/Cyrillic/
+    /// Greek glyphs, which are simple, and degrades gracefully on the
+    /// composite-heavy CJK case (the static outline is still returned).
     pub fn glyph_outline(&self, glyph_id: u16) -> Result<TtOutline, Error> {
         if glyph_id >= self.maxp.num_glyphs {
             return Err(Error::GlyphOutOfRange(glyph_id));
@@ -356,7 +406,31 @@ impl<'a> Font<'a> {
         if range.is_empty() {
             return Ok(TtOutline::default());
         }
-        glyf.glyph_outline(range, loca, 0)
+        let mut out = glyf.glyph_outline(range, loca, 0)?;
+        if let Some(gvar) = self.gvar.as_ref() {
+            if !self.var_coords.is_empty() && self.coords_differ_from_default() {
+                let n_pts: usize = out.contours.iter().map(|c| c.points.len()).sum();
+                if n_pts > 0 && n_pts <= u16::MAX as usize {
+                    let normalised = self.normalised_coords();
+                    if let Ok(deltas) = gvar.glyph_deltas(glyph_id, n_pts as u16, &normalised) {
+                        let mut idx = 0usize;
+                        for c in out.contours.iter_mut() {
+                            for p in c.points.iter_mut() {
+                                let (dx, dy) = deltas[idx];
+                                let nx = p.x as i32 + dx;
+                                let ny = p.y as i32 + dy;
+                                p.x = clamp_i16_for_outline(nx);
+                                p.y = clamp_i16_for_outline(ny);
+                                idx += 1;
+                            }
+                        }
+                        // Re-derive bounds after delta application.
+                        out.bounds = outline::derive_bbox(&out.contours);
+                    }
+                }
+            }
+        }
+        Ok(out)
     }
 
     /// Per-glyph advance width in font units.
@@ -611,5 +685,118 @@ impl<'a> Font<'a> {
     /// can do its own cycle detection).
     pub fn sbix_glyph(&self, glyph_id: u16, ppem: u16) -> Option<SbixGlyph<'a>> {
         self.sbix.as_ref()?.lookup_best_fit(glyph_id, ppem)
+    }
+
+    // ---- variable fonts (fvar / avar / gvar) -----------------------------
+
+    /// `true` if the font ships an `fvar` table — i.e. it exposes one
+    /// or more variation axes. Returns `false` for static fonts.
+    pub fn is_variable(&self) -> bool {
+        self.fvar.is_some()
+    }
+
+    /// All variation axes the font publishes (`fvar`), in declaration
+    /// order. Returns an empty slice for static fonts.
+    pub fn variation_axes(&self) -> &[VariationAxis] {
+        self.fvar.as_ref().map(|f| f.axes()).unwrap_or(&[])
+    }
+
+    /// All named instances the font ships (`fvar`), in declaration
+    /// order. Each carries a coordinate vector matching
+    /// [`Self::variation_axes`] (one f32 per axis) plus a `name`
+    /// table id for the human-readable subfamily label.
+    pub fn named_instances(&self) -> &[NamedInstance] {
+        self.fvar.as_ref().map(|f| f.instances()).unwrap_or(&[])
+    }
+
+    /// Current user-space variation coordinates (one entry per axis,
+    /// in `fvar` declaration order). Empty slice for static fonts.
+    /// Defaults to each axis's `default` value at parse time;
+    /// updated by [`Self::set_variation_coords`].
+    pub fn variation_coords(&self) -> &[f32] {
+        &self.var_coords
+    }
+
+    /// Replace the current variation coordinates. Each entry is in
+    /// **user-space** units (e.g. `wght` is 100..900). The vector
+    /// must be the same length as [`Self::variation_axes`]; shorter
+    /// vectors leave the trailing axes at their previous value, longer
+    /// vectors are truncated. Out-of-range values are clamped to each
+    /// axis's `[min, max]`.
+    ///
+    /// No-op when the font is static (`is_variable() == false`).
+    pub fn set_variation_coords(&mut self, coords: &[f32]) {
+        let axes = match self.fvar.as_ref() {
+            Some(f) => f.axes(),
+            None => return,
+        };
+        for (i, &v) in coords.iter().enumerate() {
+            if i >= self.var_coords.len() {
+                break;
+            }
+            let a = &axes[i];
+            self.var_coords[i] = v.clamp(a.min, a.max);
+        }
+    }
+
+    /// Compute the normalised coordinate vector (each entry in
+    /// `[-1, +1]`) by mapping each user-space value through the
+    /// `fvar` axis triple, then through the `avar` per-axis remap.
+    /// Returns an empty vec for static fonts.
+    pub fn normalised_coords(&self) -> Vec<f32> {
+        let axes = match self.fvar.as_ref() {
+            Some(f) => f.axes(),
+            None => return Vec::new(),
+        };
+        let mut out = Vec::with_capacity(axes.len());
+        for (i, axis) in axes.iter().enumerate() {
+            let v = self.var_coords.get(i).copied().unwrap_or(axis.default);
+            let n = if (v - axis.default).abs() < f32::EPSILON {
+                0.0
+            } else if v < axis.default {
+                if (axis.default - axis.min).abs() < f32::EPSILON {
+                    0.0
+                } else {
+                    ((v - axis.default) / (axis.default - axis.min)).clamp(-1.0, 0.0)
+                }
+            } else if (axis.max - axis.default).abs() < f32::EPSILON {
+                0.0
+            } else {
+                ((v - axis.default) / (axis.max - axis.default)).clamp(0.0, 1.0)
+            };
+            let n = match self.avar.as_ref() {
+                Some(a) => a.remap_normalised(i, n),
+                None => n,
+            };
+            out.push(n);
+        }
+        out
+    }
+
+    /// `true` if any current coordinate diverges from its axis default.
+    fn coords_differ_from_default(&self) -> bool {
+        let axes = match self.fvar.as_ref() {
+            Some(f) => f.axes(),
+            None => return false,
+        };
+        for (i, axis) in axes.iter().enumerate() {
+            if let Some(v) = self.var_coords.get(i) {
+                if (v - axis.default).abs() > f32::EPSILON {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+}
+
+#[inline]
+fn clamp_i16_for_outline(v: i32) -> i16 {
+    if v < i16::MIN as i32 {
+        i16::MIN
+    } else if v > i16::MAX as i32 {
+        i16::MAX
+    } else {
+        v as i16
     }
 }
