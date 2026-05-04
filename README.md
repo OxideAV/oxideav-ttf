@@ -13,10 +13,14 @@ ligatures and kerning.
   `loca`, `glyf` (simple + composite), `post`.
 - Legacy `kern` table (format 0).
 - `GSUB` LookupType 1 (single substitution: positional forms,
-  small-caps, vertical alternates) + LookupType 4 (ligature
-  substitution), with a ScriptList / FeatureList walk so callers can
-  ask "which lookup indices implement feature `init` for script
-  `arab`?"
+  small-caps, vertical alternates), LookupType 4 (ligature
+  substitution — exposed both as a "walk every lookup" helper and
+  as a lookup-index-specific apply path for feature-driven shaping
+  of `liga` / `rlig` / `dlig`), and LookupType 6 (chained contexts
+  substitution — formats 1 / 2 / 3, with recursive dispatch into
+  nested LookupType 1 / 4 / 6 sub-lookups). All three sit behind a
+  ScriptList / FeatureList walk so callers can ask "which lookup
+  indices implement feature `init` for script `arab`?"
 - `GPOS` LookupType 2 (pair-adjustment / kerning).
 - `GDEF` (glyph class definitions, used to skip mark glyphs).
 
@@ -67,6 +71,41 @@ for feat in font.gsub_features_for_script(*b"arab", None) {
             for &li in &feat.lookup_indices {
                 if let Some(initial_form) = font.gsub_apply_lookup_type_1(li, beh) {
                     let _ = initial_form;
+                    break;
+                }
+            }
+        }
+    }
+}
+
+// LookupType 4 — ligature substitution dispatched per-feature.
+// Resolve the `liga` feature for `latn` and apply each of its
+// LookupType-4 lookups to a glyph run; the apply method returns
+// (replacement_gid, consumed_count) on a hit.
+for feat in font.gsub_features_for_script(*b"latn", None) {
+    if &feat.tag == b"liga" {
+        let f = font.glyph_index('f').unwrap();
+        let i = font.glyph_index('i').unwrap();
+        for &li in &feat.lookup_indices {
+            if let Some((fi_gid, consumed)) = font.gsub_apply_lookup_type_4(li, &[f, i]) {
+                let _ = (fi_gid, consumed); // typically (fi-codepoint-gid, 2)
+                break;
+            }
+        }
+    }
+}
+
+// LookupType 6 — chained-context substitution. Returns the rewritten
+// run starting at `pos` (or None when no chain rule matches the
+// (backtrack, input, lookahead) window). Formats 1 (glyph sequence),
+// 2 (class-based) and 3 (coverage-based) are all supported.
+for feat in font.gsub_features_for_script(*b"arab", None) {
+    if &feat.tag == b"calt" {
+        let run: Vec<u16> = vec![/* ... shaped Arabic glyph run ... */];
+        for &li in &feat.lookup_indices {
+            for pos in 0..run.len() {
+                if let Some(rewritten) = font.gsub_apply_lookup_type_6(li, &run, pos) {
+                    let _ = rewritten;
                     break;
                 }
             }
@@ -128,10 +167,12 @@ if vfont.is_variable() {
 - Bidi, Arabic shaping, Indic conjuncts, complex contextual GSUB/GPOS.
 - TrueType bytecode hinting (modern AA at ≥ 16 px does not need it).
 - cmap formats 2, 8, 10, 13.
-- GSUB lookup types 2/3/5/6/7/8 (LookupType 1 single substitution +
-  LookupType 4 ligature substitution are implemented; ExtensionSubst
-  LookupType 7 is unwrapped transparently for both) and GPOS lookup
-  types 1/3..9 (other than the implemented 2/4/6).
+- GSUB lookup types 2 (multiple substitution), 3 (alternate), 5
+  (contextual), 8 (reverse chained context). LookupType 1 (single),
+  LookupType 4 (ligature), and LookupType 6 (chained context) are
+  implemented; ExtensionSubst LookupType 7 is unwrapped transparently
+  for all three. GPOS lookup types 1/3/5/7/8/9 also remain deferred
+  (pair / mark-base / mark-mark are implemented).
 - COLR **v1** paint graph (gradients, transforms, composites) — only
   the v0 flat layer stack is supported.
 - sbix `'dupe'` chasing (the indirection sentinel is surfaced

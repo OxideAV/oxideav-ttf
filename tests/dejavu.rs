@@ -79,6 +79,69 @@ fn fi_ligature_lookup_sans() {
     assert_eq!(hit, (fi_gid, 2), "expected ({fi_gid}, 2), got {hit:?}");
 }
 
+/// DejaVu Sans publishes a `liga` feature for `latn` whose lookup is a
+/// LookupType 4 (Ligature Substitution) covering the standard f-pair
+/// ligatures. This exercises the lookup-index-specific apply path
+/// (Font::gsub_apply_lookup_type_4) that a feature-driven shaper uses
+/// after resolving the `liga` feature for the active script via
+/// gsub_features_for_script.
+#[test]
+fn gsub_lookup_type_4_ligature_substitution_applies_for_fi_in_dejavu() {
+    let f = Font::from_bytes(FIXTURE_SANS).unwrap();
+    let f_gid = f.glyph_index('f').expect("'f' must map");
+    let i_gid = f.glyph_index('i').expect("'i' must map");
+    let fi_gid = f.glyph_index('\u{FB01}').expect("'fi' codepoint must map");
+
+    // Resolve the `liga` feature for `latn` and try every lookup it
+    // exposes; one of them should hit (fi_gid, 2).
+    let feats = f.gsub_features_for_script(*b"latn", None);
+    let mut got: Option<(u16, usize)> = None;
+    for feat in &feats {
+        if &feat.tag == b"liga" {
+            for &li in &feat.lookup_indices {
+                if let Some(hit) = f.gsub_apply_lookup_type_4(li, &[f_gid, i_gid]) {
+                    got = Some(hit);
+                    break;
+                }
+            }
+        }
+    }
+    let (sub, consumed) = got.expect("liga feature should match [f, i]");
+    assert_eq!(sub, fi_gid, "fi ligature should produce fi codepoint glyph");
+    assert_eq!(consumed, 2, "fi ligature should consume both input glyphs");
+}
+
+/// 2-glyph ligatures (the f-i / f-l pairs in DejaVu Sans) all return
+/// consumed=2; verify the `consumed` count in the public API contract.
+#[test]
+fn gsub_lookup_type_4_returns_consumed_count_2_for_2_glyph_ligature() {
+    let f = Font::from_bytes(FIXTURE_SANS).unwrap();
+    let f_gid = f.glyph_index('f').expect("'f' must map");
+    let l_gid = f.glyph_index('l').expect("'l' must map");
+    let fl_gid = f.glyph_index('\u{FB02}').expect("'fl' codepoint must map");
+
+    // The lookup_ligature walker resolves the same lookup; assert
+    // both API paths agree on the 2-glyph consumption count.
+    let walked = f
+        .lookup_ligature(&[f_gid, l_gid])
+        .expect("fl ligature must exist via the global walker");
+    assert_eq!(walked, (fl_gid, 2));
+
+    let feats = f.gsub_features_for_script(*b"latn", None);
+    for feat in &feats {
+        if &feat.tag == b"liga" {
+            for &li in &feat.lookup_indices {
+                if let Some((sub, consumed)) = f.gsub_apply_lookup_type_4(li, &[f_gid, l_gid]) {
+                    assert_eq!(sub, fl_gid);
+                    assert_eq!(consumed, 2);
+                    return;
+                }
+            }
+        }
+    }
+    panic!("no liga lookup matched [f, l] via gsub_apply_lookup_type_4");
+}
+
 #[test]
 fn av_kerning_is_negative_sans() {
     let f = Font::from_bytes(FIXTURE_SANS).unwrap();

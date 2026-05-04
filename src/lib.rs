@@ -7,9 +7,12 @@
 //!   `name`, `OS/2`, `hmtx`, `loca`, `glyf` (simple + composite), `post`.
 //! - Legacy `kern` table (format 0 subtable).
 //! - `GSUB` LookupType 1 (single substitution: positional forms,
-//!   small-caps, vertical alternates) + LookupType 4 (ligature
-//!   substitution), discoverable via the ScriptList / FeatureList /
-//!   LookupList common-table walk.
+//!   small-caps, vertical alternates), LookupType 4 (ligature
+//!   substitution — both walker and lookup-index-specific entry
+//!   points), and LookupType 6 (chained contexts substitution —
+//!   formats 1 / 2 / 3, with recursive sub-lookup dispatch),
+//!   discoverable via the ScriptList / FeatureList / LookupList
+//!   common-table walk.
 //! - `GPOS` LookupType 2 (pair-adjustment / kerning),
 //!   LookupType 4 (mark-to-base attachment for diacritics), and
 //!   LookupType 6 (mark-to-mark attachment for stacked diacritics).
@@ -519,6 +522,63 @@ impl<'a> Font<'a> {
     /// unwrapped transparently.
     pub fn gsub_apply_lookup_type_1(&self, lookup_index: u16, gid: u16) -> Option<u16> {
         self.gsub.as_ref()?.apply_lookup_type_1(lookup_index, gid)
+    }
+
+    /// Apply GSUB LookupType 4 (Ligature Substitution) lookup
+    /// `lookup_index` to a prefix of `gids`.
+    ///
+    /// Returns `Some((replacement_gid, consumed))` when a sub-table in
+    /// the named lookup matches a prefix of `gids` of length `consumed`
+    /// (typically `>= 2` for real ligatures). Returns `None` when no
+    /// rule applies, the lookup index is out of range, the referenced
+    /// lookup is not a ligature lookup, or the font has no GSUB table.
+    /// ExtensionSubst (LookupType 7) wrappers are unwrapped
+    /// transparently.
+    ///
+    /// This is the lookup-index-specific counterpart of
+    /// [`Self::lookup_ligature`] (which walks every lookup) and is the
+    /// API a feature-driven shaper uses after resolving the `liga` /
+    /// `rlig` / `dlig` feature for the active script via
+    /// [`Self::gsub_features_for_script`].
+    pub fn gsub_apply_lookup_type_4(
+        &self,
+        lookup_index: u16,
+        gids: &[u16],
+    ) -> Option<(u16, usize)> {
+        self.gsub.as_ref()?.apply_lookup_type_4(lookup_index, gids)
+    }
+
+    /// Apply GSUB LookupType 6 (Chained Contexts Substitution) lookup
+    /// `lookup_index` to the glyph run starting at `pos`.
+    ///
+    /// Returns `Some(rewritten_run)` — a fresh `Vec<u16>` of the full
+    /// run with any sub-lookups dispatched at the matched
+    /// `(backtrack, input, lookahead)` window — when one of the
+    /// lookup's sub-tables (Format 1 / 2 / 3) matches around `pos`.
+    /// Returns `None` when no chained-context rule applies, the lookup
+    /// index is out of range, the referenced lookup is not a
+    /// chain-context lookup, or the font has no GSUB table.
+    ///
+    /// Each `SubstLookupRecord { sequenceIndex, lookupListIndex }`
+    /// inside the matched rule is recursively dispatched: LookupType 1
+    /// substitutes the single glyph at the relative `sequenceIndex`,
+    /// LookupType 4 substitutes `componentCount` glyphs starting there.
+    /// Nested LookupType 6 references are also handled (bounded depth).
+    /// ExtensionSubst (LookupType 7) is unwrapped transparently.
+    ///
+    /// This is the biggest GSUB unlock for complex scripts: Arabic
+    /// shaping cascades, Indic reordering, and most ligature-with-
+    /// context rules (e.g. Latin `ct` only between word boundaries)
+    /// all run through chained-context lookups.
+    pub fn gsub_apply_lookup_type_6(
+        &self,
+        lookup_index: u16,
+        gids: &[u16],
+        pos: usize,
+    ) -> Option<Vec<u16>> {
+        self.gsub
+            .as_ref()?
+            .apply_lookup_type_6(lookup_index, gids, pos)
     }
 
     /// Look up the kerning between an ordered glyph pair, in font units.

@@ -7,6 +7,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — GSUB LookupType 4 wiring + LookupType 6 chained context (2026-05-04)
+
+- `tables::gsub::GsubTable::apply_lookup_type_4(lookup_index, glyphs)`
+  — lookup-index-specific entry point for ligature substitution. Walks
+  every sub-table inside the named LookupType-4 lookup and returns
+  `Some((replacement_gid, consumed))` when one of them matches a prefix
+  of `glyphs`. ExtensionSubst (LookupType 7) wrappers are unwrapped
+  transparently. Complement to the existing `lookup_ligature` walker
+  (which scans every lookup); the new method is what a feature-driven
+  shaper calls after resolving `liga` / `rlig` / `dlig` for the active
+  script via `features_for_script`.
+- `tables::gsub::GsubTable::apply_lookup_type_6(lookup_index, gids, pos)`
+  — chained-context substitution. All three sub-table formats are
+  decoded:
+  - **Format 1** (simple glyph contexts): coverage on the first input
+    glyph + per-coverage `ChainSubRuleSet` of explicit
+    `(backtrack, input, lookahead)` glyph sequences plus per-rule
+    `SubstLookupRecord[]`.
+  - **Format 2** (class-based contexts): coverage + three `ClassDef`
+    tables (backtrack / input / lookahead) + per-input-class
+    `ChainSubClassSet` whose rules are class sequences.
+  - **Format 3** (coverage-based contexts): three independent
+    `Coverage[]` arrays (backtrack / input / lookahead) + a single
+    `SubstLookupRecord[]`.
+  Each match's `SubstLookupRecord { sequenceIndex, lookupListIndex }`
+  is recursively dispatched: nested LookupType 1 substitutes one glyph,
+  nested LookupType 4 substitutes `componentCount` glyphs, nested
+  LookupType 6 recurses (bounded depth = 8 to stop self-referential
+  loops). Backtrack sequences are matched in reverse-text order per the
+  spec. Returns the full rewritten glyph run (`Vec<u16>`) starting at
+  `pos`, or `None` if no chain rule applies.
+- Public `Font` API:
+  - `Font::gsub_apply_lookup_type_4(lookup_index, gids) -> Option<(u16, usize)>`
+  - `Font::gsub_apply_lookup_type_6(lookup_index, gids, pos) -> Option<Vec<u16>>`
+- New tests:
+  - `tables::gsub::tests::apply_lookup_type_4_consumes_correct_count`
+    + `apply_lookup_type_4_skips_non_ligature_lookups`.
+  - `tables::gsub::tests::gsub_lookup_type_6_format_1_chained_context_simple_sequence`,
+    `gsub_lookup_type_6_format_3_coverage_based_chained_context`,
+    plus class-based Format-2 round-trip + three "no match" guards
+    (wrong backtrack, short window, wrong class).
+  - Integration tests against DejaVu Sans:
+    `gsub_lookup_type_4_ligature_substitution_applies_for_fi_in_dejavu`
+    asserts the `liga` feature for `latn` resolves to a LookupType-4
+    lookup that substitutes `[f, i]` → fi-ligature-glyph;
+    `gsub_lookup_type_4_returns_consumed_count_2_for_2_glyph_ligature`
+    cross-checks the `consumed` count against the global walker for
+    the `[f, l]` pair.
+
+This is the largest GSUB unlock since round-1: chained-context lookups
+are how Arabic shaping cascades, Indic reordering, and
+context-dependent ligatures (e.g. Latin `ct` only between word
+boundaries) are encoded in modern fonts. LookupType 4 wiring closes
+the loop on the `liga` feature dispatch path that
+`gsub_features_for_script` was published for in the prior round.
+
+Spec: Microsoft OpenType §"Ligature Substitution Subtable" (LookupType
+4 Format 1) and §"Chained Sequence Context Format 1: simple glyph
+contexts" / §"Chained Sequence Context Format 2: class-based glyph
+contexts" / §"Chained Sequence Context Format 3: coverage-based glyph
+contexts". Apple TrueType Reference §"GSUB". ISO/IEC 14496-22 §6 (OFF).
+
 ### Added — GSUB feature-tagged single substitution (LookupType 1) (2026-05-04)
 
 - `tables::gsub::GsubTable` now decodes the **ScriptList** +
