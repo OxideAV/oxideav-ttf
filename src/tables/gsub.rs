@@ -426,7 +426,8 @@ impl<'a> GsubTable<'a> {
     /// LookupType 4 substitutes `componentCount` glyphs starting at
     /// the relative `sequenceIndex`. ExtensionSubst (LookupType 7)
     /// wrappers are unwrapped transparently. Recursive sub-lookup
-    /// expansion is bounded by [`MAX_NESTED_LOOKUP_DEPTH`].
+    /// expansion is bounded by `MAX_NESTED_LOOKUP_DEPTH` (8) to
+    /// defuse pathological self-referential lookup graphs.
     pub fn apply_lookup_type_6(
         &self,
         lookup_index: u16,
