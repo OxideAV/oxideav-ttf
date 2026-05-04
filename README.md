@@ -8,8 +8,9 @@ ligatures and kerning.
 ## Round-1 scope (this release)
 
 - sfnt + table directory walker.
-- `head`, `hhea`, `maxp`, `cmap` (formats 0, 4, 6, 12), `name`, `OS/2`,
-  `hmtx`, `loca`, `glyf` (simple + composite), `post`.
+- `head`, `hhea`, `maxp`, `cmap` (base formats 0, 4, 6, 12 + format 14
+  Unicode Variation Sequences as a sidecar), `name`, `OS/2`, `hmtx`,
+  `loca`, `glyf` (simple + composite), `post`.
 - Legacy `kern` table (format 0).
 - `GSUB` LookupType 4 (ligature substitution).
 - `GPOS` LookupType 2 (pair-adjustment / kerning).
@@ -52,6 +53,10 @@ if let Some((replacement_gid, consumed)) = font.lookup_ligature(&[gid_f, gid_i])
 
 let gid_v = font.glyph_index('V').unwrap();
 let _ = font.lookup_kerning(gid_a, gid_v); // negative i16 in font units
+
+// Unicode Variation Sequences (cmap format 14). Used by emoji
+// presentation selectors and registered IVS for CJK.
+let _ = font.lookup_variation('\u{1F600}', '\u{FE0F}'); // grinning face + VS-16
 ```
 
 ## Out of scope (round 2+)
@@ -60,7 +65,7 @@ let _ = font.lookup_kerning(gid_a, gid_v); // negative i16 in font units
 - Bidi, Arabic shaping, Indic conjuncts, complex contextual GSUB/GPOS.
 - Variable fonts (`fvar` / `gvar` / `MVAR`).
 - TrueType bytecode hinting (modern AA at ≥ 16 px does not need it).
-- cmap formats 2, 8, 10, 13, 14.
+- cmap formats 2, 8, 10, 13.
 - GSUB lookup types 1/2/3/5/6/7/8 and GPOS lookup types 1/3..9.
 
 ## Test fixture
