@@ -57,6 +57,29 @@ let _ = font.lookup_kerning(gid_a, gid_v); // negative i16 in font units
 // Unicode Variation Sequences (cmap format 14). Used by emoji
 // presentation selectors and registered IVS for CJK.
 let _ = font.lookup_variation('\u{1F600}', '\u{FE0F}'); // grinning face + VS-16
+
+// Colour glyphs — three families covered:
+//
+//   COLR/CPAL: vector layer stack (Microsoft Segoe UI Emoji, Twemoji-Mozilla, …)
+//   CBDT/CBLC: PNG-payload bitmap strikes (Noto Color Emoji and friends)
+//   sbix:      Apple-style PNG/JPEG bitmap strikes (Apple Color Emoji)
+//
+if font.has_color_layers() {
+    for layer in font.color_layers(gid_a) {
+        let rgba = font.cpal_color(0, layer.palette_index); // Option<[u8;4]>
+        let _ = (layer.layer_glyph_id, rgba);
+    }
+}
+if font.has_color_bitmaps() {
+    let _ = font.glyph_color_bitmap(gid_a, /* target_ppem */ 64);
+}
+if font.has_sbix() {
+    let _ = font.sbix_glyph(gid_a, /* target_ppem */ 64);
+}
+
+// TTC (TrueType Collection) — pick one subfont from a `.ttc` file.
+let _ = oxideav_ttf::is_collection(&bytes);
+let _ = Font::from_collection_bytes(&bytes, /* index */ 0);
 ```
 
 ## Out of scope (round 2+)
@@ -67,6 +90,10 @@ let _ = font.lookup_variation('\u{1F600}', '\u{FE0F}'); // grinning face + VS-16
 - TrueType bytecode hinting (modern AA at ≥ 16 px does not need it).
 - cmap formats 2, 8, 10, 13.
 - GSUB lookup types 1/2/3/5/6/7/8 and GPOS lookup types 1/3..9.
+- COLR **v1** paint graph (gradients, transforms, composites) — only
+  the v0 flat layer stack is supported.
+- sbix `'dupe'` chasing (the indirection sentinel is surfaced
+  as-is; consumers chase it with their own cycle detection).
 
 ## Test fixture
 
