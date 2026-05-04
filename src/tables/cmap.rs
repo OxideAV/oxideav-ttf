@@ -2,24 +2,28 @@
 //!
 //! We pick a single subtable at parse time (preferred order: 32-bit
 //! formats first, BMP formats second, legacy single-byte last) and run
-//! all `lookup` calls through it. Round-1 supports formats 0, 4, 6, 12.
+//! all `lookup` calls through it. Round-1 supports formats 0, 4, 6, 12
+//! for the base codepoint→glyph map, plus format 14 (Unicode Variation
+//! Sequences) for codepoint+variation-selector → variant-glyph lookups.
 //!
-//! Format 14 (Unicode Variation Selectors) is recognised at parse time
-//! but skipped silently — it lives alongside one of the supported
-//! base-codepoint formats in real-world fonts (e.g. Noto Color Emoji
-//! ships `(0,5)/format-14` next to `(3,10)/format-12`) and isn't a
-//! standalone codepoint→glyph map. Treating it as "unsupported" used
-//! to fail the entire `cmap` parse before the picker could even see
-//! the supported sibling subtable. Future rounds may add real format-14
-//! handling for emoji variation sequences and CJK variant glyphs.
+//! Format 14 is layered on top of the picked base subtable: it never
+//! competes with formats 0/4/6/12 for the "best base map" rank and is
+//! always stored alongside it when present. Real-world fonts that ship
+//! format 14 include Noto Color Emoji (variant emoji presentation /
+//! skin-tone modifiers), Apple Color Emoji, and most CJK fonts that
+//! expose Unicode Ideographic Variation Sequences (registered IVD
+//! collections).
 
-use crate::parser::{read_u16, read_u32};
+use crate::parser::{read_u16, read_u24, read_u32};
 use crate::Error;
 
 /// Decoded cmap subtable, preselected from the candidate list.
 #[derive(Debug, Clone)]
 pub struct CmapTable<'a> {
     subtable: Subtable<'a>,
+    /// Optional Unicode Variation Sequences subtable (format 14).
+    /// Used by `lookup_variation`; never replaces the base `lookup`.
+    variation: Option<&'a [u8]>,
 }
 
 #[derive(Debug, Clone)]
@@ -44,9 +48,9 @@ impl<'a> CmapTable<'a> {
             return Err(Error::UnexpectedEof);
         }
 
-        // We want the *richest* subtable: prefer Unicode 32-bit (format
-        // 12), then any BMP format-4, then format-6, then format-0.
-        // Walk all encoding records and collect candidates.
+        // We want the *richest* base subtable: prefer Unicode 32-bit
+        // (format 12), then any BMP format-4, then format-6, then
+        // format-0. Walk all encoding records and collect candidates.
         //
         // IMPORTANT: filter on subtable format BEFORE running per-format
         // length validation. Some real-world fonts (e.g. Noto Color
@@ -58,6 +62,7 @@ impl<'a> CmapTable<'a> {
         // font even though the format-12 sibling is perfectly usable.
         let mut best: Option<Subtable<'_>> = None;
         let mut best_rank = i32::MIN;
+        let mut variation: Option<&'a [u8]> = None;
 
         for i in 0..num_tables as usize {
             let off = 4 + i * 8;
@@ -68,6 +73,28 @@ impl<'a> CmapTable<'a> {
                 return Err(Error::BadOffset);
             }
             let format = read_u16(bytes, sub_off)?;
+
+            // Format 14 (Unicode Variation Sequences) is a sidecar — it
+            // lives alongside one of the supported base subtables and
+            // contributes to `lookup_variation`, never to the base
+            // `lookup`. Pull it out separately and skip the base-map
+            // ranking entirely.
+            if format == 14 {
+                if sub_off + 6 > bytes.len() {
+                    return Err(Error::BadOffset);
+                }
+                let length = read_u32(bytes, sub_off + 2)? as usize;
+                let sub = bytes
+                    .get(sub_off..sub_off + length)
+                    .ok_or(Error::BadOffset)?;
+                // Per spec only one format-14 subtable is allowed per
+                // cmap; if a malformed font ships several, keep the
+                // first one.
+                if variation.is_none() {
+                    variation = Some(sub);
+                }
+                continue;
+            }
 
             // Skip formats we don't decode in round 1 BEFORE touching
             // their length field — different formats place `length` at
@@ -98,6 +125,7 @@ impl<'a> CmapTable<'a> {
 
         Ok(Self {
             subtable: best.ok_or(Error::UnsupportedCmapFormat(0xFFFF))?,
+            variation,
         })
     }
 
@@ -110,6 +138,164 @@ impl<'a> CmapTable<'a> {
             Subtable::Format12(b) => lookup_format12(b, codepoint),
         }
     }
+
+    /// Look up the variant glyph for a `(codepoint, variation_selector)`
+    /// pair using the cmap format-14 (Unicode Variation Sequences)
+    /// subtable. Returns:
+    ///
+    /// - `Some(glyph_id)` when the non-default UVS table maps the pair
+    ///   to a custom variant glyph.
+    /// - `Some(base_glyph)` when the pair is in the *default* UVS table
+    ///   — semantically "render the base glyph; the variation selector
+    ///   chooses the default presentation". This matches HarfBuzz's
+    ///   `hb_font_get_variation_glyph` contract.
+    /// - `None` if the font has no format-14 subtable, the variation
+    ///   selector record isn't listed, or the codepoint isn't in either
+    ///   of the record's two UVS tables.
+    ///
+    /// Note that returning `Some(base_glyph)` for default UVS hits is
+    /// *not* the same as falling through to [`Self::lookup`]: callers
+    /// that want pure base-map behaviour should call `lookup` directly.
+    pub fn lookup_variation(&self, codepoint: u32, variation_selector: u32) -> Option<u16> {
+        let bytes = self.variation?;
+        // Header: u16 format (=14), u32 length, u32 numVarSelectorRecords.
+        let num_records = read_u32(bytes, 6).ok()? as usize;
+        let records_off = 10usize;
+        // VariationSelectorRecord layout (11 bytes each):
+        //   u24 varSelector
+        //   Offset32 defaultUVSOffset    (0 = no default UVS table)
+        //   Offset32 nonDefaultUVSOffset (0 = no non-default UVS table)
+        //
+        // Records are sorted by varSelector ascending — binary search.
+        let rec_size = 11;
+        if records_off + num_records * rec_size > bytes.len() {
+            return None;
+        }
+        let mut lo = 0usize;
+        let mut hi = num_records;
+        let rec_off = loop {
+            if lo >= hi {
+                return None;
+            }
+            let mid = (lo + hi) / 2;
+            let off = records_off + mid * rec_size;
+            let vs = read_u24(bytes, off).ok()?;
+            match vs.cmp(&variation_selector) {
+                core::cmp::Ordering::Less => lo = mid + 1,
+                core::cmp::Ordering::Greater => hi = mid,
+                core::cmp::Ordering::Equal => break off,
+            }
+        };
+        let default_off = read_u32(bytes, rec_off + 3).ok()? as usize;
+        let non_default_off = read_u32(bytes, rec_off + 7).ok()? as usize;
+
+        // 1. Non-default UVS lookup wins — it carries an explicit glyph.
+        if non_default_off != 0 {
+            if let Some(g) = lookup_non_default_uvs(bytes, non_default_off, codepoint) {
+                return Some(g);
+            }
+        }
+        // 2. Default UVS hit — semantically "use the base glyph". Return
+        //    Some(base) so callers can rely on a single result type.
+        if default_off != 0 && range_contains(bytes, default_off, codepoint) {
+            return self.lookup(codepoint);
+        }
+        None
+    }
+}
+
+/// Walk a NonDefaultUVS table looking for `codepoint`. Returns the
+/// per-pair glyph ID when found.
+///
+/// Layout (from the Microsoft spec):
+///   u32 numUVSMappings
+///   UVSMapping[numUVSMappings]:
+///     u24 unicodeValue
+///     u16 glyphID
+///
+/// Mappings are sorted by unicodeValue — binary search.
+fn lookup_non_default_uvs(bytes: &[u8], table_off: usize, codepoint: u32) -> Option<u16> {
+    if table_off + 4 > bytes.len() {
+        return None;
+    }
+    let n = read_u32(bytes, table_off).ok()? as usize;
+    let entries_off = table_off + 4;
+    let entry_size = 5;
+    if entries_off + n * entry_size > bytes.len() {
+        return None;
+    }
+    let mut lo = 0usize;
+    let mut hi = n;
+    while lo < hi {
+        let mid = (lo + hi) / 2;
+        let off = entries_off + mid * entry_size;
+        let cp = read_u24(bytes, off).ok()?;
+        match cp.cmp(&codepoint) {
+            core::cmp::Ordering::Less => lo = mid + 1,
+            core::cmp::Ordering::Greater => hi = mid,
+            core::cmp::Ordering::Equal => return read_u16(bytes, off + 3).ok(),
+        }
+    }
+    None
+}
+
+/// Test whether `codepoint` lives in any UnicodeRange of a DefaultUVS
+/// table.
+///
+/// Layout:
+///   u32 numUnicodeValueRanges
+///   UnicodeRange[numUnicodeValueRanges]:
+///     u24 startUnicodeValue
+///     u8  additionalCount  (range covers start..=start+additionalCount)
+///
+/// Ranges are sorted by startUnicodeValue; binary-search to the first
+/// range whose start ≤ codepoint, then check the inclusive end bound.
+fn range_contains(bytes: &[u8], table_off: usize, codepoint: u32) -> bool {
+    if table_off + 4 > bytes.len() {
+        return false;
+    }
+    let Ok(n_u32) = read_u32(bytes, table_off) else {
+        return false;
+    };
+    let n = n_u32 as usize;
+    let entries_off = table_off + 4;
+    let entry_size = 4;
+    if entries_off + n * entry_size > bytes.len() {
+        return false;
+    }
+    // Find the largest index whose start ≤ codepoint, then test the
+    // upper bound. Standard "rightmost-≤ binary search".
+    let mut lo = 0usize;
+    let mut hi = n;
+    while lo < hi {
+        let mid = (lo + hi) / 2;
+        let off = entries_off + mid * entry_size;
+        let Ok(start) = read_u24(bytes, off) else {
+            return false;
+        };
+        if start <= codepoint {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    if lo == 0 {
+        return false;
+    }
+    let cand = lo - 1;
+    let off = entries_off + cand * entry_size;
+    let Ok(start) = read_u24(bytes, off) else {
+        return false;
+    };
+    let Ok(extra) = bytes
+        .get(off + 3)
+        .copied()
+        .ok_or(crate::Error::UnexpectedEof)
+    else {
+        return false;
+    };
+    let end = start + extra as u32;
+    codepoint >= start && codepoint <= end
 }
 
 fn is_supported_format(format: u16) -> bool {
@@ -438,6 +624,149 @@ mod tests {
         let cmap = CmapTable::parse(&out).expect("format-14 sibling must not fail parse");
         assert_eq!(cmap.lookup(0x1F600), Some(5));
         assert_eq!(cmap.lookup(0x1F601), None);
+    }
+
+    // Build a cmap with one format-12 base subtable and one
+    // format-14 (UVS) subtable carrying:
+    //   - varSelector = 0xFE0F (emoji presentation)
+    //       defaultUVS    = [0x1F600..=0x1F600] (default-render this emoji)
+    //       nonDefaultUVS = { 0x2728: 9999 }    (sparkles → custom glyph)
+    //
+    // Plus base format-12 groups:
+    //   0x2728..=0x2728  → glyph 7
+    //   0x1F600..=0x1F600 → glyph 5
+    //
+    // Lookup expectations:
+    //   lookup_variation(0x1F600, 0xFE0F) -> Some(5)    (default UVS hit, base glyph)
+    //   lookup_variation(0x2728,  0xFE0F) -> Some(9999) (non-default override)
+    //   lookup_variation(0x1F600, 0xFE0E) -> None       (no record for VS-15)
+    //   lookup_variation(0x1F601, 0xFE0F) -> None       (covered VS but cp absent)
+    fn build_cmap_with_format12_and_format14() -> Vec<u8> {
+        // -- format-12 subtable: two single-cp groups (must be sorted by
+        //    startCharCode ascending — the format-12 lookup binary-searches
+        //    them).
+        let num_groups: u32 = 2;
+        let sub12_len: usize = 16 + num_groups as usize * 12;
+        let mut sub12 = vec![0u8; sub12_len];
+        sub12[0..2].copy_from_slice(&12u16.to_be_bytes());
+        sub12[4..8].copy_from_slice(&(sub12_len as u32).to_be_bytes());
+        sub12[12..16].copy_from_slice(&num_groups.to_be_bytes());
+        // group 0: U+2728 → 7   (sparkles, BMP)
+        sub12[16..20].copy_from_slice(&0x2728u32.to_be_bytes());
+        sub12[20..24].copy_from_slice(&0x2728u32.to_be_bytes());
+        sub12[24..28].copy_from_slice(&7u32.to_be_bytes());
+        // group 1: U+1F600 → 5  (grinning face, supplementary plane)
+        sub12[28..32].copy_from_slice(&0x1F600u32.to_be_bytes());
+        sub12[32..36].copy_from_slice(&0x1F600u32.to_be_bytes());
+        sub12[36..40].copy_from_slice(&5u32.to_be_bytes());
+
+        // -- format-14 subtable -------------------------------------------
+        // 1 record (varSelector = 0xFE0F).
+        // DefaultUVS: 1 range starting at 0x1F600 with additionalCount = 0.
+        // NonDefaultUVS: 1 mapping (0x2728 → 9999).
+        let header_len = 10usize; // u16 fmt + u32 length + u32 numRecords
+        let record_len = 11usize;
+        let default_table_len = 4 + 4; // u32 count + 1 range (3 + 1)
+        let non_default_table_len = 4 + 5; // u32 count + 1 mapping (3 + 2)
+        let sub14_len = header_len + record_len + default_table_len + non_default_table_len;
+        let mut sub14 = vec![0u8; sub14_len];
+        sub14[0..2].copy_from_slice(&14u16.to_be_bytes());
+        sub14[2..6].copy_from_slice(&(sub14_len as u32).to_be_bytes());
+        sub14[6..10].copy_from_slice(&1u32.to_be_bytes()); // numVarSelectorRecords
+
+        // Layout offsets:
+        //   record at 10..21
+        //   defaultUVS table at 21..29
+        //   nonDefaultUVS table at 29..38
+        let default_off = (header_len + record_len) as u32; // 21
+        let non_default_off = default_off + default_table_len as u32; // 29
+
+        // record 0: varSelector = 0xFE0F (encoded as u24)
+        let vs_bytes = 0xFE0Fu32.to_be_bytes();
+        sub14[10..13].copy_from_slice(&vs_bytes[1..4]);
+        sub14[13..17].copy_from_slice(&default_off.to_be_bytes());
+        sub14[17..21].copy_from_slice(&non_default_off.to_be_bytes());
+
+        // DefaultUVS: 1 range, start=0x1F600, additional=0
+        let off = default_off as usize;
+        sub14[off..off + 4].copy_from_slice(&1u32.to_be_bytes());
+        let r = off + 4;
+        let start_bytes = 0x1F600u32.to_be_bytes();
+        sub14[r..r + 3].copy_from_slice(&start_bytes[1..4]);
+        sub14[r + 3] = 0; // additionalCount
+
+        // NonDefaultUVS: 1 mapping: 0x2728 → 9999
+        let off = non_default_off as usize;
+        sub14[off..off + 4].copy_from_slice(&1u32.to_be_bytes());
+        let m = off + 4;
+        let cp_bytes = 0x2728u32.to_be_bytes();
+        sub14[m..m + 3].copy_from_slice(&cp_bytes[1..4]);
+        sub14[m + 3..m + 5].copy_from_slice(&9999u16.to_be_bytes());
+
+        // -- cmap header: 2 encoding records ------------------------------
+        let header_len = 4 + 2 * 8;
+        let sub12_off = header_len;
+        let sub14_off = sub12_off + sub12.len();
+        let mut out = vec![0u8; header_len];
+        out[0..2].copy_from_slice(&0u16.to_be_bytes());
+        out[2..4].copy_from_slice(&2u16.to_be_bytes());
+        // record 0: (3, 10) → format-12
+        out[4..6].copy_from_slice(&3u16.to_be_bytes());
+        out[6..8].copy_from_slice(&10u16.to_be_bytes());
+        out[8..12].copy_from_slice(&(sub12_off as u32).to_be_bytes());
+        // record 1: (0, 5) → format-14
+        out[12..14].copy_from_slice(&0u16.to_be_bytes());
+        out[14..16].copy_from_slice(&5u16.to_be_bytes());
+        out[16..20].copy_from_slice(&(sub14_off as u32).to_be_bytes());
+        out.extend_from_slice(&sub12);
+        out.extend_from_slice(&sub14);
+        out
+    }
+
+    #[test]
+    fn variation_lookup_default_returns_base_glyph() {
+        let cmap_bytes = build_cmap_with_format12_and_format14();
+        let cmap = CmapTable::parse(&cmap_bytes).unwrap();
+        // Base lookup unchanged.
+        assert_eq!(cmap.lookup(0x1F600), Some(5));
+        assert_eq!(cmap.lookup(0x2728), Some(7));
+        // Default UVS hit on grinning-face emoji + VS-16 → base glyph.
+        assert_eq!(cmap.lookup_variation(0x1F600, 0xFE0F), Some(5));
+    }
+
+    #[test]
+    fn variation_lookup_non_default_overrides_base() {
+        let cmap_bytes = build_cmap_with_format12_and_format14();
+        let cmap = CmapTable::parse(&cmap_bytes).unwrap();
+        // U+2728 + VS-16 → custom glyph 9999, NOT the base glyph 7.
+        assert_eq!(cmap.lookup_variation(0x2728, 0xFE0F), Some(9999));
+    }
+
+    #[test]
+    fn variation_lookup_misses_return_none() {
+        let cmap_bytes = build_cmap_with_format12_and_format14();
+        let cmap = CmapTable::parse(&cmap_bytes).unwrap();
+        // Variation selector not enumerated.
+        assert_eq!(cmap.lookup_variation(0x1F600, 0xFE0E), None);
+        // Variation selector enumerated but codepoint not in either UVS.
+        assert_eq!(cmap.lookup_variation(0x1F601, 0xFE0F), None);
+    }
+
+    #[test]
+    fn variation_lookup_returns_none_when_no_format14() {
+        // The cmap from the original format12_round_trip test has no
+        // format-14 subtable.
+        let mut sub = vec![0u8; 16 + 12];
+        sub[0..2].copy_from_slice(&12u16.to_be_bytes());
+        sub[4..8].copy_from_slice(&((16 + 12) as u32).to_be_bytes());
+        sub[12..16].copy_from_slice(&1u32.to_be_bytes());
+        sub[16..20].copy_from_slice(&0x1F600u32.to_be_bytes());
+        sub[20..24].copy_from_slice(&0x1F600u32.to_be_bytes());
+        sub[24..28].copy_from_slice(&5u32.to_be_bytes());
+        let cmap_bytes = build_cmap_with_subtable(12, &sub);
+        let cmap = CmapTable::parse(&cmap_bytes).unwrap();
+        assert_eq!(cmap.lookup(0x1F600), Some(5));
+        assert_eq!(cmap.lookup_variation(0x1F600, 0xFE0F), None);
     }
 
     /// A cmap with ONLY unsupported subtables (here: just format 14)

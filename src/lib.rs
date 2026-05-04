@@ -2,7 +2,8 @@
 //!
 //! Round-1 scope:
 //! - sfnt + table directory walker (`parser`).
-//! - Core OpenType tables: `head`, `hhea`, `maxp`, `cmap` (formats 0/4/6/12),
+//! - Core OpenType tables: `head`, `hhea`, `maxp`, `cmap` (base formats
+//!   0/4/6/12 + format 14 Unicode Variation Sequences as a sidecar),
 //!   `name`, `OS/2`, `hmtx`, `loca`, `glyf` (simple + composite), `post`.
 //! - Legacy `kern` table (format 0 subtable).
 //! - `GSUB` LookupType 4 (ligature substitution).
@@ -285,6 +286,31 @@ impl<'a> Font<'a> {
     /// Map a Unicode codepoint to its glyph id.
     pub fn glyph_index(&self, codepoint: char) -> Option<u16> {
         self.cmap.lookup(codepoint as u32)
+    }
+
+    /// Look up the variant glyph for a `(codepoint, variation_selector)`
+    /// pair from the cmap format-14 (Unicode Variation Sequences)
+    /// subtable.
+    ///
+    /// Returns:
+    ///
+    /// - `Some(glyph)` from the **non-default** UVS table when the
+    ///   variation selector overrides the base glyph (e.g. emoji
+    ///   presentation `<emoji, U+FE0F>`, text presentation
+    ///   `<emoji, U+FE0E>`, or registered Ideographic Variation
+    ///   Sequence `<CJK, U+E0100..U+E01EF>`).
+    /// - `Some(base)` when the pair is in the **default** UVS table —
+    ///   semantically "render the base codepoint's default glyph; the
+    ///   variation selector is just a hint". Equivalent to
+    ///   [`Self::glyph_index`] for the base codepoint, returned for
+    ///   API symmetry so callers don't have to special-case the
+    ///   default-presentation branch.
+    /// - `None` when the font has no format-14 subtable, the variation
+    ///   selector isn't enumerated, or neither UVS table covers the
+    ///   base codepoint.
+    pub fn lookup_variation(&self, codepoint: char, variation_selector: char) -> Option<u16> {
+        self.cmap
+            .lookup_variation(codepoint as u32, variation_selector as u32)
     }
 
     /// Decode the TrueType outline for `glyph_id`. Empty / blank glyphs

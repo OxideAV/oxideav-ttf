@@ -127,6 +127,15 @@ pub(crate) fn read_i16(bytes: &[u8], off: usize) -> Result<i16, Error> {
 }
 
 #[inline]
+pub(crate) fn read_u24(bytes: &[u8], off: usize) -> Result<u32, Error> {
+    // Big-endian 24-bit, zero-extended to u32. Used by the cmap
+    // format-14 (Unicode Variation Sequences) varSelector,
+    // startUnicodeValue, unicodeValue fields.
+    let s = bytes.get(off..off + 3).ok_or(Error::UnexpectedEof)?;
+    Ok(u32::from_be_bytes([0, s[0], s[1], s[2]]))
+}
+
+#[inline]
 pub(crate) fn read_u32(bytes: &[u8], off: usize) -> Result<u32, Error> {
     let s = bytes.get(off..off + 4).ok_or(Error::UnexpectedEof)?;
     Ok(u32::from_be_bytes([s[0], s[1], s[2], s[3]]))

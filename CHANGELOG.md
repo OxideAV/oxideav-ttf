@@ -7,16 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — cmap format 14 (Unicode Variation Sequences) (2026-05-04)
+
+- `Font::lookup_variation(codepoint, variation_selector) -> Option<u16>`
+  — resolves a `(base codepoint, variation selector)` pair through the
+  cmap format-14 subtable. Returns the per-pair glyph from the
+  non-default UVS table when present, the base codepoint's glyph when
+  the pair is in the default UVS table (matches HarfBuzz's
+  `hb_font_get_variation_glyph` contract), or `None` otherwise.
+- `CmapTable::lookup_variation` — internal walker that binary-searches
+  the variation selector record list, then within each record's
+  `DefaultUVS` (UnicodeRange list) and `NonDefaultUVS` (UVSMapping
+  list) sub-tables. Both inner walks are also binary-searched —
+  every list in format 14 is required to be sorted ascending per the
+  Microsoft spec.
+- `parser::read_u24` — big-endian 24-bit unsigned reader, used by the
+  format-14 varSelector / startUnicodeValue / unicodeValue fields.
+
+Real-world use cases this unblocks:
+
+- Emoji presentation selectors `<emoji, U+FE0F>` (emoji form) and
+  `<emoji, U+FE0E>` (text form).
+- Skin-tone modifier sequences via fonts that publish them through
+  format 14 instead of GSUB.
+- Registered Ideographic Variation Sequences `<CJK, U+E0100..U+E01EF>`
+  in pan-CJK fonts (Source Han Sans / Noto Sans CJK family).
+
 ### Fixed — cmap format-14 sibling rejected the whole font (2026-05-04)
 
 - `cmap` parse no longer fails when the font ships a format-14 (Unicode
   Variation Selectors) subtable next to a supported subtable. Format-14
-  records are now skipped at the encoding-record walk *before* per-format
-  length validation runs, so the picker still finds the format-12 /
-  format-4 sibling. Affected fonts include Noto Color Emoji (which ships
-  `(0,5)/format-14` alongside `(3,10)/format-12`) and most CJK fonts
-  that expose variation sequences. Real format-14 lookup (variation
-  selectors → variant glyph IDs) remains deferred to a future round.
+  records are now picked up as a sidecar UVS table at the encoding-record
+  walk *before* per-format length validation runs, so the picker still
+  finds the format-12 / format-4 sibling and the variation-sequence
+  data is preserved for `lookup_variation`. Affected fonts include
+  Noto Color Emoji (which ships `(0,5)/format-14` alongside
+  `(3,10)/format-12`) and most CJK fonts that expose variation
+  sequences.
 
 ## [0.1.1](https://github.com/OxideAV/oxideav-ttf/compare/v0.1.0...v0.1.1) - 2026-05-03
 
