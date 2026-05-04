@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2](https://github.com/OxideAV/oxideav-ttf/compare/v0.1.1...v0.1.2) - 2026-05-04
+
+### Other
+
+- LookupTypes 2 (multiple) / 3 (alternate) / 5 (contextual) / 8 (reverse-chain)
+- Delete Cargo.lock
+- drop private-item intra-doc link to MAX_NESTED_LOOKUP_DEPTH
+- LookupType 4 wiring + LookupType 6 chained context (formats 1/2/3)
+- feature-tagged single substitution (LookupType 1) for Arabic shaping
+- variable-font axes, axis remap, glyph TupleVariationStore
+- document COLR/CPAL + sbix + TTC subfont APIs
+- Apple-style PNG/JPEG bitmap-strike colour glyph parser
+- vector colour-emoji layer-stack parsers (v0 / v0+v1)
+- fix from_collection_bytes BadOffset on real .ttc subfonts
+- document cmap format 14 + lookup_variation example
+- implement format 14 (Unicode Variation Sequences) lookup
+- skip unsupported subtable formats before length validation
+
 ### Added — GSUB LookupTypes 2 / 3 / 5 / 8 (2026-05-04)
 
 Closes the GSUB lookup-type grid; every type 1-8 (minus the implicit
