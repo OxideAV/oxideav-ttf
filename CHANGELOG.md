@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — GSUB feature-tagged single substitution (LookupType 1) (2026-05-04)
+
+- `tables::gsub::GsubTable` now decodes the **ScriptList** +
+  **FeatureList** common-tables and exposes per-`(script, language)`
+  feature lookup via `features_for_script(script_tag, lang_tag)`. The
+  active LangSys (caller-supplied tag, falling back to
+  `DefaultLangSys`) is resolved and each `featureIndex` reference is
+  expanded into a `GsubFeature { tag: [u8; 4], lookup_indices: Vec<u16> }`.
+- `tables::gsub::GsubTable::apply_lookup_type_1(lookup_index, gid)`
+  walks every sub-table in the named lookup looking for a Single
+  Substitution (LookupType 1) match. Both formats are supported:
+  - **Format 1** — coverage + signed `deltaGlyphID`; result is
+    `(gid + delta) mod 65536` so negative deltas wrap correctly.
+  - **Format 2** — coverage + indexed `substituteGlyphIDs[]` array.
+  ExtensionSubst (LookupType 7) wrappers are unwrapped transparently.
+  Returns `None` when the lookup index is out of range, the input
+  glyph is not in the lookup's coverage, or the referenced lookup is
+  not a single-substitution lookup (e.g. a ligature lookup is
+  silently skipped — call `lookup_ligature` for those).
+- Public `Font` API:
+  - `Font::gsub_features_for_script(script_tag, lang_tag) -> Vec<GsubFeature>`
+  - `Font::gsub_apply_lookup_type_1(lookup_index, gid) -> Option<u16>`
+- Public re-export: `oxideav_ttf::GsubFeature { tag, lookup_indices }`.
+- New integration test fixture `tests/fixtures/NotoSansArabic-Regular.ttf`
+  — Noto Sans Arabic 2022 (OFL/SIL, see `NOTO-ARABIC-OFL-LICENSE.txt`).
+  The new `tests/noto_arabic_gsub.rs` resolves the `arab` script's
+  feature list, asserts `init`/`medi`/`fina` are exposed, and
+  applies feature `init` to U+0628 BEH to confirm the joining-form
+  glyph differs from the isolated form. A bulk pass over
+  U+0620..U+064A confirms the lookup substitutes most Arabic
+  joining letters.
+
+This unblocks the consumer crate's Arabic shaper for fonts that ship
+positional forms via GSUB rather than the legacy Unicode
+Presentation Forms-B block (PF-B is a fallback used by older fonts
+like DejaVu Sans; modern Arabic fonts — Noto Sans Arabic UI, the
+Indic-region Noto fonts, and most Adobe Source Sans variants — rely
+on GSUB lookups).
+
+Spec: Microsoft OpenType §"GSUB — Glyph Substitution Table" /
+§"Common Table Formats" (ScriptList / FeatureList / LookupList) /
+§"Single Substitution Subtable" (formats 1 and 2). Apple TrueType
+Reference §"GSUB". ISO/IEC 14496-22 §6 (OFF).
+
 ### Added — variable fonts: fvar / avar / gvar parsers + delta-applied outlines (2026-05-04)
 
 - New `tables::fvar::FvarTable` parser for the Font Variations Header.

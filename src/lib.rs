@@ -6,7 +6,10 @@
 //!   0/4/6/12 + format 14 Unicode Variation Sequences as a sidecar),
 //!   `name`, `OS/2`, `hmtx`, `loca`, `glyf` (simple + composite), `post`.
 //! - Legacy `kern` table (format 0 subtable).
-//! - `GSUB` LookupType 4 (ligature substitution).
+//! - `GSUB` LookupType 1 (single substitution: positional forms,
+//!   small-caps, vertical alternates) + LookupType 4 (ligature
+//!   substitution), discoverable via the ScriptList / FeatureList /
+//!   LookupList common-table walk.
 //! - `GPOS` LookupType 2 (pair-adjustment / kerning),
 //!   LookupType 4 (mark-to-base attachment for diacritics), and
 //!   LookupType 6 (mark-to-mark attachment for stacked diacritics).
@@ -48,6 +51,7 @@ pub use tables::cbdt::ColorBitmap;
 pub use tables::cblc::{BigGlyphMetrics, SmallGlyphMetrics};
 pub use tables::colr::ColorLayer;
 pub use tables::fvar::{NamedInstance, VariationAxis};
+pub use tables::gsub::GsubFeature;
 pub use tables::sbix::SbixGlyph;
 
 /// Errors emitted during font parsing or glyph lookup.
@@ -467,6 +471,54 @@ impl<'a> Font<'a> {
     /// `None` otherwise (no ligature, or no GSUB table).
     pub fn lookup_ligature(&self, glyphs: &[u16]) -> Option<(u16, usize)> {
         self.gsub.as_ref().and_then(|g| g.lookup_ligature(glyphs))
+    }
+
+    /// Resolve every GSUB feature active for `script_tag` under
+    /// `lang_tag` to a list of `GsubFeature { tag, lookup_indices }`.
+    ///
+    /// `lang_tag = None` selects the script's `DefaultLangSys`. If
+    /// `lang_tag` is supplied but isn't enumerated for the script, the
+    /// lookup falls back to `DefaultLangSys` (matching the spec's
+    /// "language system not present in script → use default" rule).
+    ///
+    /// The resulting `Vec` is empty when the font has no GSUB table or
+    /// the script tag isn't in the ScriptList. Order matches the
+    /// LangSys's `featureIndices` field, so a shaper can apply features
+    /// in declaration order. The required feature (when present) is
+    /// emitted first.
+    ///
+    /// Used by the consumer crate's Arabic shaper to discover which
+    /// lookup indices implement `init` / `medi` / `fina` / `isol` for
+    /// the current script — modern Arabic fonts (Noto Sans Arabic UI,
+    /// most Indic fonts) ship positional forms via GSUB rather than
+    /// the legacy Presentation Forms-B Unicode block.
+    pub fn gsub_features_for_script(
+        &self,
+        script_tag: [u8; 4],
+        lang_tag: Option<[u8; 4]>,
+    ) -> Vec<GsubFeature> {
+        match self.gsub.as_ref() {
+            Some(g) => g.features_for_script(script_tag, lang_tag),
+            None => Vec::new(),
+        }
+    }
+
+    /// Apply GSUB LookupType 1 (Single Substitution) lookup
+    /// `lookup_index` to a single input glyph `gid`.
+    ///
+    /// Returns `Some(replacement_gid)` when the lookup's coverage
+    /// covers `gid`, or `None` when no substitution applies (caller
+    /// keeps the input glyph unchanged). `None` is also returned when
+    /// the font has no GSUB, the lookup index is out of range, or the
+    /// referenced lookup isn't a single-substitution lookup (e.g. a
+    /// ligature lookup is silently skipped here — call
+    /// [`Self::lookup_ligature`] for those).
+    ///
+    /// Format 1 (delta) and Format 2 (substitute-array) sub-tables are
+    /// both supported; ExtensionSubst (LookupType 7) wrappers are
+    /// unwrapped transparently.
+    pub fn gsub_apply_lookup_type_1(&self, lookup_index: u16, gid: u16) -> Option<u16> {
+        self.gsub.as_ref()?.apply_lookup_type_1(lookup_index, gid)
     }
 
     /// Look up the kerning between an ordered glyph pair, in font units.

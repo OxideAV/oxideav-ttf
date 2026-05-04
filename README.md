@@ -12,7 +12,11 @@ ligatures and kerning.
   Unicode Variation Sequences as a sidecar), `name`, `OS/2`, `hmtx`,
   `loca`, `glyf` (simple + composite), `post`.
 - Legacy `kern` table (format 0).
-- `GSUB` LookupType 4 (ligature substitution).
+- `GSUB` LookupType 1 (single substitution: positional forms,
+  small-caps, vertical alternates) + LookupType 4 (ligature
+  substitution), with a ScriptList / FeatureList walk so callers can
+  ask "which lookup indices implement feature `init` for script
+  `arab`?"
 - `GPOS` LookupType 2 (pair-adjustment / kerning).
 - `GDEF` (glyph class definitions, used to skip mark glyphs).
 
@@ -53,6 +57,22 @@ if let Some((replacement_gid, consumed)) = font.lookup_ligature(&[gid_f, gid_i])
 
 let gid_v = font.glyph_index('V').unwrap();
 let _ = font.lookup_kerning(gid_a, gid_v); // negative i16 in font units
+
+// GSUB feature-tagged lookups (Arabic positional forms, small-caps, …).
+// Discover which lookup indices implement `init` for script `arab`,
+// then apply LookupType 1 to a single glyph id.
+for feat in font.gsub_features_for_script(*b"arab", None) {
+    if &feat.tag == b"init" {
+        if let Some(beh) = font.glyph_index('\u{0628}') {
+            for &li in &feat.lookup_indices {
+                if let Some(initial_form) = font.gsub_apply_lookup_type_1(li, beh) {
+                    let _ = initial_form;
+                    break;
+                }
+            }
+        }
+    }
+}
 
 // Unicode Variation Sequences (cmap format 14). Used by emoji
 // presentation selectors and registered IVS for CJK.
@@ -108,7 +128,10 @@ if vfont.is_variable() {
 - Bidi, Arabic shaping, Indic conjuncts, complex contextual GSUB/GPOS.
 - TrueType bytecode hinting (modern AA at ≥ 16 px does not need it).
 - cmap formats 2, 8, 10, 13.
-- GSUB lookup types 1/2/3/5/6/7/8 and GPOS lookup types 1/3..9.
+- GSUB lookup types 2/3/5/6/7/8 (LookupType 1 single substitution +
+  LookupType 4 ligature substitution are implemented; ExtensionSubst
+  LookupType 7 is unwrapped transparently for both) and GPOS lookup
+  types 1/3..9 (other than the implemented 2/4/6).
 - COLR **v1** paint graph (gradients, transforms, composites) — only
   the v0 flat layer stack is supported.
 - sbix `'dupe'` chasing (the indirection sentinel is surfaced
@@ -127,6 +150,10 @@ if vfont.is_variable() {
 - `tests/fixtures/InterVariable.ttf` is Inter 4.0 (variable font,
   `wght` + `opsz` axes) under the SIL Open Font License 1.1
   (see `tests/fixtures/INTER-OFL-LICENSE.txt`).
+- `tests/fixtures/NotoSansArabic-Regular.ttf` is Noto Sans Arabic
+  2022 (used to exercise GSUB feature-tagged single substitution
+  for the `arab` script's positional joining forms) under the SIL
+  Open Font License 1.1 (see `tests/fixtures/NOTO-ARABIC-OFL-LICENSE.txt`).
 
 ## License
 
