@@ -7,12 +7,16 @@
 //!   `name`, `OS/2`, `hmtx`, `loca`, `glyf` (simple + composite), `post`.
 //! - Legacy `kern` table (format 0 subtable).
 //! - `GSUB` LookupType 1 (single substitution: positional forms,
-//!   small-caps, vertical alternates), LookupType 4 (ligature
-//!   substitution — both walker and lookup-index-specific entry
-//!   points), and LookupType 6 (chained contexts substitution —
-//!   formats 1 / 2 / 3, with recursive sub-lookup dispatch),
-//!   discoverable via the ScriptList / FeatureList / LookupList
-//!   common-table walk.
+//!   small-caps, vertical alternates), LookupType 2 (multiple
+//!   substitution — split one input glyph into N), LookupType 3
+//!   (alternate substitution — `aalt` / `salt` per-coverage
+//!   alternates), LookupType 4 (ligature substitution — both walker
+//!   and lookup-index-specific entry points), LookupType 5
+//!   (contextual substitution — formats 1 / 2 / 3), LookupType 6
+//!   (chained contexts substitution — formats 1 / 2 / 3, with
+//!   recursive sub-lookup dispatch), and LookupType 8 (reverse
+//!   chained context single substitution), discoverable via the
+//!   ScriptList / FeatureList / LookupList common-table walk.
 //! - `GPOS` LookupType 2 (pair-adjustment / kerning),
 //!   LookupType 4 (mark-to-base attachment for diacritics), and
 //!   LookupType 6 (mark-to-mark attachment for stacked diacritics).
@@ -579,6 +583,92 @@ impl<'a> Font<'a> {
         self.gsub
             .as_ref()?
             .apply_lookup_type_6(lookup_index, gids, pos)
+    }
+
+    /// Apply GSUB LookupType 2 (Multiple Substitution) lookup
+    /// `lookup_index` to a single input glyph `gid`.
+    ///
+    /// Returns `Some(substitute_sequence)` — a `Vec<u16>` of the
+    /// expanded glyph sequence — when the lookup's coverage covers
+    /// `gid`. Returns `None` when no rule applies, the lookup index is
+    /// out of range, the referenced lookup is not a multiple
+    /// substitution, or the font has no GSUB table. ExtensionSubst
+    /// (LookupType 7) wrappers are unwrapped transparently. The spec
+    /// permits `glyphCount = 0` (deletion); such hits surface as
+    /// `Some(Vec::new())`.
+    pub fn gsub_apply_lookup_type_2(&self, lookup_index: u16, gid: u16) -> Option<Vec<u16>> {
+        self.gsub.as_ref()?.apply_lookup_type_2(lookup_index, gid)
+    }
+
+    /// Apply GSUB LookupType 3 (Alternate Substitution) lookup
+    /// `lookup_index` to `gid`, picking `alternate_index` from the
+    /// resolved `AlternateSet`.
+    ///
+    /// Returns `Some(replacement_gid)` when the lookup covers `gid`
+    /// AND `alternate_index` is in range for that coverage's
+    /// `AlternateSet`. Returns `None` on coverage miss, out-of-range
+    /// alternate index, non-alternate-substitution referenced lookup,
+    /// or a font without GSUB. Default callers should pass
+    /// `alternate_index = 0` — the spec doesn't register a
+    /// per-feature variant index. ExtensionSubst (LookupType 7) is
+    /// unwrapped transparently.
+    pub fn gsub_apply_lookup_type_3(
+        &self,
+        lookup_index: u16,
+        gid: u16,
+        alternate_index: u16,
+    ) -> Option<u16> {
+        self.gsub
+            .as_ref()?
+            .apply_lookup_type_3(lookup_index, gid, alternate_index)
+    }
+
+    /// Apply GSUB LookupType 5 (Contextual Substitution) lookup
+    /// `lookup_index` to the glyph run starting at `pos`.
+    ///
+    /// LookupType 5 mirrors LookupType 6 minus backtrack and
+    /// lookahead — the input window is the only context. Returns
+    /// `Some(rewritten_run)` — a fresh `Vec<u16>` with any sub-lookups
+    /// dispatched at the matched input window — when one of the
+    /// lookup's sub-tables (Format 1 / 2 / 3) matches around `pos`.
+    /// Returns `None` when no contextual rule applies, the lookup
+    /// index is out of range, the referenced lookup is not a
+    /// contextual lookup, or the font has no GSUB.
+    /// ExtensionSubst (LookupType 7) is unwrapped transparently.
+    /// Recursive sub-lookup expansion is bounded.
+    pub fn gsub_apply_lookup_type_5(
+        &self,
+        lookup_index: u16,
+        gids: &[u16],
+        pos: usize,
+    ) -> Option<Vec<u16>> {
+        self.gsub
+            .as_ref()?
+            .apply_lookup_type_5(lookup_index, gids, pos)
+    }
+
+    /// Apply GSUB LookupType 8 (Reverse Chained Context Substitution)
+    /// lookup `lookup_index` to the glyph at `gids[pos]`.
+    ///
+    /// Returns `Some(replacement_gid)` when the input coverage covers
+    /// `gids[pos]` AND every backtrack / lookahead coverage matches
+    /// the surrounding glyphs. Returns `None` otherwise (no rule, out
+    /// of range, wrong lookup type, no GSUB). ExtensionSubst
+    /// (LookupType 7) is unwrapped transparently.
+    ///
+    /// The spec mandates reverse-text processing of the input run
+    /// (essential for Arabic isolated forms in some fonts) — a higher-
+    /// level shaper is what walks `pos` from right to left; this
+    /// per-position entry point answers "does the rule fire here?".
+    pub fn gsub_apply_lookup_type_8(
+        &self,
+        lookup_index: u16,
+        gids: &[u16],
+        pos: usize,
+    ) -> Option<u16> {
+        self.gsub
+            .as_ref()?
+            .apply_lookup_type_8(lookup_index, gids, pos)
     }
 
     /// Look up the kerning between an ordered glyph pair, in font units.

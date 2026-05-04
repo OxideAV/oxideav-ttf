@@ -7,6 +7,86 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — GSUB LookupTypes 2 / 3 / 5 / 8 (2026-05-04)
+
+Closes the GSUB lookup-type grid; every type 1-8 (minus the implicit
+ExtensionSubst wrapper) now has a public per-lookup entry point.
+
+- `tables::gsub::GsubTable::apply_lookup_type_2(lookup_index, gid)`
+  — Multiple Substitution (Format 1). Splits one input glyph into a
+  `Vec<u16>` substitute sequence per the matched `Sequence` record.
+  Empty sequences (`glyphCount = 0`, deletion) are returned as
+  `Some(Vec::new())`. Used by some script normalisations that expand
+  a precomposed glyph into a base + mark cluster.
+- `tables::gsub::GsubTable::apply_lookup_type_3(lookup_index, gid, alternate_index)`
+  — Alternate Substitution (Format 1). Each covered glyph carries an
+  `AlternateSet` of substitute glyph IDs; the caller picks an index
+  (default 0). Drives `aalt` / `salt` features. Out-of-range
+  alternate index returns `None`.
+- `tables::gsub::GsubTable::apply_lookup_type_5(lookup_index, gids, pos)`
+  — Contextual Substitution. All three sub-table formats are decoded
+  with the same `SubstLookupRecord` machinery as LookupType 6:
+  - **Format 1** (simple glyph contexts) — coverage on input[0] +
+    per-coverage `SubRuleSet` of explicit input glyph sequences.
+  - **Format 2** (class-based) — coverage on input[0] + a single
+    `ClassDef` + per-input-class `SubClassSet`.
+  - **Format 3** (coverage-based) — `Coverage[]` array (one per input
+    position) + a single `SubstLookupRecord[]`.
+
+  LookupType 5 is the predecessor of LookupType 6 minus the backtrack
+  / lookahead arrays (the input window IS the context). Older fonts
+  encode contextual rules here; modern fonts overwhelmingly prefer
+  LookupType 6.
+- `tables::gsub::GsubTable::apply_lookup_type_8(lookup_index, gids, pos)`
+  — Reverse Chained Context Single Substitution (Format 1). Coverage
+  on `gids[pos]` plus backtrack and lookahead `Coverage[]` arrays
+  plus a `substituteGlyphIDs[]` indexed by the input coverage index.
+  Unlike LookupType 6, the substitution is single-glyph (no
+  `SubstLookupRecord[]`) and the spec mandates reverse-text
+  processing of the input run — a higher-level shaper walks `pos`
+  from right to left; this entry point answers "does the rule fire
+  here?" Used by some Arabic fonts for isolated forms.
+- `apply_subst_records` (the LookupType 6 / 5 nested-dispatch helper)
+  now also handles nested LookupType 2 / 3 / 5 references — previously
+  only nested 1 / 4 / 6 were dispatched, the rest were silently
+  skipped. Recursion bound is unchanged at
+  `MAX_NESTED_LOOKUP_DEPTH = 8`.
+- ExtensionSubst (LookupType 7) wrappers are unwrapped transparently
+  for every new entry point.
+- Public `Font` API:
+  - `Font::gsub_apply_lookup_type_2(lookup_index, gid) -> Option<Vec<u16>>`
+  - `Font::gsub_apply_lookup_type_3(lookup_index, gid, alternate_index) -> Option<u16>`
+  - `Font::gsub_apply_lookup_type_5(lookup_index, gids, pos) -> Option<Vec<u16>>`
+  - `Font::gsub_apply_lookup_type_8(lookup_index, gids, pos) -> Option<u16>`
+- New tests:
+  - `tables::gsub::tests::lookup_type_2_expands_one_glyph_into_sequence`,
+    `lookup_type_2_returns_none_off_coverage`,
+    `lookup_type_2_zero_glyph_count_means_deletion`.
+  - `lookup_type_3_picks_default_alternate_zero`,
+    `lookup_type_3_picks_indexed_alternates`,
+    `lookup_type_3_out_of_range_alternate_returns_none`.
+  - `lookup_type_5_format_1_simple_glyph_context`,
+    `lookup_type_5_format_2_class_based_context`,
+    `lookup_type_5_format_3_coverage_based_context`.
+  - `lookup_type_8_reverse_chain_substitutes_under_context`,
+    `lookup_type_8_no_match_when_backtrack_or_lookahead_misses`.
+  - `chain_context_can_dispatch_nested_lookup_type_2` — verifies the
+    extended `apply_subst_records` correctly expands a nested
+    LookupType-2 reference under a LookupType-6 chain context.
+  - Integration tests against Noto Sans Arabic:
+    `new_gsub_lookup_types_are_panic_free_across_arab_features` and
+    `lookup_type_5_returns_none_for_non_context_lookups_in_noto`
+    drive every lookup index referenced by every Arabic feature
+    through the four new entry points to prove the dispatch walks
+    real-world tables without panic.
+
+Spec: Microsoft OpenType §"Multiple Substitution Subtable" (LookupType
+2 Format 1), §"Alternate Substitution Subtable" (LookupType 3 Format
+1), §"Sequence Context Format 1 / 2 / 3" (LookupType 5),
+§"Reverse Chaining Contextual Single Substitution Subtable"
+(LookupType 8 Format 1). Apple TrueType Reference §"GSUB". ISO/IEC
+14496-22 §6 (OFF).
+
 ### Added — GSUB LookupType 4 wiring + LookupType 6 chained context (2026-05-04)
 
 - `tables::gsub::GsubTable::apply_lookup_type_4(lookup_index, glyphs)`

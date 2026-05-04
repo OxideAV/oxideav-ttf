@@ -5,19 +5,35 @@
 //!   (indexed substitute array). Used by Arabic shaping (`init`/`medi`/
 //!   `fina`/`isol`), small-caps, vertical alternates, and most other
 //!   one-in/one-out feature lookups.
+//! - **LookupType 2** (Multiple Substitution) — format 1. Splits one
+//!   input glyph into a sequence of N replacement glyphs (`Sequence`
+//!   record per coverage index). Used for some script normalisations
+//!   (e.g. expanding a precomposed glyph into its base + mark cluster).
+//! - **LookupType 3** (Alternate Substitution) — format 1. Each
+//!   covered input glyph carries an `AlternateSet` of substitute
+//!   glyphs; the caller picks an index (default 0). Used by `aalt` /
+//!   `salt` for stylistic alternates.
 //! - **LookupType 4** (Ligature Substitution) — format 1. Both the
 //!   "walk every lookup" entry point ([`GsubTable::lookup_ligature`])
 //!   and the lookup-index-specific entry point
 //!   ([`GsubTable::apply_lookup_type_4`]) are exposed; the latter is
 //!   how a feature-driven shaper dispatches `liga` / `rlig` / `dlig`.
+//! - **LookupType 5** (Contextual Substitution) — formats 1 (glyph
+//!   sequence), 2 (class-based) and 3 (coverage-based). Predecessor of
+//!   LookupType 6 minus backtrack/lookahead — the input window is the
+//!   only context. Older fonts encode contextual rules here.
 //! - **LookupType 6** (Chained Contexts Substitution) — formats 1
 //!   (glyph sequence), 2 (class-based) and 3 (coverage-based). Each
 //!   match runs the referenced sub-lookups (typically LookupType 1 or
 //!   LookupType 4) at the recorded sequence positions and returns the
 //!   rewritten glyph run via [`GsubTable::apply_lookup_type_6`].
+//! - **LookupType 8** (Reverse Chained Context Substitution) — format
+//!   1. A single-glyph substitution under
+//!      `(backtrack, input_coverage, lookahead)` context, processed in
+//!      reverse text order. Used by some Arabic fonts for isolated forms.
 //!
-//! ExtensionSubst (LookupType 7) is unwrapped transparently for all
-//! three.
+//! ExtensionSubst (LookupType 7) is unwrapped transparently for every
+//! lookup type above.
 //!
 //! In addition to the per-lookup walkers, this module decodes the
 //! **ScriptList** + **FeatureList** at parse time so callers can ask
@@ -35,9 +51,13 @@ use crate::tables::gdef::{class_def_lookup, coverage_lookup, lookup_table_slice}
 use crate::Error;
 
 const LOOKUP_SINGLE_SUBST: u16 = 1;
+const LOOKUP_MULTIPLE_SUBST: u16 = 2;
+const LOOKUP_ALTERNATE_SUBST: u16 = 3;
 const LOOKUP_LIGATURE_SUBST: u16 = 4;
+const LOOKUP_CONTEXT_SUBST: u16 = 5;
 const LOOKUP_CHAIN_CONTEXT_SUBST: u16 = 6;
 const LOOKUP_EXTENSION_SUBST: u16 = 7;
+const LOOKUP_REVERSE_CHAIN_CONTEXT_SUBST: u16 = 8;
 
 /// Maximum recursion depth for nested chained-context substitutions.
 /// Prevents pathological self-referential lookup graphs from blowing
@@ -437,6 +457,258 @@ impl<'a> GsubTable<'a> {
         self.apply_chain_context_at(lookup_index, gids, pos, 0)
     }
 
+    /// Apply GSUB LookupType 2 (Multiple Substitution) lookup
+    /// `lookup_index` to a single input glyph `gid`.
+    ///
+    /// Multiple-substitution rules expand one glyph into a sequence of
+    /// glyphs (the inverse of a ligature). Returns
+    /// `Some(substitute_sequence)` — the `Sequence` record's glyph IDs
+    /// — when the lookup's coverage covers `gid`, or `None` when no
+    /// rule applies. ExtensionSubst (LookupType 7) wrappers are
+    /// unwrapped transparently.
+    ///
+    /// The OpenType spec allows `glyphCount = 0` (deletion); we surface
+    /// such entries as `Some(Vec::new())`. Per the spec the same
+    /// `Sequence` is shared by every coverage index when only one is
+    /// listed, but each coverage index can have its own.
+    pub fn apply_lookup_type_2(&self, lookup_index: u16, gid: u16) -> Option<Vec<u16>> {
+        if self.lookup_list_off == 0 {
+            return None;
+        }
+        let lookup = lookup_table_slice(self.bytes, self.lookup_list_off, lookup_index)?;
+        if lookup.len() < 6 {
+            return None;
+        }
+        let kind = read_u16(lookup, 0).ok()?;
+        let sub_count = read_u16(lookup, 4).ok()? as usize;
+        for s in 0..sub_count {
+            let sub_off = read_u16(lookup, 6 + s * 2).ok()? as usize;
+            let sub = lookup.get(sub_off..)?;
+            let (effective_kind, effective_sub) = if kind == LOOKUP_EXTENSION_SUBST {
+                if sub.len() < 8 {
+                    continue;
+                }
+                let ext_type = read_u16(sub, 2).ok()?;
+                let ext_off = read_u32(sub, 4).ok()? as usize;
+                let ext = match sub.get(ext_off..) {
+                    Some(s) => s,
+                    None => continue,
+                };
+                (ext_type, ext)
+            } else {
+                (kind, sub)
+            };
+            if effective_kind != LOOKUP_MULTIPLE_SUBST {
+                continue;
+            }
+            if let Some(hit) = multiple_subst_lookup(effective_sub, gid) {
+                return Some(hit);
+            }
+        }
+        None
+    }
+
+    /// Apply GSUB LookupType 3 (Alternate Substitution) lookup
+    /// `lookup_index` to a single input glyph `gid`, picking
+    /// `alternate_index` from the resolved `AlternateSet`.
+    ///
+    /// Returns `Some(replacement_gid)` when the lookup's coverage
+    /// covers `gid` AND `alternate_index` is in range for that
+    /// coverage's `AlternateSet`. Returns `None` on coverage miss,
+    /// out-of-range alternate index, or non-alternate-substitution
+    /// referenced lookup. ExtensionSubst (LookupType 7) wrappers are
+    /// unwrapped transparently.
+    ///
+    /// Default callers should pass `alternate_index = 0` — the spec
+    /// does not register a per-feature variant index, so picking the
+    /// first alternate is the conventional `aalt` / `salt` default.
+    /// Stylistic-set features like `ss01..ss20` typically encode their
+    /// choice as a separate single-substitution lookup instead.
+    pub fn apply_lookup_type_3(
+        &self,
+        lookup_index: u16,
+        gid: u16,
+        alternate_index: u16,
+    ) -> Option<u16> {
+        if self.lookup_list_off == 0 {
+            return None;
+        }
+        let lookup = lookup_table_slice(self.bytes, self.lookup_list_off, lookup_index)?;
+        if lookup.len() < 6 {
+            return None;
+        }
+        let kind = read_u16(lookup, 0).ok()?;
+        let sub_count = read_u16(lookup, 4).ok()? as usize;
+        for s in 0..sub_count {
+            let sub_off = read_u16(lookup, 6 + s * 2).ok()? as usize;
+            let sub = lookup.get(sub_off..)?;
+            let (effective_kind, effective_sub) = if kind == LOOKUP_EXTENSION_SUBST {
+                if sub.len() < 8 {
+                    continue;
+                }
+                let ext_type = read_u16(sub, 2).ok()?;
+                let ext_off = read_u32(sub, 4).ok()? as usize;
+                let ext = match sub.get(ext_off..) {
+                    Some(s) => s,
+                    None => continue,
+                };
+                (ext_type, ext)
+            } else {
+                (kind, sub)
+            };
+            if effective_kind != LOOKUP_ALTERNATE_SUBST {
+                continue;
+            }
+            if let Some(hit) = alternate_subst_lookup(effective_sub, gid, alternate_index) {
+                return Some(hit);
+            }
+        }
+        None
+    }
+
+    /// Apply GSUB LookupType 5 (Contextual Substitution) lookup
+    /// `lookup_index` to the glyph run starting at `pos`.
+    ///
+    /// LookupType 5 is the predecessor of LookupType 6 minus the
+    /// backtrack and lookahead arrays — the input window IS the
+    /// context. All three sub-table formats are decoded:
+    ///
+    /// - **Format 1** — Coverage on the first input glyph + per-coverage
+    ///   `SubRuleSet` of explicit input glyph sequences plus per-rule
+    ///   `SubstLookupRecord[]`.
+    /// - **Format 2** — Coverage on the first input glyph + a single
+    ///   `ClassDef` + per-input-class `SubClassSet` whose rules are
+    ///   class sequences instead of glyph sequences.
+    /// - **Format 3** — `Coverage[]` array (one per input position) +
+    ///   a single `SubstLookupRecord[]`.
+    ///
+    /// Each match's `SubstLookupRecord` is dispatched the same way as
+    /// LookupType 6's records (LookupType 1 / 4 / 5 / 6 nested, bounded
+    /// recursion). ExtensionSubst (LookupType 7) wrappers are unwrapped
+    /// transparently. Returns `Some(rewritten_run)` on a match or
+    /// `None` when no contextual rule fires.
+    pub fn apply_lookup_type_5(
+        &self,
+        lookup_index: u16,
+        gids: &[u16],
+        pos: usize,
+    ) -> Option<Vec<u16>> {
+        self.apply_context_at(lookup_index, gids, pos, 0)
+    }
+
+    /// Apply GSUB LookupType 8 (Reverse Chained Context Substitution)
+    /// lookup `lookup_index` to the glyph at `gids[pos]`.
+    ///
+    /// LookupType 8 has only Format 1: coverage on the input glyph,
+    /// plus backtrack and lookahead `Coverage[]` arrays, plus a
+    /// `substituteGlyphIDs[]` array indexed by the input coverage
+    /// index. Unlike LookupType 6, the substitution is single-glyph
+    /// (no `SubstLookupRecord[]`) and the spec mandates reverse-text
+    /// processing of the input run — a higher-level shaper is what
+    /// honours that ordering; this entry point answers "does this rule
+    /// fire at `pos`?".
+    ///
+    /// Returns `Some(replacement_gid)` when the input coverage covers
+    /// `gids[pos]` AND every backtrack / lookahead coverage matches
+    /// the surrounding glyphs. Returns `None` otherwise.
+    /// ExtensionSubst (LookupType 7) wrappers are unwrapped
+    /// transparently.
+    pub fn apply_lookup_type_8(&self, lookup_index: u16, gids: &[u16], pos: usize) -> Option<u16> {
+        if self.lookup_list_off == 0 || pos >= gids.len() {
+            return None;
+        }
+        let lookup = lookup_table_slice(self.bytes, self.lookup_list_off, lookup_index)?;
+        if lookup.len() < 6 {
+            return None;
+        }
+        let kind = read_u16(lookup, 0).ok()?;
+        let sub_count = read_u16(lookup, 4).ok()? as usize;
+        for s in 0..sub_count {
+            let sub_off = read_u16(lookup, 6 + s * 2).ok()? as usize;
+            let sub = lookup.get(sub_off..)?;
+            let (effective_kind, effective_sub) = if kind == LOOKUP_EXTENSION_SUBST {
+                if sub.len() < 8 {
+                    continue;
+                }
+                let ext_type = read_u16(sub, 2).ok()?;
+                let ext_off = read_u32(sub, 4).ok()? as usize;
+                let ext = match sub.get(ext_off..) {
+                    Some(s) => s,
+                    None => continue,
+                };
+                (ext_type, ext)
+            } else {
+                (kind, sub)
+            };
+            if effective_kind != LOOKUP_REVERSE_CHAIN_CONTEXT_SUBST {
+                continue;
+            }
+            if let Some(hit) = reverse_chain_context_lookup(effective_sub, gids, pos) {
+                return Some(hit);
+            }
+        }
+        None
+    }
+
+    fn apply_context_at(
+        &self,
+        lookup_index: u16,
+        gids: &[u16],
+        pos: usize,
+        depth: u8,
+    ) -> Option<Vec<u16>> {
+        if depth >= MAX_NESTED_LOOKUP_DEPTH {
+            return None;
+        }
+        if pos >= gids.len() || self.lookup_list_off == 0 {
+            return None;
+        }
+        let lookup = lookup_table_slice(self.bytes, self.lookup_list_off, lookup_index)?;
+        if lookup.len() < 6 {
+            return None;
+        }
+        let kind = read_u16(lookup, 0).ok()?;
+        let sub_count = read_u16(lookup, 4).ok()? as usize;
+        for s in 0..sub_count {
+            let sub_off = read_u16(lookup, 6 + s * 2).ok()? as usize;
+            let sub = lookup.get(sub_off..)?;
+            let (effective_kind, effective_sub) = if kind == LOOKUP_EXTENSION_SUBST {
+                if sub.len() < 8 {
+                    continue;
+                }
+                let ext_type = read_u16(sub, 2).ok()?;
+                let ext_off = read_u32(sub, 4).ok()? as usize;
+                let ext = match sub.get(ext_off..) {
+                    Some(s) => s,
+                    None => continue,
+                };
+                (ext_type, ext)
+            } else {
+                (kind, sub)
+            };
+            if effective_kind != LOOKUP_CONTEXT_SUBST {
+                continue;
+            }
+            if effective_sub.len() < 2 {
+                continue;
+            }
+            let format = match read_u16(effective_sub, 0) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            let matched = match format {
+                1 => context_format1_match(effective_sub, gids, pos),
+                2 => context_format2_match(effective_sub, gids, pos),
+                3 => context_format3_match(effective_sub, gids, pos),
+                _ => None,
+            };
+            if let Some(m) = matched {
+                return self.apply_subst_records(gids, pos, &m, depth);
+            }
+        }
+        None
+    }
+
     fn apply_chain_context_at(
         &self,
         lookup_index: u16,
@@ -603,10 +875,61 @@ impl<'a> GsubTable<'a> {
                         }
                     }
                 }
+                LOOKUP_CONTEXT_SUBST => {
+                    if let Some(rewritten) =
+                        self.apply_context_at(rec.lookup_index, &out, phys, depth + 1)
+                    {
+                        let old_len = out.len();
+                        out = rewritten;
+                        let delta = out.len() as isize - old_len as isize;
+                        if delta != 0 {
+                            for slot in logical_to_phys.iter_mut().skip(seq_idx + 1) {
+                                if let Some(p) = *slot {
+                                    let np = p as isize + delta;
+                                    if np < phys as isize {
+                                        *slot = None;
+                                    } else {
+                                        *slot = Some(np as usize);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                LOOKUP_MULTIPLE_SUBST => {
+                    if let Some(seq) = self.apply_lookup_type_2(rec.lookup_index, out[phys]) {
+                        let inserted = seq.len();
+                        out.splice(phys..phys + 1, seq);
+                        // Length delta = inserted - 1.
+                        let delta = inserted as isize - 1;
+                        if delta != 0 {
+                            for slot in logical_to_phys.iter_mut().skip(seq_idx + 1) {
+                                if let Some(p) = *slot {
+                                    let np = p as isize + delta;
+                                    if np < phys as isize {
+                                        *slot = None;
+                                    } else {
+                                        *slot = Some(np as usize);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                LOOKUP_ALTERNATE_SUBST => {
+                    // Default to alternate index 0 — the spec doesn't
+                    // register a per-feature variant index for nested
+                    // lookups.
+                    if let Some(replacement) =
+                        self.apply_lookup_type_3(rec.lookup_index, out[phys], 0)
+                    {
+                        out[phys] = replacement;
+                    }
+                }
                 _ => {
-                    // Other nested lookup types (2/3/5/8) not yet
-                    // implemented; skip silently rather than abort the
-                    // whole record.
+                    // Other nested lookup types (8 reverse-chain) are
+                    // not used as nested sub-lookups by the spec; skip
+                    // silently rather than abort the whole record.
                 }
             }
         }
@@ -782,6 +1105,167 @@ fn ligature_subst_lookup(sub: &[u8], glyphs: &[u16]) -> Option<(u16, usize)> {
         }
     }
     None
+}
+
+/// Walk a MultipleSubstFormat1 sub-table looking for a Sequence record.
+///
+/// Layout (per OpenType §"Multiple Substitution Subtable"):
+///   u16 format = 1
+///   Offset16 coverageOffset
+///   u16 sequenceCount
+///   Offset16 sequenceOffsets[sequenceCount]
+///
+///   Sequence { u16 glyphCount; u16 substituteGlyphIDs[glyphCount]; }
+///
+/// All offsets are relative to the start of the sub-table.
+fn multiple_subst_lookup(sub: &[u8], gid: u16) -> Option<Vec<u16>> {
+    if sub.len() < 6 {
+        return None;
+    }
+    let format = read_u16(sub, 0).ok()?;
+    if format != 1 {
+        return None;
+    }
+    let coverage_off = read_u16(sub, 2).ok()? as usize;
+    let coverage = sub.get(coverage_off..)?;
+    let cov_idx = coverage_lookup(coverage, gid)? as usize;
+    let seq_count = read_u16(sub, 4).ok()? as usize;
+    if cov_idx >= seq_count {
+        return None;
+    }
+    let seq_off = read_u16(sub, 6 + cov_idx * 2).ok()? as usize;
+    let seq = sub.get(seq_off..)?;
+    if seq.len() < 2 {
+        return None;
+    }
+    let glyph_count = read_u16(seq, 0).ok()? as usize;
+    if seq.len() < 2 + glyph_count * 2 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(glyph_count);
+    for i in 0..glyph_count {
+        out.push(read_u16(seq, 2 + i * 2).ok()?);
+    }
+    Some(out)
+}
+
+/// Walk an AlternateSubstFormat1 sub-table looking for an alternate.
+///
+/// Layout (per OpenType §"Alternate Substitution Subtable"):
+///   u16 format = 1
+///   Offset16 coverageOffset
+///   u16 alternateSetCount
+///   Offset16 alternateSetOffsets[alternateSetCount]
+///
+///   AlternateSet { u16 glyphCount; u16 alternateGlyphIDs[glyphCount]; }
+///
+/// All offsets are relative to the start of the sub-table.
+fn alternate_subst_lookup(sub: &[u8], gid: u16, alternate_index: u16) -> Option<u16> {
+    if sub.len() < 6 {
+        return None;
+    }
+    let format = read_u16(sub, 0).ok()?;
+    if format != 1 {
+        return None;
+    }
+    let coverage_off = read_u16(sub, 2).ok()? as usize;
+    let coverage = sub.get(coverage_off..)?;
+    let cov_idx = coverage_lookup(coverage, gid)? as usize;
+    let alt_count = read_u16(sub, 4).ok()? as usize;
+    if cov_idx >= alt_count {
+        return None;
+    }
+    let alt_off = read_u16(sub, 6 + cov_idx * 2).ok()? as usize;
+    let alt_set = sub.get(alt_off..)?;
+    if alt_set.len() < 2 {
+        return None;
+    }
+    let glyph_count = read_u16(alt_set, 0).ok()? as usize;
+    let idx = alternate_index as usize;
+    if idx >= glyph_count {
+        return None;
+    }
+    if alt_set.len() < 2 + (idx + 1) * 2 {
+        return None;
+    }
+    read_u16(alt_set, 2 + idx * 2).ok()
+}
+
+/// Walk a ReverseChainSingleSubstFormat1 sub-table.
+///
+/// Layout (per OpenType §"Reverse Chaining Contextual Single
+/// Substitution Subtable"):
+///   u16 format = 1
+///   Offset16 coverageOffset                  (input glyph coverage)
+///   u16 backtrackGlyphCount
+///   Offset16 backtrackCoverageOffsets[backtrackGlyphCount]
+///   u16 lookaheadGlyphCount
+///   Offset16 lookaheadCoverageOffsets[lookaheadGlyphCount]
+///   u16 glyphCount                           (= input coverage size)
+///   u16 substituteGlyphIDs[glyphCount]
+///
+/// Backtrack coverages are listed in reverse-text order
+/// (`backtrackCoverageOffsets[0]` covers the glyph immediately before
+/// `gids[pos]`). Substitute glyph at `substituteGlyphIDs[cov_idx]`
+/// where `cov_idx` is the input coverage index of `gids[pos]`.
+fn reverse_chain_context_lookup(sub: &[u8], gids: &[u16], pos: usize) -> Option<u16> {
+    if sub.len() < 6 {
+        return None;
+    }
+    let format = read_u16(sub, 0).ok()?;
+    if format != 1 {
+        return None;
+    }
+    let coverage_off = read_u16(sub, 2).ok()? as usize;
+    let coverage = sub.get(coverage_off..)?;
+    let cov_idx = coverage_lookup(coverage, gids[pos])? as usize;
+    let mut cur = 4usize;
+    if sub.len() < cur + 2 {
+        return None;
+    }
+    let bt_count = read_u16(sub, cur).ok()? as usize;
+    cur += 2;
+    if sub.len() < cur + bt_count * 2 {
+        return None;
+    }
+    if pos < bt_count {
+        return None;
+    }
+    for i in 0..bt_count {
+        let cov_off = read_u16(sub, cur + i * 2).ok()? as usize;
+        let cov = sub.get(cov_off..)?;
+        coverage_lookup(cov, gids[pos - 1 - i])?;
+    }
+    cur += bt_count * 2;
+    if sub.len() < cur + 2 {
+        return None;
+    }
+    let la_count = read_u16(sub, cur).ok()? as usize;
+    cur += 2;
+    if sub.len() < cur + la_count * 2 {
+        return None;
+    }
+    if pos + 1 + la_count > gids.len() {
+        return None;
+    }
+    for i in 0..la_count {
+        let cov_off = read_u16(sub, cur + i * 2).ok()? as usize;
+        let cov = sub.get(cov_off..)?;
+        coverage_lookup(cov, gids[pos + 1 + i])?;
+    }
+    cur += la_count * 2;
+    if sub.len() < cur + 2 {
+        return None;
+    }
+    let glyph_count = read_u16(sub, cur).ok()? as usize;
+    cur += 2;
+    if cov_idx >= glyph_count {
+        return None;
+    }
+    if sub.len() < cur + (cov_idx + 1) * 2 {
+        return None;
+    }
+    read_u16(sub, cur + cov_idx * 2).ok()
 }
 
 /// Outcome of a chained-context match: how many input glyphs the rule
@@ -1202,6 +1686,220 @@ fn chain_context_format3_match(sub: &[u8], gids: &[u16], pos: usize) -> Option<C
     let records = read_subst_lookup_records(sub, cur, subst_count)?;
     Some(ChainMatch {
         input_len: in_count,
+        records,
+    })
+}
+
+/// Match a SequenceContextFormat1 sub-table (LookupType 5 Format 1)
+/// against `gids[pos..]`.
+///
+/// Layout (per OpenType §"Sequence Context Format 1: simple glyph
+/// contexts"):
+///   u16 format = 1
+///   Offset16 coverageOffset                  (input[0] coverage)
+///   u16 subRuleSetCount
+///   Offset16 subRuleSetOffsets[subRuleSetCount]
+///
+///   SubRuleSet { u16 subRuleCount; Offset16 subRuleOffsets[]; }
+///   SubRule    { u16 inputGlyphCount; u16 inputSequence[inputGlyphCount-1];
+///                u16 substCount;       SubstLookupRecord substRecords[]; }
+///
+/// All offsets are relative to the start of the sub-table, then to
+/// each SubRuleSet, in turn.
+fn context_format1_match(sub: &[u8], gids: &[u16], pos: usize) -> Option<ChainMatch> {
+    if sub.len() < 6 {
+        return None;
+    }
+    let coverage_off = read_u16(sub, 2).ok()? as usize;
+    let coverage = sub.get(coverage_off..)?;
+    let cov_idx = coverage_lookup(coverage, gids[pos])? as usize;
+    let set_count = read_u16(sub, 4).ok()? as usize;
+    if cov_idx >= set_count {
+        return None;
+    }
+    let set_off = read_u16(sub, 6 + cov_idx * 2).ok()? as usize;
+    let set = sub.get(set_off..)?;
+    if set.len() < 2 {
+        return None;
+    }
+    let rule_count = read_u16(set, 0).ok()? as usize;
+    for r in 0..rule_count {
+        let rule_off = read_u16(set, 2 + r * 2).ok()? as usize;
+        let rule = match set.get(rule_off..) {
+            Some(b) => b,
+            None => continue,
+        };
+        if let Some(m) = context_format1_rule_match(rule, gids, pos) {
+            return Some(m);
+        }
+    }
+    None
+}
+
+fn context_format1_rule_match(rule: &[u8], gids: &[u16], pos: usize) -> Option<ChainMatch> {
+    let mut cur = 0usize;
+    if rule.len() < cur + 2 {
+        return None;
+    }
+    let in_count = read_u16(rule, cur).ok()? as usize;
+    if in_count == 0 {
+        return None;
+    }
+    cur += 2;
+    let in_extra = in_count - 1;
+    if rule.len() < cur + in_extra * 2 {
+        return None;
+    }
+    if pos + in_count > gids.len() {
+        return None;
+    }
+    for i in 0..in_extra {
+        let want = read_u16(rule, cur + i * 2).ok()?;
+        if gids[pos + 1 + i] != want {
+            return None;
+        }
+    }
+    cur += in_extra * 2;
+    if rule.len() < cur + 2 {
+        return None;
+    }
+    let subst_count = read_u16(rule, cur).ok()? as usize;
+    cur += 2;
+    let records = read_subst_lookup_records(rule, cur, subst_count)?;
+    Some(ChainMatch {
+        input_len: in_count,
+        records,
+    })
+}
+
+/// Match a SequenceContextFormat2 sub-table (LookupType 5 Format 2)
+/// against `gids[pos..]`.
+///
+/// Layout:
+///   u16 format = 2
+///   Offset16 coverageOffset
+///   Offset16 classDefOffset
+///   u16 subClassSetCount
+///   Offset16 subClassSetOffsets[subClassSetCount]
+///
+///   SubClassSet  { u16 subClassRuleCount; Offset16 subClassRuleOffsets[]; }
+///   SubClassRule { u16 glyphCount; u16 inputSequence[glyphCount-1]; (class IDs)
+///                  u16 substCount; SubstLookupRecord substRecords[]; }
+fn context_format2_match(sub: &[u8], gids: &[u16], pos: usize) -> Option<ChainMatch> {
+    if sub.len() < 8 {
+        return None;
+    }
+    let coverage_off = read_u16(sub, 2).ok()? as usize;
+    let cd_off = read_u16(sub, 4).ok()? as usize;
+    let set_count = read_u16(sub, 6).ok()? as usize;
+    let coverage = sub.get(coverage_off..)?;
+    coverage_lookup(coverage, gids[pos])?;
+    let cd = sub.get(cd_off..)?;
+    let class0 = class_def_lookup(cd, gids[pos]).unwrap_or(0);
+    if class0 as usize >= set_count {
+        return None;
+    }
+    let set_off = read_u16(sub, 8 + class0 as usize * 2).ok()? as usize;
+    if set_off == 0 {
+        return None;
+    }
+    let set = sub.get(set_off..)?;
+    if set.len() < 2 {
+        return None;
+    }
+    let rule_count = read_u16(set, 0).ok()? as usize;
+    for r in 0..rule_count {
+        let rule_off = read_u16(set, 2 + r * 2).ok()? as usize;
+        let rule = match set.get(rule_off..) {
+            Some(b) => b,
+            None => continue,
+        };
+        if let Some(m) = context_format2_rule_match(rule, gids, pos, cd) {
+            return Some(m);
+        }
+    }
+    None
+}
+
+fn context_format2_rule_match(
+    rule: &[u8],
+    gids: &[u16],
+    pos: usize,
+    cd: &[u8],
+) -> Option<ChainMatch> {
+    let mut cur = 0usize;
+    if rule.len() < cur + 2 {
+        return None;
+    }
+    let in_count = read_u16(rule, cur).ok()? as usize;
+    if in_count == 0 {
+        return None;
+    }
+    cur += 2;
+    let in_extra = in_count - 1;
+    if rule.len() < cur + in_extra * 2 {
+        return None;
+    }
+    if pos + in_count > gids.len() {
+        return None;
+    }
+    // input[0] class is implicit (the caller-picked set selects it).
+    for i in 0..in_extra {
+        let want = read_u16(rule, cur + i * 2).ok()?;
+        let got = class_def_lookup(cd, gids[pos + 1 + i]).unwrap_or(0);
+        if want != got {
+            return None;
+        }
+    }
+    cur += in_extra * 2;
+    if rule.len() < cur + 2 {
+        return None;
+    }
+    let subst_count = read_u16(rule, cur).ok()? as usize;
+    cur += 2;
+    let records = read_subst_lookup_records(rule, cur, subst_count)?;
+    Some(ChainMatch {
+        input_len: in_count,
+        records,
+    })
+}
+
+/// Match a SequenceContextFormat3 sub-table (LookupType 5 Format 3)
+/// against `gids[pos..]`.
+///
+/// Layout:
+///   u16 format = 3
+///   u16 glyphCount
+///   u16 substCount
+///   Offset16 coverageOffsets[glyphCount]
+///   SubstLookupRecord substRecords[substCount]
+///
+/// All coverage offsets are relative to the start of the sub-table.
+fn context_format3_match(sub: &[u8], gids: &[u16], pos: usize) -> Option<ChainMatch> {
+    if sub.len() < 6 {
+        return None;
+    }
+    let glyph_count = read_u16(sub, 2).ok()? as usize;
+    let subst_count = read_u16(sub, 4).ok()? as usize;
+    if glyph_count == 0 {
+        return None;
+    }
+    let mut cur = 6usize;
+    if sub.len() < cur + glyph_count * 2 {
+        return None;
+    }
+    if pos + glyph_count > gids.len() {
+        return None;
+    }
+    for i in 0..glyph_count {
+        let cov_off = read_u16(sub, cur + i * 2).ok()? as usize;
+        let cov = sub.get(cov_off..)?;
+        coverage_lookup(cov, gids[pos + i])?;
+    }
+    cur += glyph_count * 2;
+    let records = read_subst_lookup_records(sub, cur, subst_count)?;
+    Some(ChainMatch {
+        input_len: glyph_count,
         records,
     })
 }
@@ -1964,5 +2662,511 @@ mod tests {
         let g = GsubTable::parse(&bytes).unwrap();
         // Replace gid 1 (class 2) with gid 2 (class 0) in backtrack.
         assert_eq!(g.apply_lookup_type_6(1, &[2, 10, 99], 1), None);
+    }
+
+    /// Wrap a single sub-table in a Lookup record.
+    fn wrap_lookup_helper(lookup_type: u16, sub: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&lookup_type.to_be_bytes());
+        out.extend_from_slice(&0u16.to_be_bytes()); // flag
+        out.extend_from_slice(&1u16.to_be_bytes()); // subTableCount
+        out.extend_from_slice(&8u16.to_be_bytes()); // subTableOffset = 8
+        out.extend_from_slice(sub);
+        out
+    }
+
+    /// Build a GSUB blob that holds a single lookup at index 0 of the
+    /// given lookup_type, wrapping the supplied sub-table bytes.
+    fn build_singleton_gsub(lookup_type: u16, sub: &[u8]) -> Vec<u8> {
+        let lookup = wrap_lookup_helper(lookup_type, sub);
+        let lookup_list_header_len = 2 + 2; // count + 1 offset
+        let mut lookup_list = Vec::new();
+        lookup_list.extend_from_slice(&1u16.to_be_bytes());
+        lookup_list.extend_from_slice(&(lookup_list_header_len as u16).to_be_bytes());
+        lookup_list.extend_from_slice(&lookup);
+
+        let mut gsub = Vec::new();
+        gsub.extend_from_slice(&1u16.to_be_bytes()); // major
+        gsub.extend_from_slice(&0u16.to_be_bytes()); // minor
+        gsub.extend_from_slice(&0u16.to_be_bytes()); // scriptList
+        gsub.extend_from_slice(&0u16.to_be_bytes()); // featureList
+        gsub.extend_from_slice(&10u16.to_be_bytes()); // lookupList
+        gsub.extend_from_slice(&lookup_list);
+        gsub
+    }
+
+    // ----- LookupType 2: Multiple Substitution -----
+
+    /// MultipleSubstFormat1 with one Sequence: gid 7 → [10, 11, 12].
+    fn build_mult_subst_sub() -> Vec<u8> {
+        // Sequence: glyphCount=3, [10, 11, 12]
+        let mut seq = Vec::new();
+        seq.extend_from_slice(&3u16.to_be_bytes());
+        seq.extend_from_slice(&10u16.to_be_bytes());
+        seq.extend_from_slice(&11u16.to_be_bytes());
+        seq.extend_from_slice(&12u16.to_be_bytes());
+
+        // Coverage Format 1 covering gid 7.
+        let mut cov = Vec::new();
+        cov.extend_from_slice(&1u16.to_be_bytes());
+        cov.extend_from_slice(&1u16.to_be_bytes());
+        cov.extend_from_slice(&7u16.to_be_bytes());
+
+        // Header: u16 fmt(=1), Off16 cov, u16 seqCount, Off16 seqOffsets[1]
+        let header_len = 8u16;
+        let cov_off = header_len;
+        let seq_off = cov_off + cov.len() as u16;
+
+        let mut sub = Vec::new();
+        sub.extend_from_slice(&1u16.to_be_bytes()); // format
+        sub.extend_from_slice(&cov_off.to_be_bytes());
+        sub.extend_from_slice(&1u16.to_be_bytes()); // seqCount
+        sub.extend_from_slice(&seq_off.to_be_bytes());
+        sub.extend_from_slice(&cov);
+        sub.extend_from_slice(&seq);
+        sub
+    }
+
+    #[test]
+    fn lookup_type_2_expands_one_glyph_into_sequence() {
+        let bytes = build_singleton_gsub(LOOKUP_MULTIPLE_SUBST, &build_mult_subst_sub());
+        let g = GsubTable::parse(&bytes).unwrap();
+        assert_eq!(g.apply_lookup_type_2(0, 7), Some(vec![10, 11, 12]));
+    }
+
+    #[test]
+    fn lookup_type_2_returns_none_off_coverage() {
+        let bytes = build_singleton_gsub(LOOKUP_MULTIPLE_SUBST, &build_mult_subst_sub());
+        let g = GsubTable::parse(&bytes).unwrap();
+        assert_eq!(g.apply_lookup_type_2(0, 99), None);
+        // Wrong lookup index.
+        assert_eq!(g.apply_lookup_type_2(99, 7), None);
+        // Wrong lookup type.
+        let single_bytes = build_singleton_gsub(LOOKUP_SINGLE_SUBST, &build_mult_subst_sub());
+        let g2 = GsubTable::parse(&single_bytes).unwrap();
+        assert_eq!(g2.apply_lookup_type_2(0, 7), None);
+    }
+
+    #[test]
+    fn lookup_type_2_zero_glyph_count_means_deletion() {
+        // Build a Sequence record with glyphCount = 0 (legal per spec).
+        let mut seq = Vec::new();
+        seq.extend_from_slice(&0u16.to_be_bytes());
+        let mut cov = Vec::new();
+        cov.extend_from_slice(&1u16.to_be_bytes());
+        cov.extend_from_slice(&1u16.to_be_bytes());
+        cov.extend_from_slice(&7u16.to_be_bytes());
+        let header_len = 8u16;
+        let cov_off = header_len;
+        let seq_off = cov_off + cov.len() as u16;
+        let mut sub = Vec::new();
+        sub.extend_from_slice(&1u16.to_be_bytes());
+        sub.extend_from_slice(&cov_off.to_be_bytes());
+        sub.extend_from_slice(&1u16.to_be_bytes());
+        sub.extend_from_slice(&seq_off.to_be_bytes());
+        sub.extend_from_slice(&cov);
+        sub.extend_from_slice(&seq);
+        let bytes = build_singleton_gsub(LOOKUP_MULTIPLE_SUBST, &sub);
+        let g = GsubTable::parse(&bytes).unwrap();
+        assert_eq!(g.apply_lookup_type_2(0, 7), Some(Vec::new()));
+    }
+
+    // ----- LookupType 3: Alternate Substitution -----
+
+    /// AlternateSubstFormat1 with one AlternateSet: gid 5 → [50, 51, 52].
+    fn build_alt_subst_sub() -> Vec<u8> {
+        let mut alt_set = Vec::new();
+        alt_set.extend_from_slice(&3u16.to_be_bytes()); // glyphCount
+        alt_set.extend_from_slice(&50u16.to_be_bytes());
+        alt_set.extend_from_slice(&51u16.to_be_bytes());
+        alt_set.extend_from_slice(&52u16.to_be_bytes());
+
+        let mut cov = Vec::new();
+        cov.extend_from_slice(&1u16.to_be_bytes());
+        cov.extend_from_slice(&1u16.to_be_bytes());
+        cov.extend_from_slice(&5u16.to_be_bytes());
+
+        let header_len = 8u16;
+        let cov_off = header_len;
+        let alt_off = cov_off + cov.len() as u16;
+
+        let mut sub = Vec::new();
+        sub.extend_from_slice(&1u16.to_be_bytes()); // format
+        sub.extend_from_slice(&cov_off.to_be_bytes());
+        sub.extend_from_slice(&1u16.to_be_bytes()); // altCount
+        sub.extend_from_slice(&alt_off.to_be_bytes());
+        sub.extend_from_slice(&cov);
+        sub.extend_from_slice(&alt_set);
+        sub
+    }
+
+    #[test]
+    fn lookup_type_3_picks_default_alternate_zero() {
+        let bytes = build_singleton_gsub(LOOKUP_ALTERNATE_SUBST, &build_alt_subst_sub());
+        let g = GsubTable::parse(&bytes).unwrap();
+        assert_eq!(g.apply_lookup_type_3(0, 5, 0), Some(50));
+    }
+
+    #[test]
+    fn lookup_type_3_picks_indexed_alternates() {
+        let bytes = build_singleton_gsub(LOOKUP_ALTERNATE_SUBST, &build_alt_subst_sub());
+        let g = GsubTable::parse(&bytes).unwrap();
+        assert_eq!(g.apply_lookup_type_3(0, 5, 1), Some(51));
+        assert_eq!(g.apply_lookup_type_3(0, 5, 2), Some(52));
+    }
+
+    #[test]
+    fn lookup_type_3_out_of_range_alternate_returns_none() {
+        let bytes = build_singleton_gsub(LOOKUP_ALTERNATE_SUBST, &build_alt_subst_sub());
+        let g = GsubTable::parse(&bytes).unwrap();
+        // AlternateSet has 3 entries; index 3 is out of range.
+        assert_eq!(g.apply_lookup_type_3(0, 5, 3), None);
+        // Off-coverage glyph.
+        assert_eq!(g.apply_lookup_type_3(0, 99, 0), None);
+        // Wrong lookup type silently returns None.
+        let other = build_singleton_gsub(LOOKUP_SINGLE_SUBST, &build_alt_subst_sub());
+        let g2 = GsubTable::parse(&other).unwrap();
+        assert_eq!(g2.apply_lookup_type_3(0, 5, 0), None);
+    }
+
+    // ----- LookupType 5: Contextual Substitution -----
+
+    /// Build a SingleSubst Format-1 lookup body: covers [10], delta = +100.
+    fn build_singlesubst_for_10_plus_100() -> Vec<u8> {
+        let mut cov = Vec::new();
+        cov.extend_from_slice(&1u16.to_be_bytes());
+        cov.extend_from_slice(&1u16.to_be_bytes());
+        cov.extend_from_slice(&10u16.to_be_bytes());
+        let mut sub = Vec::new();
+        sub.extend_from_slice(&1u16.to_be_bytes()); // format
+        sub.extend_from_slice(&6u16.to_be_bytes()); // coverageOffset
+        sub.extend_from_slice(&100i16.to_be_bytes()); // delta
+        sub.extend_from_slice(&cov);
+        sub
+    }
+
+    /// Build a SequenceContextFormat1 sub-table: at gid 10 with input
+    /// run [10] (count=1), invoke single-subst lookup 0.
+    fn build_context_format1_sub() -> Vec<u8> {
+        // Coverage covering gid 10.
+        let mut cov = Vec::new();
+        cov.extend_from_slice(&1u16.to_be_bytes());
+        cov.extend_from_slice(&1u16.to_be_bytes());
+        cov.extend_from_slice(&10u16.to_be_bytes());
+
+        // Rule: inputGlyphCount=1, no extras, substCount=1, (seq=0,
+        // lookup=0)
+        let mut rule = Vec::new();
+        rule.extend_from_slice(&1u16.to_be_bytes()); // inputGlyphCount
+        rule.extend_from_slice(&1u16.to_be_bytes()); // substCount
+        rule.extend_from_slice(&0u16.to_be_bytes()); // seqIndex
+        rule.extend_from_slice(&0u16.to_be_bytes()); // lookupIndex
+
+        // SubRuleSet: count=1, offset to rule.
+        let rule_set_header = 4u16; // count + 1 offset
+        let mut rule_set = Vec::new();
+        rule_set.extend_from_slice(&1u16.to_be_bytes());
+        rule_set.extend_from_slice(&rule_set_header.to_be_bytes());
+        rule_set.extend_from_slice(&rule);
+
+        // Header: u16 fmt(=1), Off16 cov, u16 setCount, Off16 setOffsets[1]
+        let header_len = 8u16;
+        let cov_off = header_len;
+        let set_off = cov_off + cov.len() as u16;
+        let mut sub = Vec::new();
+        sub.extend_from_slice(&1u16.to_be_bytes()); // format
+        sub.extend_from_slice(&cov_off.to_be_bytes());
+        sub.extend_from_slice(&1u16.to_be_bytes()); // setCount
+        sub.extend_from_slice(&set_off.to_be_bytes());
+        sub.extend_from_slice(&cov);
+        sub.extend_from_slice(&rule_set);
+        sub
+    }
+
+    fn build_context_lookup_gsub(context_format_sub: Vec<u8>) -> Vec<u8> {
+        let lookup0 = wrap_lookup_helper(LOOKUP_SINGLE_SUBST, &build_singlesubst_for_10_plus_100());
+        let lookup1 = wrap_lookup_helper(LOOKUP_CONTEXT_SUBST, &context_format_sub);
+        let lookup_list_header = 2 + 2 * 2;
+        let mut lookup_list = Vec::new();
+        lookup_list.extend_from_slice(&2u16.to_be_bytes());
+        let mut running = lookup_list_header as u16;
+        lookup_list.extend_from_slice(&running.to_be_bytes());
+        running += lookup0.len() as u16;
+        lookup_list.extend_from_slice(&running.to_be_bytes());
+        lookup_list.extend_from_slice(&lookup0);
+        lookup_list.extend_from_slice(&lookup1);
+
+        let mut gsub = Vec::new();
+        gsub.extend_from_slice(&1u16.to_be_bytes());
+        gsub.extend_from_slice(&0u16.to_be_bytes());
+        gsub.extend_from_slice(&0u16.to_be_bytes());
+        gsub.extend_from_slice(&0u16.to_be_bytes());
+        gsub.extend_from_slice(&10u16.to_be_bytes());
+        gsub.extend_from_slice(&lookup_list);
+        gsub
+    }
+
+    #[test]
+    fn lookup_type_5_format_1_simple_glyph_context() {
+        let bytes = build_context_lookup_gsub(build_context_format1_sub());
+        let g = GsubTable::parse(&bytes).unwrap();
+        // Run [10] at pos=0: input matches; SingleSubst delta+100.
+        let out = g.apply_lookup_type_5(1, &[10], 0).unwrap();
+        assert_eq!(out, vec![110]);
+        // Off-coverage glyph → no match.
+        assert_eq!(g.apply_lookup_type_5(1, &[11], 0), None);
+        // Out-of-range lookup → no match.
+        assert_eq!(g.apply_lookup_type_5(99, &[10], 0), None);
+    }
+
+    /// SequenceContextFormat3: glyphCount=1 covering gid 10, invoke
+    /// single-subst lookup 0.
+    fn build_context_format3_sub() -> Vec<u8> {
+        let mut cov_in = Vec::new();
+        cov_in.extend_from_slice(&1u16.to_be_bytes());
+        cov_in.extend_from_slice(&1u16.to_be_bytes());
+        cov_in.extend_from_slice(&10u16.to_be_bytes());
+
+        // Header: u16 fmt(=3), u16 glyphCount, u16 substCount,
+        // Off16 covOffsets[1], SubstLookupRecord rec(=4 bytes)
+        let header_len: u16 = 2 + 2 + 2 + 2 + 4;
+        let cov_off = header_len;
+        let mut sub = Vec::new();
+        sub.extend_from_slice(&3u16.to_be_bytes()); // format
+        sub.extend_from_slice(&1u16.to_be_bytes()); // glyphCount
+        sub.extend_from_slice(&1u16.to_be_bytes()); // substCount
+        sub.extend_from_slice(&cov_off.to_be_bytes());
+        sub.extend_from_slice(&0u16.to_be_bytes()); // seqIndex
+        sub.extend_from_slice(&0u16.to_be_bytes()); // lookupIndex
+        sub.extend_from_slice(&cov_in);
+        sub
+    }
+
+    #[test]
+    fn lookup_type_5_format_3_coverage_based_context() {
+        let bytes = build_context_lookup_gsub(build_context_format3_sub());
+        let g = GsubTable::parse(&bytes).unwrap();
+        let out = g.apply_lookup_type_5(1, &[10], 0).unwrap();
+        assert_eq!(out, vec![110]);
+        // Coverage misses gid 11.
+        assert_eq!(g.apply_lookup_type_5(1, &[11], 0), None);
+    }
+
+    /// SequenceContextFormat2: ClassDef maps gid 10 → class 1,
+    /// rule under class-1 set runs single-subst lookup 0.
+    fn build_context_format2_sub() -> Vec<u8> {
+        let mut cov_in = Vec::new();
+        cov_in.extend_from_slice(&1u16.to_be_bytes());
+        cov_in.extend_from_slice(&1u16.to_be_bytes());
+        cov_in.extend_from_slice(&10u16.to_be_bytes());
+
+        // ClassDef format 1: startGlyph=10, count=1, classes=[1]
+        let mut cd = Vec::new();
+        cd.extend_from_slice(&1u16.to_be_bytes());
+        cd.extend_from_slice(&10u16.to_be_bytes());
+        cd.extend_from_slice(&1u16.to_be_bytes());
+        cd.extend_from_slice(&1u16.to_be_bytes());
+
+        // Rule: glyphCount=1, no extras, substCount=1, (seq=0, lookup=0)
+        let mut rule = Vec::new();
+        rule.extend_from_slice(&1u16.to_be_bytes());
+        rule.extend_from_slice(&1u16.to_be_bytes());
+        rule.extend_from_slice(&0u16.to_be_bytes());
+        rule.extend_from_slice(&0u16.to_be_bytes());
+
+        let rule_set_header = 4u16;
+        let mut rule_set = Vec::new();
+        rule_set.extend_from_slice(&1u16.to_be_bytes());
+        rule_set.extend_from_slice(&rule_set_header.to_be_bytes());
+        rule_set.extend_from_slice(&rule);
+
+        // Header: u16 fmt(=2), Off16 cov, Off16 cd, u16 setCount,
+        // Off16 setOffsets[2] (class 0 + class 1)
+        let header_len: u16 = 2 + 2 + 2 + 2 + 4;
+        let cov_off = header_len;
+        let cd_off = cov_off + cov_in.len() as u16;
+        let class1_set_off = cd_off + cd.len() as u16;
+
+        let mut sub = Vec::new();
+        sub.extend_from_slice(&2u16.to_be_bytes()); // format
+        sub.extend_from_slice(&cov_off.to_be_bytes());
+        sub.extend_from_slice(&cd_off.to_be_bytes());
+        sub.extend_from_slice(&2u16.to_be_bytes()); // setCount
+        sub.extend_from_slice(&0u16.to_be_bytes()); // class 0 set offset
+        sub.extend_from_slice(&class1_set_off.to_be_bytes());
+        sub.extend_from_slice(&cov_in);
+        sub.extend_from_slice(&cd);
+        sub.extend_from_slice(&rule_set);
+        sub
+    }
+
+    #[test]
+    fn lookup_type_5_format_2_class_based_context() {
+        let bytes = build_context_lookup_gsub(build_context_format2_sub());
+        let g = GsubTable::parse(&bytes).unwrap();
+        let out = g.apply_lookup_type_5(1, &[10], 0).unwrap();
+        assert_eq!(out, vec![110]);
+        // gid 11 isn't covered.
+        assert_eq!(g.apply_lookup_type_5(1, &[11], 0), None);
+    }
+
+    // ----- LookupType 8: Reverse Chained Context Substitution -----
+
+    /// ReverseChainSingleSubstFormat1:
+    /// - input coverage covers [10] → coverage index 0
+    /// - backtrack[0] covers [1] (immediately preceding glyph)
+    /// - lookahead[0] covers [99]
+    /// - substituteGlyphIDs[0] = 200
+    fn build_reverse_chain_sub() -> Vec<u8> {
+        let mut cov_in = Vec::new();
+        cov_in.extend_from_slice(&1u16.to_be_bytes());
+        cov_in.extend_from_slice(&1u16.to_be_bytes());
+        cov_in.extend_from_slice(&10u16.to_be_bytes());
+        let mut cov_bt = Vec::new();
+        cov_bt.extend_from_slice(&1u16.to_be_bytes());
+        cov_bt.extend_from_slice(&1u16.to_be_bytes());
+        cov_bt.extend_from_slice(&1u16.to_be_bytes());
+        let mut cov_la = Vec::new();
+        cov_la.extend_from_slice(&1u16.to_be_bytes());
+        cov_la.extend_from_slice(&1u16.to_be_bytes());
+        cov_la.extend_from_slice(&99u16.to_be_bytes());
+
+        // Header: u16 fmt(=1), Off16 cov, u16 btCount, Off16 btCov[1],
+        //         u16 laCount, Off16 laCov[1], u16 glyphCount, u16 sub[1]
+        // size = 2 + 2 + 2+2 + 2+2 + 2+2 = 16
+        let header_len: u16 = 2 + 2 + 2 + 2 + 2 + 2 + 2 + 2;
+        let cov_off = header_len;
+        let bt_off = cov_off + cov_in.len() as u16;
+        let la_off = bt_off + cov_bt.len() as u16;
+
+        let mut sub = Vec::new();
+        sub.extend_from_slice(&1u16.to_be_bytes()); // format
+        sub.extend_from_slice(&cov_off.to_be_bytes());
+        sub.extend_from_slice(&1u16.to_be_bytes()); // btCount
+        sub.extend_from_slice(&bt_off.to_be_bytes());
+        sub.extend_from_slice(&1u16.to_be_bytes()); // laCount
+        sub.extend_from_slice(&la_off.to_be_bytes());
+        sub.extend_from_slice(&1u16.to_be_bytes()); // glyphCount
+        sub.extend_from_slice(&200u16.to_be_bytes()); // substituteGlyphIDs[0]
+        sub.extend_from_slice(&cov_in);
+        sub.extend_from_slice(&cov_bt);
+        sub.extend_from_slice(&cov_la);
+        sub
+    }
+
+    #[test]
+    fn lookup_type_8_reverse_chain_substitutes_under_context() {
+        let bytes = build_singleton_gsub(
+            LOOKUP_REVERSE_CHAIN_CONTEXT_SUBST,
+            &build_reverse_chain_sub(),
+        );
+        let g = GsubTable::parse(&bytes).unwrap();
+        // Run [1, 10, 99] at pos=1.
+        assert_eq!(g.apply_lookup_type_8(0, &[1, 10, 99], 1), Some(200));
+    }
+
+    #[test]
+    fn lookup_type_8_no_match_when_backtrack_or_lookahead_misses() {
+        let bytes = build_singleton_gsub(
+            LOOKUP_REVERSE_CHAIN_CONTEXT_SUBST,
+            &build_reverse_chain_sub(),
+        );
+        let g = GsubTable::parse(&bytes).unwrap();
+        // Wrong backtrack glyph.
+        assert_eq!(g.apply_lookup_type_8(0, &[2, 10, 99], 1), None);
+        // Wrong lookahead glyph.
+        assert_eq!(g.apply_lookup_type_8(0, &[1, 10, 50], 1), None);
+        // No backtrack room (pos=0).
+        assert_eq!(g.apply_lookup_type_8(0, &[10, 99], 0), None);
+        // No lookahead room.
+        assert_eq!(g.apply_lookup_type_8(0, &[1, 10], 1), None);
+        // Off-coverage input.
+        assert_eq!(g.apply_lookup_type_8(0, &[1, 11, 99], 1), None);
+        // Out-of-range lookup index.
+        assert_eq!(g.apply_lookup_type_8(99, &[1, 10, 99], 1), None);
+    }
+
+    // ----- Nested-lookup dispatch through chained context -----
+
+    /// Verify that a Chain-Context (LT6) record referencing a
+    /// LookupType-2 (multiple subst) lookup correctly expands.
+    #[test]
+    fn chain_context_can_dispatch_nested_lookup_type_2() {
+        // Lookup 0: MultipleSubst gid 10 → [10, 99] (split a glyph).
+        let mult_sub = {
+            let mut seq = Vec::new();
+            seq.extend_from_slice(&2u16.to_be_bytes());
+            seq.extend_from_slice(&10u16.to_be_bytes());
+            seq.extend_from_slice(&99u16.to_be_bytes());
+            let mut cov = Vec::new();
+            cov.extend_from_slice(&1u16.to_be_bytes());
+            cov.extend_from_slice(&1u16.to_be_bytes());
+            cov.extend_from_slice(&10u16.to_be_bytes());
+            let header_len = 8u16;
+            let cov_off = header_len;
+            let seq_off = cov_off + cov.len() as u16;
+            let mut sub = Vec::new();
+            sub.extend_from_slice(&1u16.to_be_bytes());
+            sub.extend_from_slice(&cov_off.to_be_bytes());
+            sub.extend_from_slice(&1u16.to_be_bytes());
+            sub.extend_from_slice(&seq_off.to_be_bytes());
+            sub.extend_from_slice(&cov);
+            sub.extend_from_slice(&seq);
+            sub
+        };
+        // Lookup 1: ChainContextFormat1 over gid 10 (no bt/la), invokes lookup 0.
+        let chain_sub = {
+            let mut cov = Vec::new();
+            cov.extend_from_slice(&1u16.to_be_bytes());
+            cov.extend_from_slice(&1u16.to_be_bytes());
+            cov.extend_from_slice(&10u16.to_be_bytes());
+            let mut rule = Vec::new();
+            rule.extend_from_slice(&0u16.to_be_bytes()); // bt count
+            rule.extend_from_slice(&1u16.to_be_bytes()); // input count
+            rule.extend_from_slice(&0u16.to_be_bytes()); // la count
+            rule.extend_from_slice(&1u16.to_be_bytes()); // substCount
+            rule.extend_from_slice(&0u16.to_be_bytes()); // seqIndex
+            rule.extend_from_slice(&0u16.to_be_bytes()); // lookupIndex
+            let rule_set_header = 4u16;
+            let mut rule_set = Vec::new();
+            rule_set.extend_from_slice(&1u16.to_be_bytes());
+            rule_set.extend_from_slice(&rule_set_header.to_be_bytes());
+            rule_set.extend_from_slice(&rule);
+            let header_len = 8u16;
+            let cov_off = header_len;
+            let set_off = cov_off + cov.len() as u16;
+            let mut sub = Vec::new();
+            sub.extend_from_slice(&1u16.to_be_bytes());
+            sub.extend_from_slice(&cov_off.to_be_bytes());
+            sub.extend_from_slice(&1u16.to_be_bytes());
+            sub.extend_from_slice(&set_off.to_be_bytes());
+            sub.extend_from_slice(&cov);
+            sub.extend_from_slice(&rule_set);
+            sub
+        };
+        let lookup0 = wrap_lookup_helper(LOOKUP_MULTIPLE_SUBST, &mult_sub);
+        let lookup1 = wrap_lookup_helper(LOOKUP_CHAIN_CONTEXT_SUBST, &chain_sub);
+        let lookup_list_header = 2 + 2 * 2;
+        let mut lookup_list = Vec::new();
+        lookup_list.extend_from_slice(&2u16.to_be_bytes());
+        let mut running = lookup_list_header as u16;
+        lookup_list.extend_from_slice(&running.to_be_bytes());
+        running += lookup0.len() as u16;
+        lookup_list.extend_from_slice(&running.to_be_bytes());
+        lookup_list.extend_from_slice(&lookup0);
+        lookup_list.extend_from_slice(&lookup1);
+
+        let mut gsub = Vec::new();
+        gsub.extend_from_slice(&1u16.to_be_bytes());
+        gsub.extend_from_slice(&0u16.to_be_bytes());
+        gsub.extend_from_slice(&0u16.to_be_bytes());
+        gsub.extend_from_slice(&0u16.to_be_bytes());
+        gsub.extend_from_slice(&10u16.to_be_bytes());
+        gsub.extend_from_slice(&lookup_list);
+
+        let g = GsubTable::parse(&gsub).unwrap();
+        let out = g.apply_lookup_type_6(1, &[10], 0).unwrap();
+        // Multiple subst expands gid 10 → [10, 99].
+        assert_eq!(out, vec![10, 99]);
     }
 }
