@@ -3,6 +3,15 @@
 //! We pick a single subtable at parse time (preferred order: 32-bit
 //! formats first, BMP formats second, legacy single-byte last) and run
 //! all `lookup` calls through it. Round-1 supports formats 0, 4, 6, 12.
+//!
+//! Format 14 (Unicode Variation Selectors) is recognised at parse time
+//! but skipped silently — it lives alongside one of the supported
+//! base-codepoint formats in real-world fonts (e.g. Noto Color Emoji
+//! ships `(0,5)/format-14` next to `(3,10)/format-12`) and isn't a
+//! standalone codepoint→glyph map. Treating it as "unsupported" used
+//! to fail the entire `cmap` parse before the picker could even see
+//! the supported sibling subtable. Future rounds may add real format-14
+//! handling for emoji variation sequences and CJK variant glyphs.
 
 use crate::parser::{read_u16, read_u32};
 use crate::Error;
@@ -38,6 +47,15 @@ impl<'a> CmapTable<'a> {
         // We want the *richest* subtable: prefer Unicode 32-bit (format
         // 12), then any BMP format-4, then format-6, then format-0.
         // Walk all encoding records and collect candidates.
+        //
+        // IMPORTANT: filter on subtable format BEFORE running per-format
+        // length validation. Some real-world fonts (e.g. Noto Color
+        // Emoji, many CJK fonts) ship a format-14 (Unicode Variation
+        // Selectors) subtable alongside a supported format-12 / format-4
+        // base map. Format 14 has a different header layout (no u16
+        // length at offset+2), so calling the length helper on it would
+        // bail with `UnsupportedCmapFormat(14)` and reject the entire
+        // font even though the format-12 sibling is perfectly usable.
         let mut best: Option<Subtable<'_>> = None;
         let mut best_rank = i32::MIN;
 
@@ -50,24 +68,31 @@ impl<'a> CmapTable<'a> {
                 return Err(Error::BadOffset);
             }
             let format = read_u16(bytes, sub_off)?;
+
+            // Skip formats we don't decode in round 1 BEFORE touching
+            // their length field — different formats place `length` at
+            // different offsets / widths, and unrecognised formats may
+            // not have one in the same place at all.
+            if !is_supported_format(format) {
+                continue;
+            }
+
             let length = subtable_length(bytes, sub_off, format)?;
             let sub = bytes
                 .get(sub_off..sub_off + length)
                 .ok_or(Error::BadOffset)?;
 
             let candidate = match format {
-                0 => Some(Subtable::Format0(sub)),
-                4 => Some(Subtable::Format4(sub)),
-                6 => Some(Subtable::Format6(sub)),
-                12 => Some(Subtable::Format12(sub)),
-                _ => None, // formats 2/8/10/13/14 ignored in round 1
+                0 => Subtable::Format0(sub),
+                4 => Subtable::Format4(sub),
+                6 => Subtable::Format6(sub),
+                12 => Subtable::Format12(sub),
+                _ => unreachable!("filtered by is_supported_format above"),
             };
-            if let Some(c) = candidate {
-                let rank = subtable_rank(format, platform_id, encoding_id);
-                if rank > best_rank {
-                    best_rank = rank;
-                    best = Some(c);
-                }
+            let rank = subtable_rank(format, platform_id, encoding_id);
+            if rank > best_rank {
+                best_rank = rank;
+                best = Some(candidate);
             }
         }
 
@@ -87,9 +112,15 @@ impl<'a> CmapTable<'a> {
     }
 }
 
+fn is_supported_format(format: u16) -> bool {
+    matches!(format, 0 | 4 | 6 | 12)
+}
+
 fn subtable_length(bytes: &[u8], off: usize, format: u16) -> Result<usize, Error> {
     // Formats 0/4/6 have a u16 length at offset+2. Formats 8/10/12/13
-    // have a u32 length at offset+4.
+    // have a u32 length at offset+4. Format 14 has its own u32 length
+    // at offset+2 (different layout entirely) but the picker filters
+    // it out before we get here, so we don't need to handle it.
     Ok(match format {
         0 | 2 | 4 | 6 => read_u16(bytes, off + 2)? as usize,
         8 | 10 | 12 | 13 => read_u32(bytes, off + 4)? as usize,
@@ -351,6 +382,89 @@ mod tests {
         assert_eq!(cmap.lookup(0x4E02), Some(1002));
         assert_eq!(cmap.lookup(0x4E03), None);
         assert_eq!(cmap.lookup(0x1F600), Some(5000));
+    }
+
+    /// Regression: a cmap that ships a format-14 (Unicode Variation
+    /// Selectors) subtable alongside a supported format must NOT fail
+    /// the parse. The format-14 entry is silently skipped and the
+    /// format-12 sibling is selected as the active subtable. This is
+    /// the layout used by Noto Color Emoji, many CJK fonts, and any
+    /// font that wants to expose emoji-presentation variation
+    /// sequences (codepoint + U+FE0F / U+FE0E).
+    #[test]
+    fn format14_subtable_is_skipped_not_rejected() {
+        // Build the format-12 subtable: one group, U+1F600 → glyph 5.
+        let mut sub12 = vec![0u8; 16 + 12];
+        sub12[0..2].copy_from_slice(&12u16.to_be_bytes()); // format
+        sub12[4..8].copy_from_slice(&((16 + 12) as u32).to_be_bytes()); // length
+        sub12[12..16].copy_from_slice(&1u32.to_be_bytes()); // numGroups
+        sub12[16..20].copy_from_slice(&0x1F600u32.to_be_bytes()); // start
+        sub12[20..24].copy_from_slice(&0x1F600u32.to_be_bytes()); // end
+        sub12[24..28].copy_from_slice(&5u32.to_be_bytes()); // startGlyph
+
+        // Build a minimal format-14 subtable: 0 variation selector
+        // records (length = 10 bytes header). Per spec:
+        //   u16 format (= 14), u32 length, u32 numVarSelectorRecords.
+        // Even with zero records the layout differs from formats 0/4/6
+        // (which have a u16 length at offset+2). Before this fix, the
+        // length probe would mis-read offset+2 as u16 and either crash
+        // or — worse — bail with UnsupportedCmapFormat(14) BEFORE the
+        // format-12 sibling could be picked.
+        let mut sub14 = vec![0u8; 10];
+        sub14[0..2].copy_from_slice(&14u16.to_be_bytes()); // format
+        sub14[2..6].copy_from_slice(&10u32.to_be_bytes()); // length
+        sub14[6..10].copy_from_slice(&0u32.to_be_bytes()); // numVarSelectorRecords
+
+        // Hand-roll the cmap header: 2 encoding records.
+        //   record 0: (3, 10) → format-12 subtable
+        //   record 1: (0, 5)  → format-14 subtable (Unicode Variation Selectors)
+        let header_len = 4 + 2 * 8;
+        let sub12_off = header_len;
+        let sub14_off = sub12_off + sub12.len();
+        let mut out = vec![0u8; header_len];
+        out[0..2].copy_from_slice(&0u16.to_be_bytes()); // version
+        out[2..4].copy_from_slice(&2u16.to_be_bytes()); // numTables
+                                                        // record 0
+        out[4..6].copy_from_slice(&3u16.to_be_bytes());
+        out[6..8].copy_from_slice(&10u16.to_be_bytes());
+        out[8..12].copy_from_slice(&(sub12_off as u32).to_be_bytes());
+        // record 1
+        out[12..14].copy_from_slice(&0u16.to_be_bytes());
+        out[14..16].copy_from_slice(&5u16.to_be_bytes());
+        out[16..20].copy_from_slice(&(sub14_off as u32).to_be_bytes());
+        out.extend_from_slice(&sub12);
+        out.extend_from_slice(&sub14);
+
+        let cmap = CmapTable::parse(&out).expect("format-14 sibling must not fail parse");
+        assert_eq!(cmap.lookup(0x1F600), Some(5));
+        assert_eq!(cmap.lookup(0x1F601), None);
+    }
+
+    /// A cmap with ONLY unsupported subtables (here: just format 14)
+    /// still has to fail — the picker has nothing to map base codepoints
+    /// through. Make sure the failure mode is the existing
+    /// `UnsupportedCmapFormat(0xFFFF)` sentinel and not a length-validation
+    /// crash on the format-14 header.
+    #[test]
+    fn cmap_with_only_format14_fails_cleanly() {
+        let mut sub14 = vec![0u8; 10];
+        sub14[0..2].copy_from_slice(&14u16.to_be_bytes());
+        sub14[2..6].copy_from_slice(&10u32.to_be_bytes());
+        sub14[6..10].copy_from_slice(&0u32.to_be_bytes());
+
+        let header_len = 4 + 8;
+        let mut out = vec![0u8; header_len];
+        out[0..2].copy_from_slice(&0u16.to_be_bytes());
+        out[2..4].copy_from_slice(&1u16.to_be_bytes());
+        out[4..6].copy_from_slice(&0u16.to_be_bytes());
+        out[6..8].copy_from_slice(&5u16.to_be_bytes());
+        out[8..12].copy_from_slice(&(header_len as u32).to_be_bytes());
+        out.extend_from_slice(&sub14);
+
+        match CmapTable::parse(&out) {
+            Err(Error::UnsupportedCmapFormat(0xFFFF)) => {}
+            other => panic!("expected UnsupportedCmapFormat(0xFFFF), got {other:?}"),
+        }
     }
 
     #[test]

@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — cmap format-14 sibling rejected the whole font (2026-05-04)
+
+- `cmap` parse no longer fails when the font ships a format-14 (Unicode
+  Variation Selectors) subtable next to a supported subtable. Format-14
+  records are now skipped at the encoding-record walk *before* per-format
+  length validation runs, so the picker still finds the format-12 /
+  format-4 sibling. Affected fonts include Noto Color Emoji (which ships
+  `(0,5)/format-14` alongside `(3,10)/format-12`) and most CJK fonts
+  that expose variation sequences. Real format-14 lookup (variation
+  selectors → variant glyph IDs) remains deferred to a future round.
+
 ## [0.1.1](https://github.com/OxideAV/oxideav-ttf/compare/v0.1.0...v0.1.1) - 2026-05-03
 
 ### Fixed
