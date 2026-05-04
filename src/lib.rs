@@ -31,15 +31,16 @@ pub use collection::{is_collection, CollectionHeader, TTC_MAGIC};
 
 use crate::parser::TableDirectory;
 use crate::tables::{
-    cbdt::CbdtTable, cblc::CblcTable, cmap::CmapTable, gdef::GdefTable, glyf::GlyfTable,
-    gpos::GposTable, gsub::GsubTable, head::HeadTable, hhea::HheaTable, hmtx::HmtxTable,
-    kern::KernTable, loca::LocaTable, maxp::MaxpTable, name::NameTable, os2::Os2Table,
-    post::PostTable,
+    cbdt::CbdtTable, cblc::CblcTable, cmap::CmapTable, colr::ColrTable, cpal::CpalTable,
+    gdef::GdefTable, glyf::GlyfTable, gpos::GposTable, gsub::GsubTable, head::HeadTable,
+    hhea::HheaTable, hmtx::HmtxTable, kern::KernTable, loca::LocaTable, maxp::MaxpTable,
+    name::NameTable, os2::Os2Table, post::PostTable,
 };
 
 pub use outline::{BBox, Contour, Point, TtOutline};
 pub use tables::cbdt::ColorBitmap;
 pub use tables::cblc::{BigGlyphMetrics, SmallGlyphMetrics};
+pub use tables::colr::ColorLayer;
 
 /// Errors emitted during font parsing or glyph lookup.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -121,6 +122,8 @@ pub struct Font<'a> {
     gdef: Option<GdefTable<'a>>,
     cblc: Option<CblcTable<'a>>,
     cbdt: Option<CbdtTable<'a>>,
+    colr: Option<ColrTable<'a>>,
+    cpal: Option<CpalTable<'a>>,
 }
 
 impl<'a> Font<'a> {
@@ -204,6 +207,8 @@ impl<'a> Font<'a> {
         let gdef = dir.find(b"GDEF", bytes).map(GdefTable::parse).transpose()?;
         let cblc = dir.find(b"CBLC", bytes).map(CblcTable::parse).transpose()?;
         let cbdt = dir.find(b"CBDT", bytes).map(CbdtTable::parse).transpose()?;
+        let colr = dir.find(b"COLR", bytes).map(ColrTable::parse).transpose()?;
+        let cpal = dir.find(b"CPAL", bytes).map(CpalTable::parse).transpose()?;
 
         Ok(Self {
             bytes,
@@ -223,6 +228,8 @@ impl<'a> Font<'a> {
             gdef,
             cblc,
             cbdt,
+            colr,
+            cpal,
         })
     }
 
@@ -483,5 +490,80 @@ impl<'a> Font<'a> {
         let cbdt = self.cbdt.as_ref()?;
         let entry = cblc.lookup_glyph(glyph_id, target_ppem)?;
         cbdt.lookup(&entry).ok().flatten()
+    }
+
+    // ---- color layer glyphs (COLR / CPAL) --------------------------------
+
+    /// `true` if this font ships a `COLR` + `CPAL` pair — i.e. carries
+    /// vector colour-emoji glyphs as a per-glyph layer stack
+    /// (Microsoft's Segoe UI Emoji, Twemoji's Mozilla cut, FiraCode's
+    /// "color" variant, and so on). Returns `false` for plain
+    /// outline-only fonts and for CBDT-only colour-emoji fonts.
+    ///
+    /// Only **COLR version 0** (flat palette-indexed layer stack) is
+    /// supported; v1 (paint graph with gradients/transforms) and v2/v3
+    /// (variable-COLR) are accepted at parse time but the v0
+    /// `BaseGlyphRecord` array is the only thing
+    /// [`Font::color_layers`] returns. v1 paint graphs are out of
+    /// scope for this crate.
+    pub fn has_color_layers(&self) -> bool {
+        self.colr.is_some() && self.cpal.is_some()
+    }
+
+    /// All colour layers for `glyph_id`, in back-to-front paint order.
+    /// Each layer carries an outline-glyph id (whose outline you fetch
+    /// via [`Font::glyph_outline`]) and a CPAL palette-entry index.
+    /// The reserved palette index `0xFFFF` means "use the renderer's
+    /// foreground colour" — substitute your own.
+    ///
+    /// Returns an empty `Vec` when the font has no `COLR` table or
+    /// `glyph_id` isn't a base glyph (i.e. it's a single-colour
+    /// outline glyph or a layer-only glyph used by other bases).
+    pub fn color_layers(&self, glyph_id: u16) -> Vec<ColorLayer> {
+        match self.colr.as_ref() {
+            Some(colr) => colr.layers(glyph_id),
+            None => Vec::new(),
+        }
+    }
+
+    /// Resolve a single CPAL colour by `(palette_index, color_index)`.
+    /// Returns `[r, g, b, a]` (the byte order swizzled out of CPAL's
+    /// on-disk BGRA) or `None` when either index is out of range or the
+    /// font has no `CPAL` table.
+    ///
+    /// Palette 0 is the spec's "default" palette. CPAL v1's palette
+    /// flags (`USABLE_WITH_LIGHT_BACKGROUND`,
+    /// `USABLE_WITH_DARK_BACKGROUND`) are exposed via
+    /// [`Font::cpal_palette_type`] for renderers that want to pick a
+    /// theme-appropriate palette.
+    pub fn cpal_color(&self, palette_index: u16, color_index: u16) -> Option<[u8; 4]> {
+        self.cpal.as_ref()?.color(palette_index, color_index)
+    }
+
+    /// All colours for palette `palette_index` as an `Vec<[u8; 4]>`
+    /// (RGBA byte order). `None` if the font has no CPAL table or
+    /// `palette_index` is out of range.
+    pub fn cpal_palette(&self, palette_index: u16) -> Option<Vec<[u8; 4]>> {
+        self.cpal.as_ref()?.palette(palette_index)
+    }
+
+    /// Number of CPAL palettes the font ships, or `0` if there's no
+    /// `CPAL` table. Mostly useful for renderers that pick a palette
+    /// based on `cpal_palette_type` flags.
+    pub fn cpal_num_palettes(&self) -> u16 {
+        self.cpal.as_ref().map(|c| c.num_palettes()).unwrap_or(0)
+    }
+
+    /// CPAL v1 palette-type flags for `palette_index`. Returns 0 when
+    /// the font has no CPAL table, the table is v0, or the palette
+    /// index is out of range.
+    ///
+    /// Bit 0 (`0x0001`) = USABLE_WITH_LIGHT_BACKGROUND
+    /// Bit 1 (`0x0002`) = USABLE_WITH_DARK_BACKGROUND
+    pub fn cpal_palette_type(&self, palette_index: u16) -> u32 {
+        self.cpal
+            .as_ref()
+            .map(|c| c.palette_type(palette_index))
+            .unwrap_or(0)
     }
 }

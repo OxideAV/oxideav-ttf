@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — COLR + CPAL parsers (vector colour-emoji layer stack) (2026-05-04)
+
+- New `tables::colr::ColrTable` walker for COLR **version 0** — flat
+  per-base-glyph layer stack with palette-indexed colours. Binary-
+  searches the `BaseGlyphRecord` array on `glyph_id`, then walks the
+  contiguous `LayerRecord` slice to produce
+  `Vec<ColorLayer { layer_glyph_id, palette_index }>` in back-to-front
+  paint order. Higher header versions are accepted at parse time
+  (their additive trailing fields are ignored); v1 paint-graph
+  decoding (gradients / transforms / composites) and v2/v3
+  variable-COLR are out of scope for this round.
+- New `tables::cpal::CpalTable` walker for CPAL **versions 0 and 1**.
+  Decodes the per-palette colour-record-index array and validates the
+  combined `ColorRecord` array; v1's three trailing offsets
+  (`paletteTypesArrayOffset`, `paletteLabelsArrayOffset`,
+  `paletteEntryLabelsArrayOffset`) are stored so consumers can read
+  `palette_type(i)` for `USABLE_WITH_LIGHT_BACKGROUND` /
+  `USABLE_WITH_DARK_BACKGROUND` hints.
+- Public `Font` API:
+  - `Font::has_color_layers() -> bool`
+  - `Font::color_layers(glyph_id: u16) -> Vec<ColorLayer>`
+  - `Font::cpal_color(palette_index, color_index) -> Option<[u8; 4]>`
+    (RGBA byte order, swizzled out of CPAL's on-disk BGRA)
+  - `Font::cpal_palette(palette_index) -> Option<Vec<[u8; 4]>>`
+  - `Font::cpal_num_palettes() -> u16`
+  - `Font::cpal_palette_type(palette_index) -> u32`
+- Public re-export: `oxideav_ttf::ColorLayer { layer_glyph_id,
+  palette_index }`. The reserved `palette_index == 0xFFFF` is the
+  spec's "use foreground colour" sentinel — consumers substitute
+  their own when they encounter it.
+
 ### Fixed — `from_collection_bytes` BadOffset on real `.ttc` (2026-05-04)
 
 - `Font::from_collection_bytes(bytes, index)` previously sub-sliced

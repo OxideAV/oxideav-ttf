@@ -8,6 +8,8 @@
 pub mod cbdt;
 pub mod cblc;
 pub mod cmap;
+pub mod colr;
+pub mod cpal;
 pub mod gdef;
 pub mod glyf;
 pub mod gpos;
