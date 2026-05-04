@@ -34,13 +34,14 @@ use crate::tables::{
     cbdt::CbdtTable, cblc::CblcTable, cmap::CmapTable, colr::ColrTable, cpal::CpalTable,
     gdef::GdefTable, glyf::GlyfTable, gpos::GposTable, gsub::GsubTable, head::HeadTable,
     hhea::HheaTable, hmtx::HmtxTable, kern::KernTable, loca::LocaTable, maxp::MaxpTable,
-    name::NameTable, os2::Os2Table, post::PostTable,
+    name::NameTable, os2::Os2Table, post::PostTable, sbix::SbixTable,
 };
 
 pub use outline::{BBox, Contour, Point, TtOutline};
 pub use tables::cbdt::ColorBitmap;
 pub use tables::cblc::{BigGlyphMetrics, SmallGlyphMetrics};
 pub use tables::colr::ColorLayer;
+pub use tables::sbix::SbixGlyph;
 
 /// Errors emitted during font parsing or glyph lookup.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -124,6 +125,7 @@ pub struct Font<'a> {
     cbdt: Option<CbdtTable<'a>>,
     colr: Option<ColrTable<'a>>,
     cpal: Option<CpalTable<'a>>,
+    sbix: Option<SbixTable<'a>>,
 }
 
 impl<'a> Font<'a> {
@@ -209,6 +211,10 @@ impl<'a> Font<'a> {
         let cbdt = dir.find(b"CBDT", bytes).map(CbdtTable::parse).transpose()?;
         let colr = dir.find(b"COLR", bytes).map(ColrTable::parse).transpose()?;
         let cpal = dir.find(b"CPAL", bytes).map(CpalTable::parse).transpose()?;
+        let sbix = dir
+            .find(b"sbix", bytes)
+            .map(|s| SbixTable::parse(s, maxp.num_glyphs))
+            .transpose()?;
 
         Ok(Self {
             bytes,
@@ -230,6 +236,7 @@ impl<'a> Font<'a> {
             cbdt,
             colr,
             cpal,
+            sbix,
         })
     }
 
@@ -565,5 +572,44 @@ impl<'a> Font<'a> {
             .as_ref()
             .map(|c| c.palette_type(palette_index))
             .unwrap_or(0)
+    }
+
+    // ---- sbix bitmap glyphs (Apple Color Emoji format) -------------------
+
+    /// `true` if this font ships an `sbix` table — Apple's PNG/JPEG/
+    /// TIFF bitmap-strike container, used by Apple Color Emoji and
+    /// every macOS/iOS-native colour-emoji font. Returns `false` for
+    /// outline-only fonts and for CBDT/CBLC- or COLR/CPAL-flavoured
+    /// colour fonts.
+    pub fn has_sbix(&self) -> bool {
+        self.sbix.is_some()
+    }
+
+    /// All strike ppem sizes the `sbix` table ships, sorted ascending
+    /// and de-duplicated. Apple Color Emoji typically lists eight
+    /// strikes in the 20-160 ppem range. Returns an empty `Vec` when
+    /// the font has no `sbix` table.
+    pub fn sbix_strikes(&self) -> Vec<u16> {
+        self.sbix
+            .as_ref()
+            .map(|s| s.all_ppems_unique_sorted())
+            .unwrap_or_default()
+    }
+
+    /// Resolve `glyph_id`'s sbix bitmap from the strike whose `ppem`
+    /// is closest to the requested `ppem` (ties favour the larger
+    /// strike, per the spec recommendation). Returns `None` if the
+    /// font has no `sbix` table OR no strike contains a bitmap for
+    /// `glyph_id`.
+    ///
+    /// `SbixGlyph::graphic_type` is one of `*b"png "`, `*b"jpg "`,
+    /// `*b"tiff"`, or `*b"dupe"` — the consumer crate is expected to
+    /// route the payload to the right decoder. The special `'dupe'`
+    /// value indicates a 2-byte big-endian glyph id whose bitmap
+    /// should be substituted; chasing the indirection is the
+    /// caller's responsibility (we leave it explicit so the caller
+    /// can do its own cycle detection).
+    pub fn sbix_glyph(&self, glyph_id: u16, ppem: u16) -> Option<SbixGlyph<'a>> {
+        self.sbix.as_ref()?.lookup_best_fit(glyph_id, ppem)
     }
 }

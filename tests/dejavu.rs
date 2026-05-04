@@ -105,14 +105,17 @@ fn mono_has_no_pair_kerning() {
 /// so every colour-glyph API should report empty / `false` rather
 /// than crash.
 #[test]
-fn outline_only_font_has_no_color_layers() {
+fn outline_only_font_has_no_color_tables() {
     let f = Font::from_bytes(FIXTURE_SANS).unwrap();
     assert!(!f.has_color_layers());
     assert!(!f.has_color_bitmaps());
+    assert!(!f.has_sbix());
     let a = f.glyph_index('A').unwrap();
     assert!(f.color_layers(a).is_empty());
     assert!(f.cpal_color(0, 0).is_none());
     assert!(f.cpal_palette(0).is_none());
     assert_eq!(f.cpal_num_palettes(), 0);
     assert_eq!(f.cpal_palette_type(0), 0);
+    assert!(f.sbix_strikes().is_empty());
+    assert!(f.sbix_glyph(a, 32).is_none());
 }

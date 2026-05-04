@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — sbix table parser (Apple Color Emoji bitmap strikes) (2026-05-04)
+
+- New `tables::sbix::SbixTable` walker for Apple's Standard Bitmap
+  Graphics container. Validates the version-1 header + per-strike
+  offset array up front; per-strike `glyphDataOffsets` arrays are
+  walked lazily via `glyph(strike_index, glyph_id)`.
+- Public `Font` API:
+  - `Font::has_sbix() -> bool`
+  - `Font::sbix_strikes() -> Vec<u16>` (de-duped + sorted ascending
+    list of strike ppems)
+  - `Font::sbix_glyph(glyph_id, ppem) -> Option<SbixGlyph>` —
+    best-fit lookup that scans every strike, picks the one whose
+    ppem is closest to the request (ties favour the larger strike
+    per the spec recommendation), and returns the per-glyph
+    bitmap as `SbixGlyph { graphic_type: [u8; 4], bytes: &[u8],
+    origin_x: i16, origin_y: i16 }`.
+- Re-exports `oxideav_ttf::SbixGlyph`. `graphic_type` is one of
+  `*b"png "`, `*b"jpg "`, `*b"tiff"`, or `*b"dupe"` (the spec's
+  glyph-aliasing sentinel — payload is a 2-byte u16 glyph id; we
+  expose it explicitly so the caller can do its own
+  cycle-detection rather than recursing here).
+
+Spec: Microsoft OpenType §"sbix — Standard Bitmap Graphics Table" /
+Apple TrueType Reference §"sbix" (version 1 only).
+
 ### Added — COLR + CPAL parsers (vector colour-emoji layer stack) (2026-05-04)
 
 - New `tables::colr::ColrTable` walker for COLR **version 0** — flat
