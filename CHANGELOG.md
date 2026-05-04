@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — `from_collection_bytes` BadOffset on real `.ttc` (2026-05-04)
+
+- `Font::from_collection_bytes(bytes, index)` previously sub-sliced
+  `bytes` from the subfont header offset and ran the standard sfnt
+  parse path against the sub-slice. That works for the *header*, but
+  the per-table records inside a TTC subfont's table directory carry
+  **file-relative** offsets (per OpenType §"Font Collections": *"The
+  table offsets in all table directories within a TTC file are
+  measured from the beginning of the TTC file"*), so every offset
+  underflowed and the parse died with `Error::BadOffset` on the first
+  table whose header sat below the subfont offset. Real-world impact:
+  `NotoSansCJK-Medium.ttc` (and every other Noto Sans CJK collection)
+  failed to parse subfont 0.
+- Fix: thread a `header_offset` through `TableDirectory::parse` and
+  `Font::from_bytes_at(bytes, header_offset)` so the directory header
+  is read from `bytes[header_offset..]` while the per-table data
+  slices remain anchored to the full `bytes` buffer.
+- New regression test: `tests/ttc_subfont.rs` walks all subfonts of a
+  cached `NotoSansCJK-Medium.ttc` (network-gated, skip-on-absent —
+  populated by oxideav-scribe round-5's fixture helper).
+- New unit test: `parser::tests::parses_directory_with_nonzero_header_offset`
+  validates the new `header_offset` parameter against a hand-built
+  buffer that distinguishes file-relative from header-relative
+  offsets.
+
 ### Added — cmap format 14 (Unicode Variation Sequences) (2026-05-04)
 
 - `Font::lookup_variation(codepoint, variation_selector) -> Option<u16>`

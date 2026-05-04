@@ -148,13 +148,24 @@ impl<'a> Font<'a> {
         let offset = header
             .font_offset(index)
             .ok_or(Error::SubfontOutOfRange(index))? as usize;
-        let sub = bytes.get(offset..).ok_or(Error::BadOffset)?;
-        Self::from_bytes(sub)
+        // The TTC spec requires the subfont's table directory offsets to
+        // be FILE-relative (not subfont-relative), so we hand
+        // `from_bytes_at` the full file slice and the subfont header
+        // offset rather than slicing the file from `offset` onwards.
+        Self::from_bytes_at(bytes, offset)
     }
 
     /// Parse a font from a borrowed byte slice.
     pub fn from_bytes(bytes: &'a [u8]) -> Result<Self, Error> {
-        let dir = TableDirectory::parse(bytes)?;
+        Self::from_bytes_at(bytes, 0)
+    }
+
+    /// Parse a font whose sfnt header sits at `header_offset` inside
+    /// `bytes`. Used by `from_collection_bytes` for TTC subfonts (whose
+    /// table records carry file-relative offsets, not subfont-relative
+    /// ones); equivalent to `from_bytes` when `header_offset == 0`.
+    fn from_bytes_at(bytes: &'a [u8], header_offset: usize) -> Result<Self, Error> {
+        let dir = TableDirectory::parse(bytes, header_offset)?;
 
         let head = HeadTable::parse(dir.required(b"head", bytes)?)?;
         let hhea = HheaTable::parse(dir.required(b"hhea", bytes)?)?;

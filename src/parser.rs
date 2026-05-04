@@ -28,17 +28,28 @@ struct TableRecord {
 }
 
 impl TableDirectory {
-    pub(crate) fn parse(bytes: &[u8]) -> Result<Self, Error> {
-        if bytes.len() < 12 {
+    /// Parse the sfnt header + table directory at `bytes[header_offset..]`,
+    /// validating each table record's `(offset, length)` against the
+    /// **full** `bytes` slice (`file_len`). For a plain sfnt
+    /// `header_offset == 0` and the validation is trivially the
+    /// "in-bounds vs. file" check; for a TTC subfont the table record
+    /// offsets are file-relative per the TTC spec ("The table offsets
+    /// in all table directories within a TTC file are measured from the
+    /// beginning of the TTC file") so we likewise validate against
+    /// `bytes.len()` and the resolver `find`/`required` returns
+    /// `&bytes[record.offset..record.offset + record.length]`.
+    pub(crate) fn parse(bytes: &[u8], header_offset: usize) -> Result<Self, Error> {
+        let hdr = bytes.get(header_offset..).ok_or(Error::UnexpectedEof)?;
+        if hdr.len() < 12 {
             return Err(Error::UnexpectedEof);
         }
-        let version = read_u32(bytes, 0)?;
+        let version = read_u32(hdr, 0)?;
         match version {
             // 'true', 'OTTO', or sfnt version 1.0.
             0x00010000 | 0x4F54544F /* OTTO */ | 0x74727565 /* true */ => {}
             _ => return Err(Error::BadMagic),
         }
-        let num_tables = read_u16(bytes, 4)?;
+        let num_tables = read_u16(hdr, 4)?;
         if num_tables == 0 || num_tables > MAX_TABLES {
             return Err(Error::BadHeader);
         }
@@ -47,18 +58,20 @@ impl TableDirectory {
         let dir_end = 12usize
             .checked_add(num_tables as usize * 16)
             .ok_or(Error::BadHeader)?;
-        if bytes.len() < dir_end {
+        if hdr.len() < dir_end {
             return Err(Error::UnexpectedEof);
         }
 
         let mut entries = Vec::with_capacity(num_tables as usize);
         for i in 0..num_tables as usize {
             let off = 12 + i * 16;
-            let tag = [bytes[off], bytes[off + 1], bytes[off + 2], bytes[off + 3]];
+            let tag = [hdr[off], hdr[off + 1], hdr[off + 2], hdr[off + 3]];
             // checksum at off+4, skipped.
-            let offset = read_u32(bytes, off + 8)?;
-            let length = read_u32(bytes, off + 12)?;
-            // Validate offset + length lie inside the file.
+            let offset = read_u32(hdr, off + 8)?;
+            let length = read_u32(hdr, off + 12)?;
+            // Validate offset + length lie inside the file. Note that
+            // `offset` is FILE-relative (relative to `bytes`, not to
+            // the subfont header at `header_offset`).
             let end = (offset as u64)
                 .checked_add(length as u64)
                 .ok_or(Error::BadOffset)?;
@@ -162,7 +175,7 @@ mod tests {
     #[test]
     fn rejects_short_input() {
         assert!(matches!(
-            TableDirectory::parse(&[0u8; 4]),
+            TableDirectory::parse(&[0u8; 4], 0),
             Err(Error::UnexpectedEof)
         ));
     }
@@ -172,7 +185,7 @@ mod tests {
         let mut bytes = [0u8; 12];
         bytes[0..4].copy_from_slice(&0xDEADBEEFu32.to_be_bytes());
         assert!(matches!(
-            TableDirectory::parse(&bytes),
+            TableDirectory::parse(&bytes, 0),
             Err(Error::BadMagic)
         ));
     }
@@ -189,9 +202,31 @@ mod tests {
         bytes[20..24].copy_from_slice(&28u32.to_be_bytes()); // offset
         bytes[24..28].copy_from_slice(&4u32.to_be_bytes()); // length
 
-        let dir = TableDirectory::parse(&bytes).expect("parse");
+        let dir = TableDirectory::parse(&bytes, 0).expect("parse");
         let head = dir.find(b"head", &bytes).expect("find head");
         assert_eq!(head.len(), 4);
         assert!(dir.find(b"glyf", &bytes).is_none());
+    }
+
+    /// Simulate a TTC: header at byte 100, with a table record whose
+    /// offset is FILE-relative (= 200, not 200-100 = 100). The directory
+    /// must validate against the full file length and the resolver must
+    /// return `bytes[200..204]`.
+    #[test]
+    fn parses_directory_with_nonzero_header_offset() {
+        let mut bytes = vec![0u8; 256];
+        let h = 100usize;
+        bytes[h..h + 4].copy_from_slice(&0x00010000u32.to_be_bytes()); // version
+        bytes[h + 4..h + 6].copy_from_slice(&1u16.to_be_bytes()); // numTables
+        bytes[h + 12..h + 16].copy_from_slice(b"head");
+        bytes[h + 20..h + 24].copy_from_slice(&200u32.to_be_bytes()); // FILE offset
+        bytes[h + 24..h + 28].copy_from_slice(&4u32.to_be_bytes());
+        // Tag the data so we can verify the resolver indexes into the
+        // outer file, not the header sub-slice.
+        bytes[200..204].copy_from_slice(b"DATA");
+
+        let dir = TableDirectory::parse(&bytes, h).expect("parse");
+        let head = dir.find(b"head", &bytes).expect("find head");
+        assert_eq!(head, b"DATA");
     }
 }
