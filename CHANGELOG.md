@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.3](https://github.com/OxideAV/oxideav-ttf/compare/v0.1.2...v0.1.3) - 2026-05-05
+
+### Other
+
+- LookupType 1 (single pos) + LookupType 8 (chained context) + LookupList enum
+
 ### Added — GPOS LookupType 1 + LookupType 8 + LookupList enumeration (2026-05-04)
 
 Closes the highest-impact gap left in the GPOS lookup-type grid:
