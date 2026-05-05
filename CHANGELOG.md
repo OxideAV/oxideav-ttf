@@ -7,6 +7,106 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — GPOS LookupType 3 (cursive attachment) + LookupType 5 (mark-to-ligature) + lookup-level ExtensionPos coverage + real Arabic GPOS fixture (2026-05-04)
+
+Closes the remaining GPOS lookup-type gaps left from the prior
+round: cursive attachment for Arabic Nastaliq / script-font
+cursive chaining, and mark-to-ligature for the
+"`fi` ligature + above-mark" cluster. Adds an integration test
+suite against Noto Sans Arabic that drives the new apply paths
+(LT 1 + LT 5) against the real-world LAM-ALEF ligature.
+
+- `tables::gpos::CursiveAttachment` (re-exported as
+  `oxideav_ttf::CursiveAttachment`) — entry/exit anchor pair for
+  one cursive glyph: `entry: Option<(i16, i16)>` (the connecting
+  point on the leading edge, `None` for first-of-cluster glyphs)
+  and `exit: Option<(i16, i16)>` (trailing edge, `None` for
+  last-of-cluster). All coordinates are in TT font units (Y-up).
+- `tables::gpos::GposTable::apply_lookup_type_3(lookup_index, gid)
+   -> Option<CursiveAttachment>` — Cursive Attachment
+  (CursivePosFormat1). Walks every sub-table in the named lookup;
+  first hit wins. Anchor formats 1, 2 and 3 are accepted (format
+  2's anchor point and format 3's device tables are silently
+  ignored). The shaper chains glyph N+1 onto glyph N by
+  translating glyph N+1's pen origin so its `entry` lands on
+  glyph N's `exit`: `delta = prev.exit - this.entry`.
+- `tables::gpos::GposTable::lookup_cursive_attachment(gid)
+   -> Option<CursiveAttachment>` — convenience walker that scans
+  the entire LookupList rather than a single index. Useful for
+  fonts that ship a single `curs` lookup (the common case).
+- `tables::gpos::GposTable::apply_lookup_type_5(lookup_index,
+   ligature, ligature_component, mark) -> Option<(i16, i16)>` —
+  Mark-to-Ligature Attachment (MarkLigPosFormat1). Per-component
+  anchor lookup: `ligature_component` is 0-indexed (0 = first
+  component, e.g. `LAM` of `LAM-ALEF`). Returns the `(dx, dy)`
+  offset to add to the mark's pen origin so its class anchor
+  lands on the selected component's anchor. Returns `None` on
+  coverage miss, out-of-range component, or null-anchor for the
+  mark's class on the requested component.
+- `tables::gpos::GposTable::lookup_mark_to_ligature(ligature,
+   ligature_component, mark) -> Option<(i16, i16)>` — convenience
+  walker scanning the entire LookupList.
+- `apply_pos_records` (the GPOS chain-context nested-dispatch
+  helper) now also handles nested LookupType 3 references —
+  emits a single `PosRecord` at the absolute glyph index
+  carrying `prev.exit - this.entry` as `(x_placement, y_placement)`
+  when both anchors line up across the abs_idx-1 / abs_idx pair.
+- ExtensionPos (LookupType 9) is now confirmed to unwrap
+  transparently both at the sub-table level (LT-9 sub-table inside
+  any kind=N lookup) AND at the **lookup level** (a whole lookup
+  whose `lookupType` is 9 wrapping any of LT 1 / 2 / 3 / 4 / 5 /
+  6 / 8) — the new `extension_wrapper_unwraps_for_cursive_pos_lookup`
+  test pins the lookup-level case down. This closes the previously-
+  deferred "LookupType 7 / lookup-level extension wrapper" gap (the
+  pattern we mirror is GSUB's LT-7 handling — for GPOS it's LT 9).
+- Public `Font` API:
+  - `Font::gpos_apply_lookup_type_3(lookup_index, gid) -> Option<CursiveAttachment>`
+  - `Font::lookup_cursive_attachment(gid) -> Option<CursiveAttachment>`
+  - `Font::gpos_apply_lookup_type_5(lookup_index, ligature, ligature_component, mark) -> Option<(i16, i16)>`
+  - `Font::lookup_mark_to_ligature(ligature, ligature_component, mark) -> Option<(i16, i16)>`
+- New unit tests (in `tables::gpos::tests`):
+  - `cursive_pos_format1_returns_entry_and_exit_anchors` —
+    round-trip: gid 5 (entry-only), gid 6 (both), gid 7
+    (exit-only) match their on-disk anchor coords exactly.
+  - `cursive_pos_returns_none_off_coverage`,
+    `cursive_pos_returns_none_when_lookup_is_not_type_3`,
+    `lookup_cursive_attachment_walks_lookup_list`.
+  - `mark_to_ligature_attaches_to_each_component` — round-trip:
+    2-component LAM-ALEF-style ligature with FATHA-style mark on
+    each component.
+  - `mark_to_ligature_returns_none_for_out_of_range_component`,
+    `mark_to_ligature_returns_none_for_uncovered_glyphs`,
+    `lookup_mark_to_ligature_walks_lookup_list`.
+  - `extension_wrapper_unwraps_for_cursive_pos_lookup` — verifies
+    that a Lookup whose `lookupType=9` wrapping a CursivePosFormat1
+    sub-table is correctly unwrapped by `apply_lookup_type_3`.
+- New integration test file `tests/noto_arabic_gpos.rs` — drives
+  the new apply paths against Noto Sans Arabic 2022:
+  - `noto_arabic_gpos_lookup_list_has_lt_1_4_5_6_8` — proves the
+    fixture exposes every lookup type we now support.
+  - `lt1_single_positioning_fires_on_real_arabic_glyphs` — counts
+    ≥100 distinct non-zero LT-1 single-position adjustments
+    across the real glyph table.
+  - `lt5_mark_to_ligature_anchors_marks_on_lam_alef` — for every
+    Arabic vowel mark in U+064B..U+0652, confirms the LAM-ALEF
+    (U+FEFB) ligature anchors it on both components 0 (LAM) and
+    1 (ALEF). Sanity-bounds the returned `(dx, dy)` to ±5 UPMs.
+  - `lt5_returns_none_for_out_of_range_component`,
+    `lt5_returns_none_for_uncovered_mark`,
+    `lt3_cursive_attachment_returns_none_in_noto_sans_arabic`
+    (Noto's regular Arabic cut isn't Nastaliq).
+  - `new_gpos_lookup_types_are_panic_free_on_real_arabic_run` —
+    drives every lookup index through every new apply path.
+  - `lt1_plus_lt5_combined_shaping_pass_on_lam_alef_with_fatha` —
+    the headline real-font dual exercise: applies LT 1 (advance
+    trim walk) + LT 5 (FATHA on LAM component 0 of LAM-ALEF) in
+    a single pass and asserts the LT-5 anchor is non-zero.
+
+Spec: Microsoft OpenType §"Cursive Attachment Positioning Subtable"
+(LookupType 3 Format 1), §"Mark-to-Ligature Attachment Positioning
+Subtable" (LookupType 5 Format 1). Apple TrueType Reference §"GPOS",
+ISO/IEC 14496-22 §6 (OFF).
+
 ## [0.1.3](https://github.com/OxideAV/oxideav-ttf/compare/v0.1.2...v0.1.3) - 2026-05-05
 
 ### Other

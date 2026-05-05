@@ -13,6 +13,13 @@
 //!   PairPosFormat2 (class-pair grid) are supported. We extract only
 //!   the `xAdvance` adjustment of the first glyph in the pair — that's
 //!   all "kerning" means for our consumer crate.
+//! - **LookupType 3** (Cursive Attachment) — entry/exit anchor pairs
+//!   on consecutive glyphs. Used by Arabic Nastaliq + script-font
+//!   cursive chaining: the *exit* anchor of glyph N is chained to the
+//!   *entry* anchor of glyph N+1, with the second glyph's pen origin
+//!   shifted so the two anchors coincide. Returns
+//!   [`CursiveAttachment`] (entry + exit points, each optional). Only
+//!   CursivePosFormat1 is defined by the spec.
 //! - **LookupType 4** (Mark-to-Base Attachment) — diacritic positioning
 //!   for a mark glyph above / below a base glyph. Returns the offset
 //!   `(dx, dy)` in font units that, when added to the mark's pen
@@ -21,6 +28,13 @@
 //!   (plain x/y) and format 3 (x/y + device offsets, which we ignore)
 //!   are accepted. Format 2 (anchor point) is treated as format 1
 //!   because we don't run the TT bytecode.
+//! - **LookupType 5** (Mark-to-Ligature Attachment) — like LookupType 4
+//!   but the second glyph is a *ligature* whose component the mark
+//!   attaches to is selected by the caller. Each ligature carries one
+//!   anchor *per (component, mark class)* slot. Returns `(dx, dy)` to
+//!   shift the mark's pen origin so its class anchor lands on the
+//!   selected component's anchor. Closes the "fi + dot-above"
+//!   ligature+mark gap.
 //! - **LookupType 6** (Mark-to-Mark Attachment) — mark-on-mark stacking
 //!   used when a base glyph already carries one diacritic and a second
 //!   diacritic must sit on top of (or below) the first. Layout-wise the
@@ -36,8 +50,10 @@
 //!   2 / 4 / 6 / 8 dispatches are supported; the recursion fence is
 //!   the same `MAX_NESTED_LOOKUP_DEPTH = 8` we use in GSUB.
 //!
-//! ExtensionPos (LookupType 9) is unwrapped transparently for all
-//! supported sub-types.
+//! ExtensionPos (LookupType 9) is unwrapped transparently for every
+//! supported sub-type AND when it sits as the outer wrapper around the
+//! lookup itself (i.e. `apply_lookup_type_X` accepts an index whose
+//! lookup is `kind=9, inner=X` exactly the same as a plain `kind=X`).
 //!
 //! Spec: Microsoft OpenType §"GPOS — Glyph Positioning Table",
 //! §"Common Table Formats", Apple TrueType Reference §"GPOS",
@@ -51,7 +67,9 @@ use crate::Error;
 
 const LOOKUP_SINGLE_POS: u16 = 1;
 const LOOKUP_PAIR_POS: u16 = 2;
+const LOOKUP_CURSIVE_POS: u16 = 3;
 const LOOKUP_MARK_BASE_POS: u16 = 4;
+const LOOKUP_MARK_LIGATURE_POS: u16 = 5;
 const LOOKUP_MARK_MARK_POS: u16 = 6;
 const LOOKUP_CHAIN_CONTEXT_POS: u16 = 8;
 const LOOKUP_EXTENSION_POS: u16 = 9;
@@ -103,6 +121,28 @@ pub struct PosValue {
 pub struct PosRecord {
     pub glyph_index: usize,
     pub value: PosValue,
+}
+
+/// Cursive attachment anchors for one glyph (GPOS LookupType 3).
+///
+/// Each glyph in a cursive lookup carries an *entry* anchor (the
+/// connecting point on its leading edge) and an *exit* anchor (the
+/// connecting point on its trailing edge). Either can be absent
+/// (null offset on disk → `None` here): a "joining" glyph has both,
+/// a "first-of-cluster" glyph has only `exit`, a "last-of-cluster"
+/// glyph has only `entry`.
+///
+/// Returned by [`GposTable::lookup_cursive_attachment`]. The shaper
+/// chains glyphs by translating glyph N+1 so its `entry` lands on
+/// glyph N's `exit`. Coordinates are in TT font units (Y-up).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CursiveAttachment {
+    /// `(x, y)` of the entry anchor, or `None` if this glyph has no
+    /// entry connection (i.e. it's the first glyph in a cursive run).
+    pub entry: Option<(i16, i16)>,
+    /// `(x, y)` of the exit anchor, or `None` if this glyph has no
+    /// exit connection (i.e. it's the last glyph in a cursive run).
+    pub exit: Option<(i16, i16)>,
 }
 
 #[derive(Debug, Clone)]
@@ -203,6 +243,182 @@ impl<'a> GposTable<'a> {
             }
             if let Some(v) = single_pos_lookup(effective_sub, gid) {
                 return Some(v);
+            }
+        }
+        None
+    }
+
+    /// Apply GPOS LookupType 3 (Cursive Attachment) lookup
+    /// `lookup_index` to `gid`.
+    ///
+    /// Returns `Some(CursiveAttachment { entry, exit })` when the
+    /// lookup's coverage covers `gid`, or `None` when no rule applies.
+    /// Either anchor may be `None` (the spec allows null offsets for
+    /// glyphs that don't connect on one side: a "first-of-cluster"
+    /// glyph carries only `exit`; a "last-of-cluster" carries only
+    /// `entry`).
+    ///
+    /// Cursive attachment is what powers Arabic Nastaliq and most
+    /// Brahmic-script "cursive" fonts: the shaper chains glyph N+1 by
+    /// translating its pen origin so glyph N+1's `entry` anchor lands
+    /// on glyph N's `exit` anchor — i.e. the per-glyph delta to apply
+    /// is `prev.exit - this.entry` in (x, y) font units.
+    ///
+    /// Only CursivePosFormat1 is defined by the spec. Anchor formats
+    /// 1, 2 and 3 are accepted (format 2's anchor point and format
+    /// 3's device tables are silently ignored). ExtensionPos
+    /// (LookupType 9) wrappers — both at the lookup level and at the
+    /// sub-table level — are unwrapped transparently.
+    pub fn apply_lookup_type_3(&self, lookup_index: u16, gid: u16) -> Option<CursiveAttachment> {
+        if self.lookup_list_off == 0 {
+            return None;
+        }
+        let lookup = lookup_table_slice(self.bytes, self.lookup_list_off, lookup_index)?;
+        if lookup.len() < 6 {
+            return None;
+        }
+        let kind = read_u16(lookup, 0).ok()?;
+        let sub_count = read_u16(lookup, 4).ok()? as usize;
+        for s in 0..sub_count {
+            let sub_off = read_u16(lookup, 6 + s * 2).ok()? as usize;
+            let sub = lookup.get(sub_off..)?;
+            let (effective_kind, effective_sub) = unwrap_extension(kind, sub)?;
+            if effective_kind != LOOKUP_CURSIVE_POS {
+                continue;
+            }
+            if let Some(v) = cursive_pos_lookup(effective_sub, gid) {
+                return Some(v);
+            }
+        }
+        None
+    }
+
+    /// Walk every GPOS LookupType-3 (Cursive Attachment) lookup looking
+    /// for `gid`'s entry/exit anchor pair.
+    ///
+    /// Convenience wrapper that scans the entire LookupList rather than
+    /// a single lookup index — useful when the caller hasn't resolved
+    /// the active feature's lookup-index list yet, or when there's only
+    /// one cursive lookup in the font (the common case for Arabic
+    /// Nastaliq fonts that ship a single `curs` lookup). Returns the
+    /// first hit in lookup order (matches the OpenType "first matching
+    /// subtable in lookup order" rule).
+    pub fn lookup_cursive_attachment(&self, gid: u16) -> Option<CursiveAttachment> {
+        let lookup_list = self.bytes.get(self.lookup_list_off as usize..)?;
+        if lookup_list.len() < 2 {
+            return None;
+        }
+        let lookup_count = read_u16(lookup_list, 0).ok()?;
+        for i in 0..lookup_count {
+            let lookup = lookup_table_slice(self.bytes, self.lookup_list_off, i)?;
+            if lookup.len() < 6 {
+                continue;
+            }
+            let kind = read_u16(lookup, 0).ok()?;
+            let sub_count = read_u16(lookup, 4).ok()? as usize;
+            for s in 0..sub_count {
+                let sub_off = read_u16(lookup, 6 + s * 2).ok()? as usize;
+                let sub = lookup.get(sub_off..)?;
+                let (effective_kind, effective_sub) = unwrap_extension(kind, sub)?;
+                if effective_kind != LOOKUP_CURSIVE_POS {
+                    continue;
+                }
+                if let Some(v) = cursive_pos_lookup(effective_sub, gid) {
+                    return Some(v);
+                }
+            }
+        }
+        None
+    }
+
+    /// Apply GPOS LookupType 5 (Mark-to-Ligature Attachment) lookup
+    /// `lookup_index` to a `(ligature, ligature_component, mark)` triple.
+    ///
+    /// Returns `Some((dx, dy))` in font units (TT Y-up) — the offset
+    /// to add to the mark's pen origin so its class anchor lands on the
+    /// selected component's anchor on the ligature glyph. Returns
+    /// `None` when no MarkLigPosFormat1 sub-table covers both glyphs,
+    /// when `ligature_component` is out of range for the matched
+    /// ligature, or when the mark's class has no anchor on that
+    /// component.
+    ///
+    /// `ligature_component` is **0-indexed**: component 0 is the
+    /// first component (e.g. `f` in the `fi` ligature), component 1
+    /// is the second (e.g. `i`). The shaper picks the component
+    /// based on Unicode-cluster boundaries — a base mark attaches to
+    /// the component whose source codepoint it follows.
+    ///
+    /// Only MarkLigPosFormat1 is defined by the spec. Anchor formats
+    /// 1, 2 and 3 are accepted (format 2's anchor point and format
+    /// 3's device tables are silently ignored). ExtensionPos
+    /// (LookupType 9) wrappers are unwrapped transparently.
+    pub fn apply_lookup_type_5(
+        &self,
+        lookup_index: u16,
+        ligature: u16,
+        ligature_component: u16,
+        mark: u16,
+    ) -> Option<(i16, i16)> {
+        if self.lookup_list_off == 0 {
+            return None;
+        }
+        let lookup = lookup_table_slice(self.bytes, self.lookup_list_off, lookup_index)?;
+        if lookup.len() < 6 {
+            return None;
+        }
+        let kind = read_u16(lookup, 0).ok()?;
+        let sub_count = read_u16(lookup, 4).ok()? as usize;
+        for s in 0..sub_count {
+            let sub_off = read_u16(lookup, 6 + s * 2).ok()? as usize;
+            let sub = lookup.get(sub_off..)?;
+            let (effective_kind, effective_sub) = unwrap_extension(kind, sub)?;
+            if effective_kind != LOOKUP_MARK_LIGATURE_POS {
+                continue;
+            }
+            if let Some(v) =
+                mark_ligature_pos_lookup(effective_sub, ligature, ligature_component, mark)
+            {
+                return Some(v);
+            }
+        }
+        None
+    }
+
+    /// Walk every GPOS LookupType-5 (Mark-to-Ligature) lookup looking
+    /// for the `(ligature, ligature_component, mark)` triple.
+    ///
+    /// Convenience wrapper that scans the LookupList rather than a
+    /// single lookup index. First hit in lookup order wins.
+    pub fn lookup_mark_to_ligature(
+        &self,
+        ligature: u16,
+        ligature_component: u16,
+        mark: u16,
+    ) -> Option<(i16, i16)> {
+        let lookup_list = self.bytes.get(self.lookup_list_off as usize..)?;
+        if lookup_list.len() < 2 {
+            return None;
+        }
+        let lookup_count = read_u16(lookup_list, 0).ok()?;
+        for i in 0..lookup_count {
+            let lookup = lookup_table_slice(self.bytes, self.lookup_list_off, i)?;
+            if lookup.len() < 6 {
+                continue;
+            }
+            let kind = read_u16(lookup, 0).ok()?;
+            let sub_count = read_u16(lookup, 4).ok()? as usize;
+            for s in 0..sub_count {
+                let sub_off = read_u16(lookup, 6 + s * 2).ok()? as usize;
+                let sub = lookup.get(sub_off..)?;
+                let (effective_kind, effective_sub) = unwrap_extension(kind, sub)?;
+                if effective_kind != LOOKUP_MARK_LIGATURE_POS {
+                    continue;
+                }
+                if let Some(v) =
+                    mark_ligature_pos_lookup(effective_sub, ligature, ligature_component, mark)
+                {
+                    return Some(v);
+                }
             }
         }
         None
@@ -682,6 +898,171 @@ fn mark_mark_pos_lookup(sub: &[u8], mark1: u16, mark2: u16) -> Option<(i16, i16)
     Some((bx.wrapping_sub(mx), by.wrapping_sub(my)))
 }
 
+/// Walk a CursivePosFormat1 subtable looking for `gid` and returning
+/// its `(entry, exit)` anchor pair.
+///
+/// CursivePosFormat1 layout (OpenType spec §"Cursive Attachment
+/// Positioning Subtable"):
+/// ```text
+///   u16 format == 1
+///   Offset16 coverageOffset
+///   u16 entryExitCount
+///   EntryExitRecord entryExitRecords[entryExitCount]
+///       Offset16 entryAnchorOffset    // 0 = null = no entry
+///       Offset16 exitAnchorOffset     // 0 = null = no exit
+/// ```
+///
+/// Both offsets are relative to the **subtable** start. The Coverage
+/// table indexes the EntryExitRecord array (record `i` belongs to the
+/// `i`th covered glyph in coverage order).
+fn cursive_pos_lookup(sub: &[u8], gid: u16) -> Option<CursiveAttachment> {
+    if sub.len() < 6 {
+        return None;
+    }
+    let format = read_u16(sub, 0).ok()?;
+    if format != 1 {
+        return None;
+    }
+    let coverage_off = read_u16(sub, 2).ok()? as usize;
+    let entry_exit_count = read_u16(sub, 4).ok()? as usize;
+    let cov = sub.get(coverage_off..)?;
+    let cov_idx = coverage_lookup(cov, gid)? as usize;
+    if cov_idx >= entry_exit_count {
+        return None;
+    }
+    // Each EntryExitRecord = 4 bytes (two Offset16). Header = 6 bytes.
+    let rec_off = 6 + cov_idx * 4;
+    if sub.len() < rec_off + 4 {
+        return None;
+    }
+    let entry_off = read_u16(sub, rec_off).ok()? as usize;
+    let exit_off = read_u16(sub, rec_off + 2).ok()? as usize;
+    let entry = if entry_off == 0 {
+        None
+    } else {
+        sub.get(entry_off..).and_then(parse_anchor)
+    };
+    let exit = if exit_off == 0 {
+        None
+    } else {
+        sub.get(exit_off..).and_then(parse_anchor)
+    };
+    // The spec allows both offsets to be 0 (degenerate); we still
+    // surface that as Some({None, None}) so the caller can distinguish
+    // "covered but no anchors" from "not covered".
+    Some(CursiveAttachment { entry, exit })
+}
+
+/// Walk a MarkLigPosFormat1 subtable looking for the
+/// `(ligature, ligature_component, mark)` triple and return the
+/// `(dx, dy)` mark-attachment offset in font units.
+///
+/// MarkLigPosFormat1 layout (OpenType spec §"Mark-to-Ligature
+/// Attachment Positioning Subtable"):
+/// ```text
+///   u16 format == 1
+///   Offset16 markCoverageOffset       // covers all mark glyphs
+///   Offset16 ligatureCoverageOffset   // covers all ligature glyphs
+///   u16 markClassCount
+///   Offset16 markArrayOffset
+///   Offset16 ligatureArrayOffset
+/// ```
+///
+/// MarkArray is identical to MarkBasePos / MarkMarkPos:
+/// ```text
+///   u16 markCount
+///   markRecords[markCount] = { u16 markClass; Offset16 markAnchorOffset; }
+/// ```
+///
+/// LigatureArray:
+/// ```text
+///   u16 ligatureCount
+///   Offset16 ligatureAttachOffsets[ligatureCount]
+///
+///   LigatureAttach (per ligature):
+///     u16 componentCount
+///     componentRecords[componentCount]:
+///       Offset16 ligatureAnchorOffsets[markClassCount]
+/// ```
+///
+/// Returned offset is `ligature_anchor - mark_anchor` in TT (Y-up) font
+/// units. The shaper applies it as `mark.x_offset += dx`,
+/// `mark.y_offset += dy` minus the un-attached pen advance.
+fn mark_ligature_pos_lookup(
+    sub: &[u8],
+    ligature: u16,
+    ligature_component: u16,
+    mark: u16,
+) -> Option<(i16, i16)> {
+    if sub.len() < 12 {
+        return None;
+    }
+    let format = read_u16(sub, 0).ok()?;
+    if format != 1 {
+        return None;
+    }
+    let mark_cov_off = read_u16(sub, 2).ok()? as usize;
+    let lig_cov_off = read_u16(sub, 4).ok()? as usize;
+    let mark_class_count = read_u16(sub, 6).ok()? as usize;
+    let mark_array_off = read_u16(sub, 8).ok()? as usize;
+    let lig_array_off = read_u16(sub, 10).ok()? as usize;
+
+    let mark_cov = sub.get(mark_cov_off..)?;
+    let lig_cov = sub.get(lig_cov_off..)?;
+    let mark_idx = coverage_lookup(mark_cov, mark)? as usize;
+    let lig_idx = coverage_lookup(lig_cov, ligature)? as usize;
+
+    // MarkArray: markCount + markRecord[mark_idx] = (class u16, anchor_off u16)
+    let mark_array = sub.get(mark_array_off..)?;
+    if mark_array.len() < 2 {
+        return None;
+    }
+    let mark_count = read_u16(mark_array, 0).ok()? as usize;
+    if mark_idx >= mark_count {
+        return None;
+    }
+    let mr_off = 2 + mark_idx * 4;
+    let mark_class = read_u16(mark_array, mr_off).ok()? as usize;
+    let mark_anchor_off_local = read_u16(mark_array, mr_off + 2).ok()? as usize;
+    if mark_class >= mark_class_count {
+        return None;
+    }
+    let mark_anchor = mark_array.get(mark_anchor_off_local..)?;
+    let (mx, my) = parse_anchor(mark_anchor)?;
+
+    // LigatureArray: ligatureCount + ligatureAttachOffsets[lig_idx]
+    let lig_array = sub.get(lig_array_off..)?;
+    if lig_array.len() < 2 {
+        return None;
+    }
+    let lig_count = read_u16(lig_array, 0).ok()? as usize;
+    if lig_idx >= lig_count {
+        return None;
+    }
+    let lig_attach_off = read_u16(lig_array, 2 + lig_idx * 2).ok()? as usize;
+    let lig_attach = lig_array.get(lig_attach_off..)?;
+    if lig_attach.len() < 2 {
+        return None;
+    }
+    let component_count = read_u16(lig_attach, 0).ok()? as usize;
+    if (ligature_component as usize) >= component_count {
+        return None;
+    }
+    // Component record = markClassCount Offset16 anchor offsets.
+    let comp_record_size = mark_class_count * 2;
+    let comp_off = 2 + ligature_component as usize * comp_record_size;
+    let lig_anchor_off_local = read_u16(lig_attach, comp_off + mark_class * 2).ok()? as usize;
+    // Null offset → this component has no anchor for this mark class.
+    if lig_anchor_off_local == 0 {
+        return None;
+    }
+    // Component-anchor offsets are relative to the LigatureAttach start.
+    let lig_anchor = lig_attach.get(lig_anchor_off_local..)?;
+    let (lx, ly) = parse_anchor(lig_anchor)?;
+
+    Some((lx.wrapping_sub(mx), ly.wrapping_sub(my)))
+}
+
 /// Parse an Anchor table. Supports format 1 (plain x/y) and format 3
 /// (x/y + device tables which we ignore — not relevant without TT
 /// hinting). Format 2 (x/y + anchor point) is read like format 1 since
@@ -1007,6 +1388,26 @@ impl<'a> GposTable<'a> {
                                 ..PosValue::default()
                             },
                         });
+                    }
+                }
+                LOOKUP_CURSIVE_POS if abs_idx > 0 => {
+                    // Cursive-pos under chain context: chain glyph N+1
+                    // (= abs_idx) onto glyph N (= abs_idx - 1). Compute
+                    // `prev.exit - this.entry`; emit only when both
+                    // anchors exist for the pair.
+                    let prev = self.apply_lookup_type_3(rec.lookup_index, gids[abs_idx - 1]);
+                    let curr = self.apply_lookup_type_3(rec.lookup_index, gids[abs_idx]);
+                    if let (Some(p), Some(c)) = (prev, curr) {
+                        if let (Some((px, py)), Some((cx, cy))) = (p.exit, c.entry) {
+                            out.push(PosRecord {
+                                glyph_index: abs_idx,
+                                value: PosValue {
+                                    x_placement: px.wrapping_sub(cx),
+                                    y_placement: py.wrapping_sub(cy),
+                                    ..PosValue::default()
+                                },
+                            });
+                        }
                     }
                 }
                 LOOKUP_MARK_BASE_POS if abs_idx + 1 < gids.len() => {
@@ -2275,5 +2676,305 @@ mod tests {
         assert_eq!(value_record_size(all), 16);
         // Empty value format → 0 bytes.
         assert_eq!(value_record_size(0), 0);
+    }
+
+    // ---- LookupType 3 (cursive attachment) -------------------------
+
+    /// Build a CursivePosFormat1 sub-table covering glyphs 5 (entry only),
+    /// 6 (both entry and exit), 7 (exit only). Anchor coords are
+    /// (entry.x, entry.y) = (10*gid, 100), (exit.x, exit.y) = (20*gid, 200).
+    fn build_cursive_pos_format1() -> Vec<u8> {
+        // Anchor table format 1: u16 format + i16 x + i16 y = 6 bytes.
+        fn anchor(x: i16, y: i16) -> Vec<u8> {
+            let mut v = Vec::new();
+            v.extend_from_slice(&1u16.to_be_bytes());
+            v.extend_from_slice(&x.to_be_bytes());
+            v.extend_from_slice(&y.to_be_bytes());
+            v
+        }
+        // Anchors: 6 bytes each. We need:
+        //   gid 5 entry (50, 100)
+        //   gid 6 entry (60, 100), exit (120, 200)
+        //   gid 7 exit  (140, 200)
+        let a5_entry = anchor(50, 100);
+        let a6_entry = anchor(60, 100);
+        let a6_exit = anchor(120, 200);
+        let a7_exit = anchor(140, 200);
+
+        // Coverage format 1 covering [5, 6, 7].
+        let mut cov = Vec::new();
+        cov.extend_from_slice(&1u16.to_be_bytes()); // format
+        cov.extend_from_slice(&3u16.to_be_bytes()); // glyphCount
+        cov.extend_from_slice(&5u16.to_be_bytes());
+        cov.extend_from_slice(&6u16.to_be_bytes());
+        cov.extend_from_slice(&7u16.to_be_bytes());
+
+        // Sub-table header: format(2) + covOff(2) + entryExitCount(2)
+        // + 3 EntryExitRecords (4 bytes each) = 6 + 12 = 18 bytes
+        let header_len = 6 + 3 * 4;
+        let cov_off = (header_len + 4 * 6) as u16; // anchors live before coverage
+                                                   // anchor placement: right after header.
+        let a5_entry_off = header_len as u16;
+        let a6_entry_off = a5_entry_off + 6;
+        let a6_exit_off = a6_entry_off + 6;
+        let a7_exit_off = a6_exit_off + 6;
+
+        let mut sub = Vec::new();
+        sub.extend_from_slice(&1u16.to_be_bytes()); // format
+        sub.extend_from_slice(&cov_off.to_be_bytes());
+        sub.extend_from_slice(&3u16.to_be_bytes()); // entryExitCount
+                                                    // Record [0] gid 5: entry only (exit = 0/null)
+        sub.extend_from_slice(&a5_entry_off.to_be_bytes());
+        sub.extend_from_slice(&0u16.to_be_bytes());
+        // Record [1] gid 6: both
+        sub.extend_from_slice(&a6_entry_off.to_be_bytes());
+        sub.extend_from_slice(&a6_exit_off.to_be_bytes());
+        // Record [2] gid 7: exit only (entry = 0/null)
+        sub.extend_from_slice(&0u16.to_be_bytes());
+        sub.extend_from_slice(&a7_exit_off.to_be_bytes());
+        // Anchors
+        sub.extend_from_slice(&a5_entry);
+        sub.extend_from_slice(&a6_entry);
+        sub.extend_from_slice(&a6_exit);
+        sub.extend_from_slice(&a7_exit);
+        // Coverage
+        sub.extend_from_slice(&cov);
+
+        let lookup = wrap_lookup(LOOKUP_CURSIVE_POS, &sub);
+        wrap_gpos_single(&lookup)
+    }
+
+    #[test]
+    fn cursive_pos_format1_returns_entry_and_exit_anchors() {
+        let bytes = build_cursive_pos_format1();
+        let g = GposTable::parse(&bytes).unwrap();
+        // gid 5 has only entry (50, 100).
+        let r5 = g.apply_lookup_type_3(0, 5).unwrap();
+        assert_eq!(r5.entry, Some((50, 100)));
+        assert_eq!(r5.exit, None);
+        // gid 6 has both.
+        let r6 = g.apply_lookup_type_3(0, 6).unwrap();
+        assert_eq!(r6.entry, Some((60, 100)));
+        assert_eq!(r6.exit, Some((120, 200)));
+        // gid 7 has only exit.
+        let r7 = g.apply_lookup_type_3(0, 7).unwrap();
+        assert_eq!(r7.entry, None);
+        assert_eq!(r7.exit, Some((140, 200)));
+    }
+
+    #[test]
+    fn cursive_pos_returns_none_off_coverage() {
+        let bytes = build_cursive_pos_format1();
+        let g = GposTable::parse(&bytes).unwrap();
+        assert_eq!(g.apply_lookup_type_3(0, 4), None);
+        assert_eq!(g.apply_lookup_type_3(0, 8), None);
+    }
+
+    #[test]
+    fn cursive_pos_returns_none_when_lookup_is_not_type_3() {
+        // Re-use a kerning-only GPOS — its single lookup is type 2.
+        let bytes = build_simple_pp1();
+        let g = GposTable::parse(&bytes).unwrap();
+        assert_eq!(g.apply_lookup_type_3(0, 5), None);
+    }
+
+    #[test]
+    fn lookup_cursive_attachment_walks_lookup_list() {
+        let bytes = build_cursive_pos_format1();
+        let g = GposTable::parse(&bytes).unwrap();
+        // The convenience walker should find the same anchors
+        // regardless of which lookup index hosts them.
+        let r6 = g.lookup_cursive_attachment(6).unwrap();
+        assert_eq!(r6.entry, Some((60, 100)));
+        assert_eq!(r6.exit, Some((120, 200)));
+        // No coverage hit on gid 99 in any cursive lookup.
+        assert_eq!(g.lookup_cursive_attachment(99), None);
+    }
+
+    // ---- LookupType 5 (mark-to-ligature) ---------------------------
+
+    /// Build a MarkLigPosFormat1 sub-table:
+    ///   ligature gid 100 with 2 components,
+    ///   mark gid 200 (class 0) with anchor (10, 0).
+    ///   Component 0 anchor for class 0: (300, 800)
+    ///   Component 1 anchor for class 0: (500, 850)
+    /// Expected:
+    ///   apply(lig=100, comp=0, mark=200) -> (300-10, 800-0) = (290, 800)
+    ///   apply(lig=100, comp=1, mark=200) -> (500-10, 850-0) = (490, 850)
+    fn build_mark_ligature_pos_format1() -> Vec<u8> {
+        fn anchor(x: i16, y: i16) -> Vec<u8> {
+            let mut v = Vec::new();
+            v.extend_from_slice(&1u16.to_be_bytes());
+            v.extend_from_slice(&x.to_be_bytes());
+            v.extend_from_slice(&y.to_be_bytes());
+            v
+        }
+
+        // ---- mark anchor + MarkArray ----
+        let mark_anchor = anchor(10, 0);
+        // MarkArray: markCount(2) + markRecord (4 bytes: class + offset)
+        // = 6 bytes header. Anchor placed right after at offset 6.
+        let mut mark_array = Vec::new();
+        mark_array.extend_from_slice(&1u16.to_be_bytes()); // markCount
+        mark_array.extend_from_slice(&0u16.to_be_bytes()); // class 0
+        mark_array.extend_from_slice(&6u16.to_be_bytes()); // anchor offset
+        mark_array.extend_from_slice(&mark_anchor);
+
+        // ---- LigatureAttach for ligature 100, 2 components, 1 mark class ----
+        // Header: componentCount(2). Each componentRecord = markClassCount * 2
+        // = 2 bytes (1 anchor offset). Total component-record block = 4 bytes.
+        // Anchors placed right after at offsets:
+        //   header(2) + 2 component records (2 bytes each) = 6
+        //   comp0 anchor at 6, comp1 anchor at 12.
+        let comp0_anchor = anchor(300, 800);
+        let comp1_anchor = anchor(500, 850);
+        let mut lig_attach = Vec::new();
+        lig_attach.extend_from_slice(&2u16.to_be_bytes()); // componentCount
+        lig_attach.extend_from_slice(&6u16.to_be_bytes()); // comp0 → offset 6
+        lig_attach.extend_from_slice(&12u16.to_be_bytes()); // comp1 → offset 12
+        lig_attach.extend_from_slice(&comp0_anchor);
+        lig_attach.extend_from_slice(&comp1_anchor);
+
+        // ---- LigatureArray: ligatureCount(1) + offset to lig_attach
+        // Header = 2 + 2 = 4 bytes. lig_attach starts at offset 4.
+        let mut lig_array = Vec::new();
+        lig_array.extend_from_slice(&1u16.to_be_bytes()); // ligatureCount
+        lig_array.extend_from_slice(&4u16.to_be_bytes()); // offset
+        lig_array.extend_from_slice(&lig_attach);
+
+        // ---- Coverage tables ----
+        let mut mark_cov = Vec::new();
+        mark_cov.extend_from_slice(&1u16.to_be_bytes());
+        mark_cov.extend_from_slice(&1u16.to_be_bytes());
+        mark_cov.extend_from_slice(&200u16.to_be_bytes());
+
+        let mut lig_cov = Vec::new();
+        lig_cov.extend_from_slice(&1u16.to_be_bytes());
+        lig_cov.extend_from_slice(&1u16.to_be_bytes());
+        lig_cov.extend_from_slice(&100u16.to_be_bytes());
+
+        // ---- MarkLigPosFormat1 sub-table (12-byte header) ----
+        let header = 12usize;
+        let mark_cov_off = header;
+        let lig_cov_off = mark_cov_off + mark_cov.len();
+        let mark_array_off = lig_cov_off + lig_cov.len();
+        let lig_array_off = mark_array_off + mark_array.len();
+
+        let mut mlp = Vec::new();
+        mlp.extend_from_slice(&1u16.to_be_bytes()); // format
+        mlp.extend_from_slice(&(mark_cov_off as u16).to_be_bytes());
+        mlp.extend_from_slice(&(lig_cov_off as u16).to_be_bytes());
+        mlp.extend_from_slice(&1u16.to_be_bytes()); // markClassCount
+        mlp.extend_from_slice(&(mark_array_off as u16).to_be_bytes());
+        mlp.extend_from_slice(&(lig_array_off as u16).to_be_bytes());
+        mlp.extend_from_slice(&mark_cov);
+        mlp.extend_from_slice(&lig_cov);
+        mlp.extend_from_slice(&mark_array);
+        mlp.extend_from_slice(&lig_array);
+
+        let lookup = wrap_lookup(LOOKUP_MARK_LIGATURE_POS, &mlp);
+        wrap_gpos_single(&lookup)
+    }
+
+    #[test]
+    fn mark_to_ligature_attaches_to_each_component() {
+        let bytes = build_mark_ligature_pos_format1();
+        let g = GposTable::parse(&bytes).unwrap();
+        // Component 0: (300 - 10, 800 - 0) = (290, 800)
+        assert_eq!(g.apply_lookup_type_5(0, 100, 0, 200), Some((290, 800)));
+        // Component 1: (500 - 10, 850 - 0) = (490, 850)
+        assert_eq!(g.apply_lookup_type_5(0, 100, 1, 200), Some((490, 850)));
+    }
+
+    #[test]
+    fn mark_to_ligature_returns_none_for_out_of_range_component() {
+        let bytes = build_mark_ligature_pos_format1();
+        let g = GposTable::parse(&bytes).unwrap();
+        // Only 2 components (0, 1); component 2 is out of range.
+        assert_eq!(g.apply_lookup_type_5(0, 100, 2, 200), None);
+    }
+
+    #[test]
+    fn mark_to_ligature_returns_none_for_uncovered_glyphs() {
+        let bytes = build_mark_ligature_pos_format1();
+        let g = GposTable::parse(&bytes).unwrap();
+        // Wrong ligature glyph.
+        assert_eq!(g.apply_lookup_type_5(0, 101, 0, 200), None);
+        // Wrong mark glyph.
+        assert_eq!(g.apply_lookup_type_5(0, 100, 0, 201), None);
+    }
+
+    #[test]
+    fn lookup_mark_to_ligature_walks_lookup_list() {
+        let bytes = build_mark_ligature_pos_format1();
+        let g = GposTable::parse(&bytes).unwrap();
+        assert_eq!(g.lookup_mark_to_ligature(100, 1, 200), Some((490, 850)));
+        assert_eq!(g.lookup_mark_to_ligature(99, 0, 200), None);
+    }
+
+    // ---- ExtensionPos (LookupType 9) wrapping at the lookup level --
+
+    /// Wrap an arbitrary sub-table inside an ExtensionPosFormat1 wrapper
+    /// so the resulting Lookup carries `lookupType = 9` even though its
+    /// effective sub-table is `inner_type`.
+    ///
+    /// ExtensionPosFormat1 wire layout:
+    ///   u16 format = 1
+    ///   u16 extensionLookupType
+    ///   Offset32 extensionOffset (relative to ExtensionPos sub-table)
+    fn build_extension_wrapped_lookup(inner_type: u16, inner_sub: &[u8]) -> Vec<u8> {
+        // Build the wrapper sub-table: 8-byte header + inner sub-table.
+        let mut ext_sub = Vec::new();
+        ext_sub.extend_from_slice(&1u16.to_be_bytes()); // format
+        ext_sub.extend_from_slice(&inner_type.to_be_bytes()); // extensionLookupType
+        ext_sub.extend_from_slice(&8u32.to_be_bytes()); // extensionOffset = 8
+        ext_sub.extend_from_slice(inner_sub);
+        // Wrap as an outer LookupType-9 lookup.
+        let lookup = wrap_lookup(LOOKUP_EXTENSION_POS, &ext_sub);
+        wrap_gpos_single(&lookup)
+    }
+
+    #[test]
+    fn extension_wrapper_unwraps_for_cursive_pos_lookup() {
+        // Build a CursivePosFormat1 sub-table by extracting it from the
+        // build_cursive_pos_format1 fixture (which wraps it as a plain
+        // type-3 lookup). We re-build the inner sub-table here so we
+        // can wrap it with type 9 instead.
+        // Easier: inline a tiny cursive sub-table covering only gid 6.
+        let mut cursive_sub = Vec::new();
+        // format=1, covOff=10, entryExitCount=1, then EntryExitRecord
+        // (entryOff=20, exitOff=26), then anchors at 20+26.
+        // header = 6 + 4 = 10.
+        cursive_sub.extend_from_slice(&1u16.to_be_bytes()); // format
+        cursive_sub.extend_from_slice(&22u16.to_be_bytes()); // covOff (after anchors)
+        cursive_sub.extend_from_slice(&1u16.to_be_bytes()); // entryExitCount
+                                                            // EntryExitRecord
+        cursive_sub.extend_from_slice(&10u16.to_be_bytes()); // entryOff
+        cursive_sub.extend_from_slice(&16u16.to_be_bytes()); // exitOff
+                                                             // Entry anchor (1, x=70, y=110)
+        cursive_sub.extend_from_slice(&1u16.to_be_bytes());
+        cursive_sub.extend_from_slice(&70i16.to_be_bytes());
+        cursive_sub.extend_from_slice(&110i16.to_be_bytes());
+        // Exit anchor (1, x=130, y=210)
+        cursive_sub.extend_from_slice(&1u16.to_be_bytes());
+        cursive_sub.extend_from_slice(&130i16.to_be_bytes());
+        cursive_sub.extend_from_slice(&210i16.to_be_bytes());
+        // Coverage format 1 covering [6]
+        cursive_sub.extend_from_slice(&1u16.to_be_bytes());
+        cursive_sub.extend_from_slice(&1u16.to_be_bytes());
+        cursive_sub.extend_from_slice(&6u16.to_be_bytes());
+
+        let bytes = build_extension_wrapped_lookup(LOOKUP_CURSIVE_POS, &cursive_sub);
+        let g = GposTable::parse(&bytes).unwrap();
+
+        // The lookup is type 9 on disk; lookup_list reports the
+        // *effective* type after unwrap.
+        let v: Vec<_> = g.lookup_list().collect();
+        assert_eq!(v, vec![(0u16, LOOKUP_CURSIVE_POS, 1u16)]);
+
+        // apply_lookup_type_3 must transparently unwrap the LT9 wrapper.
+        let r = g.apply_lookup_type_3(0, 6).unwrap();
+        assert_eq!(r.entry, Some((70, 110)));
+        assert_eq!(r.exit, Some((130, 210)));
     }
 }

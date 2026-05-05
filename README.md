@@ -28,12 +28,18 @@ ligatures and kerning.
   can ask "which lookup indices implement feature `init` for script
   `arab`?"
 - `GPOS` LookupType 1 (single positioning — formats 1 + 2),
-  LookupType 2 (pair-adjustment / kerning), LookupType 4
-  (mark-to-base attachment), LookupType 6 (mark-to-mark stacking),
-  and LookupType 8 (chained-context positioning — formats 1 / 2 / 3,
-  with nested LT 1 / 2 / 4 / 6 / 8 dispatch). ExtensionPos
-  (LookupType 9) is unwrapped transparently. `Font::gpos_lookup_list()`
-  + `Font::gsub_lookup_list()` enumerate every lookup as
+  LookupType 2 (pair-adjustment / kerning), LookupType 3 (cursive
+  attachment — entry/exit anchor pairs for Arabic Nastaliq +
+  script-font cursive chaining), LookupType 4 (mark-to-base
+  attachment), LookupType 5 (mark-to-ligature attachment — closes
+  the `fi`-ligature + above-mark gap), LookupType 6 (mark-to-mark
+  stacking), and LookupType 8 (chained-context positioning —
+  formats 1 / 2 / 3, with nested LT 1 / 2 / 3 / 4 / 6 / 8 dispatch).
+  ExtensionPos (LookupType 9) is unwrapped transparently — both at
+  the sub-table level (a LT-9 sub-table inside any lookup) and at
+  the lookup level (a whole lookup whose `lookupType` is 9 wrapping
+  any of the supported inner types). `Font::gpos_lookup_list()` +
+  `Font::gsub_lookup_list()` enumerate every lookup as
   `(index, effective_type, subtable_count)` for shapers that need to
   find e.g. every chained-context lookup without probing each index.
 - `GDEF` (glyph class definitions, used to skip mark glyphs).
@@ -195,6 +201,25 @@ for (lookup_index, lookup_type, _sub_count) in font.gpos_lookup_list() {
     }
 }
 
+// GPOS LookupType 3 — cursive attachment. Returns a CursiveAttachment
+// with (entry, exit) anchor points (each Option). Chain glyph N+1's
+// entry onto glyph N's exit: per-glyph delta = prev.exit - this.entry.
+if let Some(attach) = font.lookup_cursive_attachment(gid_a) {
+    let _ = (attach.entry, attach.exit);
+}
+
+// GPOS LookupType 5 — mark-to-ligature attachment. Pick the ligature
+// component the mark sits over (0-indexed: 0 = first component, etc.).
+// Returns (dx, dy) to shift the mark's pen origin.
+if let Some(lig_gid) = font.glyph_index('\u{FEFB}') {
+    // LAM-ALEF is a 2-component ligature; its second component (ALEF)
+    // is index 1.
+    if let Some(mark_gid) = font.glyph_index('\u{064E}') {
+        // FATHA above LAM (component 0 of LAM-ALEF).
+        let _ = font.lookup_mark_to_ligature(lig_gid, 0, mark_gid);
+    }
+}
+
 // GPOS LookupType 8 — chained-context positioning. Returns a Vec of
 // PosRecord(absolute glyph index, four-field PosValue). The shaper
 // folds these deltas into its own glyph-position state.
@@ -274,17 +299,16 @@ if vfont.is_variable() {
 - Bidi, Arabic shaping, Indic conjuncts, complex contextual GSUB/GPOS.
 - TrueType bytecode hinting (modern AA at ≥ 16 px does not need it).
 - cmap formats 2, 8, 10, 13.
-- GPOS lookup types 3 (cursive attachment, blocks Arabic Nastaliq
-  + script-font cursive chaining), 5 (mark-to-ligature, closes the
-  ligature + mark gap e.g. `fi` + dot-above) and 7 (extension at
-  the lookup level — the LT 9 sub-table-level wrapper IS handled
-  transparently for every supported type) remain deferred. LT 1
-  (single), 2 (pair), 4 (mark-to-base), 6 (mark-to-mark) and 8
-  (chained context) are implemented. All seven public GSUB lookup
+- All GPOS lookup types except LookupType 7 (the now-fully-handled
+  LookupType 9 ExtensionPos wrapper plays its role) are implemented:
+  1 (single), 2 (pair), 3 (cursive attachment), 4 (mark-to-base),
+  5 (mark-to-ligature), 6 (mark-to-mark), 8 (chained context with
+  nested LT 1/2/3/4/6/8 dispatch). All seven public GSUB lookup
   types (1 single, 2 multiple, 3 alternate, 4 ligature, 5
   contextual, 6 chained context, 8 reverse chained context) are
-  implemented; ExtensionSubst LookupType 7 is unwrapped
-  transparently for every type.
+  implemented; ExtensionSubst LookupType 7 (GSUB) and ExtensionPos
+  LookupType 9 (GPOS) are unwrapped transparently for every type
+  both at the sub-table and lookup level.
 - COLR **v1** paint graph (gradients, transforms, composites) — only
   the v0 flat layer stack is supported.
 - sbix `'dupe'` chasing (the indirection sentinel is surfaced

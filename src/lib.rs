@@ -58,7 +58,7 @@ pub use tables::cbdt::ColorBitmap;
 pub use tables::cblc::{BigGlyphMetrics, SmallGlyphMetrics};
 pub use tables::colr::ColorLayer;
 pub use tables::fvar::{NamedInstance, VariationAxis};
-pub use tables::gpos::{PosRecord, PosValue};
+pub use tables::gpos::{CursiveAttachment, PosRecord, PosValue};
 pub use tables::gsub::GsubFeature;
 pub use tables::sbix::SbixGlyph;
 
@@ -755,6 +755,80 @@ impl<'a> Font<'a> {
     /// uppercase glyph to add side bearing.
     pub fn gpos_apply_lookup_type_1(&self, lookup_index: u16, gid: u16) -> Option<PosValue> {
         self.gpos.as_ref()?.apply_lookup_type_1(lookup_index, gid)
+    }
+
+    /// Apply GPOS LookupType 3 (Cursive Attachment) to `gid` via the
+    /// lookup at `lookup_index`.
+    ///
+    /// Returns `Some(CursiveAttachment { entry, exit })` when the
+    /// lookup's coverage covers `gid`. Either anchor may be `None`
+    /// (the spec allows one-sided cursive glyphs at cluster
+    /// boundaries). Returns `None` when no rule applies, the lookup
+    /// index is out of range, the referenced lookup is not a cursive
+    /// lookup, or the font has no GPOS. ExtensionPos (LookupType 9)
+    /// wrappers are unwrapped transparently.
+    ///
+    /// Cursive attachment chains glyph N+1 onto glyph N: the shaper
+    /// translates glyph N+1's pen origin so its `entry` anchor lands
+    /// on glyph N's `exit` anchor — i.e. the per-glyph delta is
+    /// `prev.exit - this.entry` in (x, y) font units.
+    pub fn gpos_apply_lookup_type_3(
+        &self,
+        lookup_index: u16,
+        gid: u16,
+    ) -> Option<CursiveAttachment> {
+        self.gpos.as_ref()?.apply_lookup_type_3(lookup_index, gid)
+    }
+
+    /// Walk every GPOS LookupType-3 (Cursive Attachment) lookup
+    /// looking for `gid`'s entry/exit anchor pair. Convenience wrapper
+    /// around [`Self::gpos_apply_lookup_type_3`] for fonts that ship a
+    /// single `curs` lookup (the common Arabic Nastaliq case). Returns
+    /// the first hit in lookup order.
+    pub fn lookup_cursive_attachment(&self, gid: u16) -> Option<CursiveAttachment> {
+        self.gpos.as_ref()?.lookup_cursive_attachment(gid)
+    }
+
+    /// Apply GPOS LookupType 5 (Mark-to-Ligature Attachment) to the
+    /// `(ligature, ligature_component, mark)` triple via the lookup
+    /// at `lookup_index`.
+    ///
+    /// Returns `Some((dx, dy))` (font units, TT Y-up) — the offset to
+    /// add to the mark's pen origin so its class anchor lands on the
+    /// selected component's anchor. `ligature_component` is 0-indexed
+    /// (component 0 = first component, e.g. `f` in `fi`). Returns
+    /// `None` when no rule covers both glyphs, when the component
+    /// index is out of range, or when no anchor exists for the mark's
+    /// class on the requested component. ExtensionPos (LookupType 9)
+    /// wrappers are unwrapped transparently.
+    ///
+    /// Closes the "fi + dot-above" gap: a mark following the second
+    /// codepoint of a 2-component ligature attaches to component 1.
+    pub fn gpos_apply_lookup_type_5(
+        &self,
+        lookup_index: u16,
+        ligature: u16,
+        ligature_component: u16,
+        mark: u16,
+    ) -> Option<(i16, i16)> {
+        self.gpos
+            .as_ref()?
+            .apply_lookup_type_5(lookup_index, ligature, ligature_component, mark)
+    }
+
+    /// Walk every GPOS LookupType-5 (Mark-to-Ligature) lookup looking
+    /// for the `(ligature, ligature_component, mark)` triple.
+    /// Convenience wrapper around [`Self::gpos_apply_lookup_type_5`]
+    /// that scans the LookupList rather than a specific index.
+    pub fn lookup_mark_to_ligature(
+        &self,
+        ligature: u16,
+        ligature_component: u16,
+        mark: u16,
+    ) -> Option<(i16, i16)> {
+        self.gpos
+            .as_ref()?
+            .lookup_mark_to_ligature(ligature, ligature_component, mark)
     }
 
     /// Apply GPOS LookupType 8 (Chained Contexts Positioning) to the
