@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.4](https://github.com/OxideAV/oxideav-ttf/compare/v0.1.3...v0.1.4) - 2026-05-05
+
+### Other
+
+- LookupType 3 (cursive) + LookupType 5 (mark-to-ligature) + real Arabic fixture
+
 ### Added — GPOS LookupType 3 (cursive attachment) + LookupType 5 (mark-to-ligature) + lookup-level ExtensionPos coverage + real Arabic GPOS fixture (2026-05-04)
 
 Closes the remaining GPOS lookup-type gaps left from the prior
