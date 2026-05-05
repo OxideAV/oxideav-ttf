@@ -117,6 +117,40 @@ impl<'a> GsubTable<'a> {
         })
     }
 
+    /// Enumerate every lookup in the LookupList as
+    /// `(lookup_index, lookup_type, subtable_count)`.
+    ///
+    /// The reported `lookup_type` is the **effective** type after
+    /// unwrapping any LookupType-7 ExtensionSubst wrapper — i.e. the
+    /// caller sees `4` for a ligature lookup whether it's stored as
+    /// a plain LookupType-4 lookup or as a LookupType-7 wrapper. This
+    /// lets downstream find lookups of a specific type without
+    /// probing every index.
+    pub fn lookup_list(&self) -> impl Iterator<Item = (u16, u16, u16)> + '_ {
+        let lookup_count = if self.lookup_list_off == 0 {
+            0
+        } else {
+            self.bytes
+                .get(self.lookup_list_off as usize..)
+                .and_then(|s| read_u16(s, 0).ok())
+                .unwrap_or(0)
+        };
+        (0..lookup_count).filter_map(move |i| {
+            let lookup = lookup_table_slice(self.bytes, self.lookup_list_off, i)?;
+            if lookup.len() < 6 {
+                return None;
+            }
+            let mut kind = read_u16(lookup, 0).ok()?;
+            let sub_count = read_u16(lookup, 4).ok()?;
+            if kind == LOOKUP_EXTENSION_SUBST && sub_count > 0 {
+                if let Some(t) = peek_extension_type(lookup) {
+                    kind = t;
+                }
+            }
+            Some((i, kind, sub_count))
+        })
+    }
+
     /// Return all features active for `script_tag` under `lang_tag`.
     ///
     /// `lang_tag = None` → use the script's `DefaultLangSys`. If

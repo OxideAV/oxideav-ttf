@@ -7,6 +7,93 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — GPOS LookupType 1 + LookupType 8 + LookupList enumeration (2026-05-04)
+
+Closes the highest-impact gap left in the GPOS lookup-type grid:
+single-glyph positioning (LT 1) and chained-context positioning
+(LT 8) plus a public LookupList enumeration that lets downstream
+shapers find every chained / mark-to-ligature / extension lookup
+without probing each index in turn.
+
+- `tables::gpos::PosValue` (re-exported as `oxideav_ttf::PosValue`)
+  — a decoded ValueRecord: `x_placement`, `y_placement`,
+  `x_advance`, `y_advance` (all `i16`, TT Y-up font units). Fields
+  whose `valueFormat` bit isn't set come back as `0`. The four
+  device-table offsets in the high byte of `valueFormat` are
+  skipped over (we don't run the TT bytecode interpreter so
+  device-pixel snapping is out of scope).
+- `tables::gpos::PosRecord` (re-exported as `oxideav_ttf::PosRecord`)
+  — one per-glyph adjustment emitted by a chained-context match:
+  `glyph_index` (absolute offset into the input glyph run) +
+  `value: PosValue`. Multiple records may target the same glyph
+  index when nested lookups stack adjustments; callers add (don't
+  replace) deltas.
+- `tables::gpos::GposTable::apply_lookup_type_1(lookup_index, gid)
+   -> Option<PosValue>` — Single Adjustment Positioning. Both
+  formats are supported:
+  - **Format 1** — one shared `ValueRecord` applied to every
+    glyph the coverage table lists (typical for "shift this whole
+    script up by N units" / `valt` features).
+  - **Format 2** — per-glyph `ValueRecord` indexed by the
+    coverage index (used by `cpsp` capital-spacing and similar).
+
+  ExtensionPos (LookupType 9) wrappers are unwrapped transparently.
+- `tables::gpos::GposTable::apply_lookup_type_8(lookup_index, gids,
+   pos) -> Option<Vec<PosRecord>>` — Chained Contexts Positioning.
+  Same wire shape as GSUB LookupType 6 — formats 1 (glyph
+  sequence), 2 (class-based) and 3 (coverage-based) — but each
+  `PosLookupRecord { sequenceIndex, lookupListIndex }` references
+  another GPOS lookup. The walker dispatches nested LookupType 1 /
+  2 (kerning) / 4 (mark-to-base) / 6 (mark-to-mark) / 8 (recursive)
+  references and returns a single concatenated `Vec<PosRecord>`.
+  Recursion is bounded by `MAX_NESTED_LOOKUP_DEPTH = 8` to defuse
+  pathological self-referential graphs (same fence as GSUB).
+  Backtrack sequences are matched in reverse-text order per spec.
+- `tables::gpos::GposTable::lookup_list() -> impl Iterator<Item =
+   (u16, u16, u16)>` and the matching
+  `tables::gsub::GsubTable::lookup_list()` — enumerate every
+  lookup as `(lookup_index, lookup_type, subtable_count)`. The
+  reported `lookup_type` is the **effective** type after
+  unwrapping any LookupType-7 ExtensionSubst (GSUB) or
+  LookupType-9 ExtensionPos (GPOS) wrapper, so callers don't
+  need to know whether a lookup is wrapped.
+- Public `Font` API:
+  - `Font::gpos_apply_lookup_type_1(lookup_index, gid) -> Option<PosValue>`
+  - `Font::gpos_apply_lookup_type_8(lookup_index, gids, pos) -> Option<Vec<PosRecord>>`
+  - `Font::gpos_lookup_list() -> Vec<(u16, u16, u16)>`
+  - `Font::gsub_lookup_list() -> Vec<(u16, u16, u16)>`
+- New tests:
+  - `tables::gpos::tests::single_pos_format1_returns_shared_value_for_every_covered_glyph`
+  - `tables::gpos::tests::single_pos_format2_returns_per_glyph_value`
+  - `tables::gpos::tests::single_pos_returns_none_when_lookup_index_out_of_range`
+  - `tables::gpos::tests::single_pos_returns_none_when_lookup_is_not_type_1`
+  - `tables::gpos::tests::chain_context_pos_format1_dispatches_nested_single_pos`
+  - `tables::gpos::tests::chain_context_pos_format1_no_match_when_backtrack_or_lookahead_misses`
+  - `tables::gpos::tests::chain_context_pos_format3_coverage_based_dispatch`
+  - `tables::gpos::tests::chain_context_pos_format3_no_match_when_window_short_or_uncovered`
+  - `tables::gpos::tests::chain_context_pos_format2_class_based_dispatch`
+  - `tables::gpos::tests::chain_context_pos_format2_no_match_when_class_differs`
+  - `tables::gpos::tests::lookup_list_reports_index_type_and_subtable_count`
+  - `tables::gpos::tests::value_record_size_packs_low_byte_only`
+  - Integration tests against DejaVu Sans:
+    `gpos_lookup_list_enumerates_pair_pos_in_dejavu_sans`,
+    `gsub_lookup_list_enumerates_ligature_in_dejavu_sans`,
+    `new_gpos_lookup_types_are_panic_free_across_dejavu_lookups`
+    (drives every LT 1 / LT 8 lookup found in the live GPOS table
+    through both apply paths to prove panic freedom on real
+    on-disk geometry).
+
+GPOS LookupTypes 3 (cursive attachment), 5 (mark-to-ligature), 7
+(extension at the lookup level — the LT 9 wrapper handles the
+sub-table level transparently for every supported type) are still
+deferred. LT 3 unblocks Arabic Nastaliq / script-font cursive
+chaining; LT 5 closes the ligature + mark gap (fi + dot-above).
+
+Spec: Microsoft OpenType §"Single Adjustment Positioning Subtable"
+(LookupType 1 Format 1 / 2), §"Chained Sequence Context Format
+1 / 2 / 3" (the GSUB and GPOS tables share the wire format),
+Apple TrueType Reference §"GPOS", ISO/IEC 14496-22 §6 (OFF).
+
 ## [0.1.2](https://github.com/OxideAV/oxideav-ttf/compare/v0.1.1...v0.1.2) - 2026-05-04
 
 ### Other

@@ -27,7 +27,15 @@ ligatures and kerning.
   fonts). All sit behind a ScriptList / FeatureList walk so callers
   can ask "which lookup indices implement feature `init` for script
   `arab`?"
-- `GPOS` LookupType 2 (pair-adjustment / kerning).
+- `GPOS` LookupType 1 (single positioning — formats 1 + 2),
+  LookupType 2 (pair-adjustment / kerning), LookupType 4
+  (mark-to-base attachment), LookupType 6 (mark-to-mark stacking),
+  and LookupType 8 (chained-context positioning — formats 1 / 2 / 3,
+  with nested LT 1 / 2 / 4 / 6 / 8 dispatch). ExtensionPos
+  (LookupType 9) is unwrapped transparently. `Font::gpos_lookup_list()`
+  + `Font::gsub_lookup_list()` enumerate every lookup as
+  `(index, effective_type, subtable_count)` for shapers that need to
+  find e.g. every chained-context lookup without probing each index.
 - `GDEF` (glyph class definitions, used to skip mark glyphs).
 
 The companion [`oxideav-scribe`](https://github.com/OxideAV/oxideav-scribe)
@@ -176,6 +184,42 @@ for feat in font.gsub_features_for_script(*b"arab", None) {
     }
 }
 
+// GPOS LookupType 1 — single-glyph positioning. Returns four signed
+// i16 deltas: x_placement / y_placement / x_advance / y_advance. Used
+// by features like `cpsp` (capital spacing).
+for (lookup_index, lookup_type, _sub_count) in font.gpos_lookup_list() {
+    if lookup_type == 1 {
+        if let Some(adj) = font.gpos_apply_lookup_type_1(lookup_index, gid_a) {
+            let _ = (adj.x_placement, adj.y_placement, adj.x_advance, adj.y_advance);
+        }
+    }
+}
+
+// GPOS LookupType 8 — chained-context positioning. Returns a Vec of
+// PosRecord(absolute glyph index, four-field PosValue). The shaper
+// folds these deltas into its own glyph-position state.
+for (lookup_index, lookup_type, _sub_count) in font.gpos_lookup_list() {
+    if lookup_type == 8 {
+        let run: Vec<u16> = vec![/* ... shaped run ... */];
+        for pos in 0..run.len() {
+            if let Some(records) = font.gpos_apply_lookup_type_8(lookup_index, &run, pos) {
+                for r in records {
+                    let _ = (r.glyph_index, r.value.x_advance, r.value.y_advance);
+                }
+            }
+        }
+    }
+}
+
+// LookupList enumeration — find every lookup of a given (effective,
+// post-extension-unwrap) type without probing each index in turn.
+let chain_pos_lookups: Vec<u16> = font
+    .gpos_lookup_list()
+    .into_iter()
+    .filter_map(|(idx, ty, _)| (ty == 8).then_some(idx))
+    .collect();
+let _ = chain_pos_lookups;
+
 // Unicode Variation Sequences (cmap format 14). Used by emoji
 // presentation selectors and registered IVS for CJK.
 let _ = font.lookup_variation('\u{1F600}', '\u{FE0F}'); // grinning face + VS-16
@@ -230,12 +274,17 @@ if vfont.is_variable() {
 - Bidi, Arabic shaping, Indic conjuncts, complex contextual GSUB/GPOS.
 - TrueType bytecode hinting (modern AA at ≥ 16 px does not need it).
 - cmap formats 2, 8, 10, 13.
-- GPOS lookup types 1 / 3 / 5 / 7 / 8 / 9 remain deferred (pair /
-  mark-base / mark-mark are implemented). All seven public GSUB
-  lookup types (1 single, 2 multiple, 3 alternate, 4 ligature, 5
+- GPOS lookup types 3 (cursive attachment, blocks Arabic Nastaliq
+  + script-font cursive chaining), 5 (mark-to-ligature, closes the
+  ligature + mark gap e.g. `fi` + dot-above) and 7 (extension at
+  the lookup level — the LT 9 sub-table-level wrapper IS handled
+  transparently for every supported type) remain deferred. LT 1
+  (single), 2 (pair), 4 (mark-to-base), 6 (mark-to-mark) and 8
+  (chained context) are implemented. All seven public GSUB lookup
+  types (1 single, 2 multiple, 3 alternate, 4 ligature, 5
   contextual, 6 chained context, 8 reverse chained context) are
-  implemented; ExtensionSubst LookupType 7 is unwrapped transparently
-  for every type.
+  implemented; ExtensionSubst LookupType 7 is unwrapped
+  transparently for every type.
 - COLR **v1** paint graph (gradients, transforms, composites) — only
   the v0 flat layer stack is supported.
 - sbix `'dupe'` chasing (the indirection sentinel is surfaced

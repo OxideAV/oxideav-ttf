@@ -58,6 +58,7 @@ pub use tables::cbdt::ColorBitmap;
 pub use tables::cblc::{BigGlyphMetrics, SmallGlyphMetrics};
 pub use tables::colr::ColorLayer;
 pub use tables::fvar::{NamedInstance, VariationAxis};
+pub use tables::gpos::{PosRecord, PosValue};
 pub use tables::gsub::GsubFeature;
 pub use tables::sbix::SbixGlyph;
 
@@ -736,6 +737,79 @@ impl<'a> Font<'a> {
             .as_ref()
             .map(|g| g.is_mark(glyph_id))
             .unwrap_or(false)
+    }
+
+    /// Apply GPOS LookupType 1 (Single Adjustment Positioning) to
+    /// `gid` via the lookup at `lookup_index`.
+    ///
+    /// Returns `Some(PosValue)` with the four geometric adjustments
+    /// (`xPlacement`, `yPlacement`, `xAdvance`, `yAdvance`) when the
+    /// lookup's coverage covers `gid`, or `None` when no rule applies
+    /// (or the font has no GPOS). Both SinglePosFormat 1 (one shared
+    /// ValueRecord) and Format 2 (per-glyph ValueRecord) are
+    /// supported; ExtensionPos (LookupType 9) wrappers are unwrapped
+    /// transparently.
+    ///
+    /// Use this for features that don't need pair context — e.g. the
+    /// `cpsp` (capital spacing) feature applies a SinglePos to every
+    /// uppercase glyph to add side bearing.
+    pub fn gpos_apply_lookup_type_1(&self, lookup_index: u16, gid: u16) -> Option<PosValue> {
+        self.gpos.as_ref()?.apply_lookup_type_1(lookup_index, gid)
+    }
+
+    /// Apply GPOS LookupType 8 (Chained Contexts Positioning) to the
+    /// glyph run starting at `pos` via the lookup at `lookup_index`.
+    ///
+    /// Returns `Some(records)` — a `Vec<PosRecord>` listing every
+    /// per-glyph adjustment the matched chain rule emits — when one
+    /// of the lookup's sub-tables matches the
+    /// `(backtrack, input, lookahead)` window around `pos`. Each
+    /// `PosRecord.glyph_index` is an absolute offset into `gids`.
+    ///
+    /// All three sub-table formats (1 glyph-sequence, 2 class-based,
+    /// 3 coverage-based) are supported. ExtensionPos (LookupType 9)
+    /// wrappers are unwrapped transparently. Nested
+    /// `PosLookupRecord` references into LookupType 1 / 2 / 4 / 6 / 8
+    /// dispatch through the same machinery; recursion is bounded.
+    pub fn gpos_apply_lookup_type_8(
+        &self,
+        lookup_index: u16,
+        gids: &[u16],
+        pos: usize,
+    ) -> Option<Vec<PosRecord>> {
+        self.gpos
+            .as_ref()?
+            .apply_lookup_type_8(lookup_index, gids, pos)
+    }
+
+    /// Enumerate every GPOS lookup as `(lookup_index, lookup_type,
+    /// subtable_count)`.
+    ///
+    /// The reported `lookup_type` is the **effective** type after
+    /// unwrapping any LookupType-9 ExtensionPos wrapper. Returns an
+    /// empty iterator when the font has no GPOS table.
+    ///
+    /// Use this to find every chained-context positioning lookup, or
+    /// every mark-to-ligature lookup, etc., without probing each
+    /// index in turn — for example,
+    /// `font.gpos_lookup_list().filter(|(_, t, _)| *t == 8)` enumerates
+    /// the chained-context-positioning lookups.
+    pub fn gpos_lookup_list(&self) -> Vec<(u16, u16, u16)> {
+        match self.gpos.as_ref() {
+            Some(g) => g.lookup_list().collect(),
+            None => Vec::new(),
+        }
+    }
+
+    /// Enumerate every GSUB lookup as `(lookup_index, lookup_type,
+    /// subtable_count)`. Same shape as [`Self::gpos_lookup_list`] —
+    /// the reported `lookup_type` is post-unwrap of any
+    /// LookupType-7 ExtensionSubst wrapper.
+    pub fn gsub_lookup_list(&self) -> Vec<(u16, u16, u16)> {
+        match self.gsub.as_ref() {
+            Some(g) => g.lookup_list().collect(),
+            None => Vec::new(),
+        }
     }
 
     // ---- color bitmap glyphs (CBDT/CBLC) ---------------------------------

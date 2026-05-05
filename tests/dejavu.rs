@@ -182,3 +182,86 @@ fn outline_only_font_has_no_color_tables() {
     assert!(f.sbix_strikes().is_empty());
     assert!(f.sbix_glyph(a, 32).is_none());
 }
+
+/// `gpos_lookup_list` should return one tuple per GPOS lookup with
+/// the lookup type post-extension-unwrap. DejaVu Sans ships at
+/// least one LookupType-2 (pair-pos) lookup driving its `kern`
+/// feature; verify that turns up in the enumeration.
+#[test]
+fn gpos_lookup_list_enumerates_pair_pos_in_dejavu_sans() {
+    let f = Font::from_bytes(FIXTURE_SANS).unwrap();
+    let lookups = f.gpos_lookup_list();
+    assert!(!lookups.is_empty(), "DejaVu Sans should have GPOS lookups");
+    // At least one LookupType-2 (pair adjustment) is required for the
+    // `av_kerning_is_negative_sans` test above to find anything.
+    let pp_count = lookups.iter().filter(|(_, t, _)| *t == 2).count();
+    assert!(
+        pp_count >= 1,
+        "expected ≥1 LookupType-2 (pair pos) lookup, got {pp_count}"
+    );
+    // Indices must be contiguous from 0 (LookupList invariant).
+    for (i, (idx, _, sub_count)) in lookups.iter().enumerate() {
+        assert_eq!(*idx as usize, i);
+        assert!(*sub_count > 0, "lookup {i} has 0 subtables");
+    }
+}
+
+/// `gsub_lookup_list` should enumerate every GSUB lookup with the
+/// effective type (post LookupType-7 ExtensionSubst unwrap). DejaVu
+/// Sans's `liga` feature is implemented via at least one
+/// LookupType-4 (ligature) lookup; verify it shows up.
+#[test]
+fn gsub_lookup_list_enumerates_ligature_in_dejavu_sans() {
+    let f = Font::from_bytes(FIXTURE_SANS).unwrap();
+    let lookups = f.gsub_lookup_list();
+    assert!(!lookups.is_empty(), "DejaVu Sans should have GSUB lookups");
+    let lig_count = lookups.iter().filter(|(_, t, _)| *t == 4).count();
+    assert!(
+        lig_count >= 1,
+        "expected ≥1 LookupType-4 (ligature) lookup, got {lig_count}"
+    );
+    // Cross-check: every LookupType-4 lookup index reported by
+    // `liga`/`rlig`/`dlig` features must show up here as type 4.
+    let feats = f.gsub_features_for_script(*b"latn", None);
+    for feat in &feats {
+        if matches!(&feat.tag, b"liga" | b"rlig" | b"dlig") {
+            for &li in &feat.lookup_indices {
+                let entry = lookups.iter().find(|(idx, _, _)| *idx == li);
+                let (_, ty, _) = entry.unwrap_or_else(|| {
+                    panic!("feature lookup index {li} missing from gsub_lookup_list")
+                });
+                // Some `liga` lookups are LookupType-4 (the typical case)
+                // but a few may be other types under chained context;
+                // for DejaVu specifically, the `liga` lookup is type 4.
+                if &feat.tag == b"liga" {
+                    assert_eq!(*ty, 4, "liga lookup {li} reported as type {ty}");
+                }
+            }
+        }
+    }
+}
+
+/// Sanity-walk every GPOS lookup type in DejaVu Sans through the new
+/// per-lookup entry points. Most won't fire (most fonts use only
+/// pair-pos), but the apply paths must not panic on real on-disk
+/// tables — the test is the panic-freedom guarantee.
+#[test]
+fn new_gpos_lookup_types_are_panic_free_across_dejavu_lookups() {
+    let f = Font::from_bytes(FIXTURE_SANS).unwrap();
+    let a_gid = f.glyph_index('A').unwrap();
+    let v_gid = f.glyph_index('V').unwrap();
+    for (idx, ty, _) in f.gpos_lookup_list() {
+        // LookupType 1: poke with a single glyph.
+        if ty == 1 {
+            let _ = f.gpos_apply_lookup_type_1(idx, a_gid);
+            let _ = f.gpos_apply_lookup_type_1(idx, v_gid);
+        }
+        // LookupType 8: poke at every position of a small glyph run.
+        if ty == 8 {
+            let run = [a_gid, v_gid, a_gid];
+            for pos in 0..run.len() {
+                let _ = f.gpos_apply_lookup_type_8(idx, &run, pos);
+            }
+        }
+    }
+}
