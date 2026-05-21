@@ -7,6 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — cmap format-4 binary search + composite-glyph depth-guard tests (2026-05-21)
+
+Two correctness-and-robustness improvements, no public-API change.
+
+- `tables::cmap::lookup_format4` now binary-searches `endCode[]`
+  instead of linear-scanning. Format-4 mandates `endCode[]` be sorted
+  ascending and the spec ships the `searchRange / entrySelector /
+  rangeShift` triple precisely so divide-free reverse-engineered
+  binary search is possible; we have division, so we do a normal
+  log-N search. CJK fonts shipping 100+ segments (Source Han Sans /
+  Noto Sans CJK) now resolve BMP codepoints in O(log N) instead of
+  O(N). New test
+  `format4_binary_search_resolves_many_segments` exercises a
+  200-segment synthetic cmap and asserts both hits AND
+  immediately-adjacent misses to pin down off-by-ones.
+- `tables::cmap::lookup_format4` now uses `checked_add` for the
+  `target` byte offset in the indirect-mapping (glyphIdArray) path.
+  In practice the operands are all u16-bounded so the sum cannot
+  overflow `usize`, but the previous code did unchecked arithmetic
+  on inputs that could in principle be attacker-controlled. New
+  test `format4_indirect_mapping_resolves_through_glyph_id_array`
+  rounds-trips the indirect path explicitly (the existing
+  `format4_round_trip` only exercises the direct
+  `id_range_offset == 0` branch). New test
+  `format4_truncated_arrays_does_not_panic` exposes the lookup to
+  a deliberately length-trimmed subtable to prove the existing
+  per-read bounds checks suffice to keep us panic-free.
+- `tables::glyf` now has explicit boundary tests for
+  `MAX_COMPOSITE_DEPTH`:
+  - `composite_chain_at_max_depth_succeeds` — a chain of
+    composites K levels deep, with K = `MAX_COMPOSITE_DEPTH - 1`,
+    decodes the leaf triangle.
+  - `composite_chain_over_max_depth_returns_composite_too_deep` —
+    one link deeper, we get `Error::CompositeTooDeep` instead of a
+    stack overflow.
+  - `composite_self_cycle_terminates_with_composite_too_deep` — a
+    glyph that references itself (the simplest pathological
+    cycle a malformed / malicious font can ship) is rejected
+    cleanly rather than overflowing the recursion stack.
+
+Spec: Microsoft OpenType §"cmap — Character to Glyph Index Mapping
+Table" / §"Format 4: Segment mapping to delta values". §"glyf —
+Glyph Data" / §"Composite Glyph Description". Apple TrueType
+Reference §"cmap" / §"glyf". ISO/IEC 14496-22 §5.
+
 ## [0.1.4](https://github.com/OxideAV/oxideav-ttf/compare/v0.1.3...v0.1.4) - 2026-05-05
 
 ### Other

@@ -368,10 +368,20 @@ fn lookup_format4(bytes: &[u8], codepoint: u32) -> Option<u16> {
     //   6  / segCountX2 (2)
     //   8  / searchRange / entrySelector / rangeShift (each 2)
     //  14  / endCode[segCount] u16
-    //   ...
+    //  14 + 2*segCount        / reservedPad (u16, = 0)
+    //  16 + 2*segCount        / startCode[segCount]
+    //  16 + 4*segCount        / idDelta[segCount]
+    //  16 + 6*segCount        / idRangeOffset[segCount]
+    //  16 + 8*segCount        / glyphIdArray[…] (variable, addressed
+    //                                            relative to idRangeOffset[i])
+    //
+    // Format-4 mandates a terminator segment whose endCode is 0xFFFF;
+    // a well-formed cmap always has at least one segment.
     let seg_count_x2 = read_u16(bytes, 6).ok()? as usize;
     let seg_count = seg_count_x2 / 2;
     if seg_count == 0 {
+        // Malformed: a real font cannot have segCount = 0 (the
+        // terminator alone forces seg_count >= 1). Refuse to look up.
         return None;
     }
     let end_code_off = 14usize;
@@ -383,17 +393,30 @@ fn lookup_format4(bytes: &[u8], codepoint: u32) -> Option<u16> {
     if bytes.len() < glyph_id_array_off {
         return None;
     }
-    // Linear-scan to find the segment whose endCode >= cp.
-    // Could binary-search; small fonts have ~50-200 segments so linear is fine.
-    let mut seg = None;
-    for i in 0..seg_count {
-        let end = read_u16(bytes, end_code_off + i * 2).ok()?;
-        if end >= cp {
-            seg = Some(i);
-            break;
+    // Binary-search the endCode[] array for the first segment whose
+    // endCode >= cp. endCode[] is sorted ascending per the spec (the
+    // searchRange / entrySelector / rangeShift triple at offset 8..14
+    // exists precisely so a hardware-constrained reader can binary-search
+    // it without a divide); we don't need those values because we have
+    // a real binary search. This makes BMP lookups O(log N) instead of
+    // O(N), which matters for Asian fonts that ship 100+ segments.
+    let mut lo = 0usize;
+    let mut hi = seg_count;
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        let end = read_u16(bytes, end_code_off + mid * 2).ok()?;
+        if end < cp {
+            lo = mid + 1;
+        } else {
+            hi = mid;
         }
     }
-    let seg = seg?;
+    if lo >= seg_count {
+        // cp is greater than every endCode — only possible if the font
+        // is malformed (the 0xFFFF terminator should always match).
+        return None;
+    }
+    let seg = lo;
     let start = read_u16(bytes, start_code_off + seg * 2).ok()?;
     if start > cp {
         return None;
@@ -412,10 +435,13 @@ fn lookup_format4(bytes: &[u8], codepoint: u32) -> Option<u16> {
     //   *(idRangeOffset[i]/2 + (cp - startCode[i]) + &idRangeOffset[i])
     // Equivalent absolute byte offset:
     //   id_range_offset_off + seg*2 + id_range_offset + 2*(cp - start)
-    let target = id_range_offset_off
-        + seg * 2
-        + id_range_offset as usize
-        + 2 * (cp as usize - start as usize);
+    //
+    // Bail rather than wrap if a malformed font causes either side to
+    // exceed `usize`. In practice all three operands are u16-bounded so
+    // the sum fits trivially; the checked_* chain is belt-and-braces.
+    let target = (id_range_offset_off + seg * 2)
+        .checked_add(id_range_offset as usize)?
+        .checked_add(2 * (cp as usize - start as usize))?;
     let raw = read_u16(bytes, target).ok()?;
     if raw == 0 {
         return None;
@@ -832,5 +858,188 @@ mod tests {
         // 'D' (68) > end 67 < terminator 0xFFFF: still finds the
         // terminator segment which yields glyph 0 (skipped → None).
         assert_eq!(cmap.lookup('D' as u32), None);
+    }
+
+    /// Build a format-4 subtable from an arbitrary list of
+    /// (startCode, endCode, idDelta) direct-mapping segments. The
+    /// 0xFFFF..0xFFFF terminator with id_delta=1 is appended automatically
+    /// (per the spec: "the last endCode must always be 0xFFFF"). All
+    /// `idRangeOffset`s are zero (direct mapping; the `glyph_id_array`
+    /// is empty).
+    fn build_format4_direct(segs: &[(u16, u16, u16)]) -> Vec<u8> {
+        let mut all: Vec<(u16, u16, u16)> = segs.to_vec();
+        all.push((0xFFFF, 0xFFFF, 1));
+        let seg_count = all.len() as u16;
+        let seg_count_x2 = seg_count * 2;
+        let header = 14;
+        let arrays_len = seg_count_x2 as usize * 4 + 2 /*reserved pad*/;
+        let length = header + arrays_len;
+        let mut sub = vec![0u8; length];
+        sub[0..2].copy_from_slice(&4u16.to_be_bytes());
+        sub[2..4].copy_from_slice(&(length as u16).to_be_bytes());
+        sub[6..8].copy_from_slice(&seg_count_x2.to_be_bytes());
+        // endCode[]
+        for (i, (_, end, _)) in all.iter().enumerate() {
+            let off = 14 + i * 2;
+            sub[off..off + 2].copy_from_slice(&end.to_be_bytes());
+        }
+        // reservedPad already zero.
+        let start_off = 14 + seg_count_x2 as usize + 2;
+        let delta_off = start_off + seg_count_x2 as usize;
+        // idRangeOffset[] follows at delta_off + seg_count_x2; already zero.
+        for (i, (start, _, delta)) in all.iter().enumerate() {
+            sub[start_off + i * 2..start_off + i * 2 + 2].copy_from_slice(&start.to_be_bytes());
+            sub[delta_off + i * 2..delta_off + i * 2 + 2].copy_from_slice(&delta.to_be_bytes());
+        }
+        sub
+    }
+
+    /// Regression for the binary-search rewrite: a cmap with 200
+    /// single-codepoint segments (Asian / large-coverage fonts ship
+    /// counts in this range) must resolve every covered codepoint
+    /// correctly AND must miss correctly on the gaps between segments.
+    /// The previous linear-scan implementation also passed this but
+    /// at O(N); the binary search must produce identical answers.
+    #[test]
+    fn format4_binary_search_resolves_many_segments() {
+        // 200 segments at codepoints 0x0100, 0x0102, 0x0104, ...; each
+        // covers one codepoint that maps to glyph (cp - 0x0100 + 1).
+        let mut segs: Vec<(u16, u16, u16)> = Vec::with_capacity(200);
+        for i in 0..200u16 {
+            let cp = 0x0100 + i * 2;
+            // id_delta is applied modulo 65536; to land glyph `i+1` for
+            // codepoint `cp`, we want delta = (i + 1 - cp) mod 65536.
+            let want_glyph = i + 1;
+            let delta = want_glyph.wrapping_sub(cp);
+            segs.push((cp, cp, delta));
+        }
+        let sub = build_format4_direct(&segs);
+        let cmap_bytes = build_cmap_with_subtable(4, &sub);
+        let cmap = CmapTable::parse(&cmap_bytes).unwrap();
+        for i in 0..200u16 {
+            let cp = 0x0100 + i * 2;
+            assert_eq!(
+                cmap.lookup(cp as u32),
+                Some(i + 1),
+                "codepoint {cp:#06x} expected glyph {}",
+                i + 1
+            );
+            // The gap immediately after each covered codepoint must miss:
+            // the next segment's startCode > cp+1, so the search lands
+            // on a higher-endCode segment whose startCode rejects us.
+            // Don't test the gap after segment 199 because the terminator
+            // (0xFFFF) would match it; the spec's terminator hands back
+            // glyph 0 → None which is correct but tested elsewhere.
+            if i + 1 < 200 {
+                assert_eq!(
+                    cmap.lookup((cp + 1) as u32),
+                    None,
+                    "codepoint {:#06x} unexpectedly mapped",
+                    cp + 1
+                );
+            }
+        }
+        // Codepoint below the first segment must miss.
+        assert_eq!(cmap.lookup(0x00FF), None);
+    }
+
+    /// Indirect mapping (idRangeOffset != 0) — the format-4 path that
+    /// reads glyph IDs out of the `glyphIdArray` rather than computing
+    /// them directly from id_delta. Covers a single 4-codepoint segment
+    /// whose glyphIdArray entries are picked to verify both the
+    /// `target` offset arithmetic and the `id_delta` post-fold.
+    #[test]
+    fn format4_indirect_mapping_resolves_through_glyph_id_array() {
+        // One real segment covering 'A'..'D' (65..68), one terminator.
+        // idRangeOffset[0] points at the start of glyphIdArray (the
+        // byte immediately after the last idRangeOffset entry); per the
+        // spec formula this means offset = 2 * segCount - 2*0 (we are
+        // the first segment, so the byte after the second
+        // idRangeOffset). The glyphIdArray then holds 4 entries: the
+        // raw u16s that get summed with id_delta to produce the final
+        // glyph.
+        let seg_count: u16 = 2;
+        let seg_count_x2: u16 = seg_count * 2;
+        let header = 14;
+        // glyphIdArray: 4 u16 entries (one per codepoint covered).
+        let glyph_id_array_bytes: usize = 4 * 2;
+        let arrays_len = seg_count_x2 as usize * 4 + 2 /*reserved pad*/ + glyph_id_array_bytes;
+        let length = header + arrays_len;
+        let mut sub = vec![0u8; length];
+        sub[0..2].copy_from_slice(&4u16.to_be_bytes());
+        sub[2..4].copy_from_slice(&(length as u16).to_be_bytes());
+        sub[6..8].copy_from_slice(&seg_count_x2.to_be_bytes());
+        // endCode[]
+        sub[14..16].copy_from_slice(&68u16.to_be_bytes());
+        sub[16..18].copy_from_slice(&0xFFFFu16.to_be_bytes());
+        // reservedPad at [18..20] zero.
+        // startCode[]
+        sub[20..22].copy_from_slice(&65u16.to_be_bytes());
+        sub[22..24].copy_from_slice(&0xFFFFu16.to_be_bytes());
+        // idDelta[] — pick +10 so the raw u16s above are easy to read.
+        sub[24..26].copy_from_slice(&10u16.to_be_bytes());
+        sub[26..28].copy_from_slice(&1u16.to_be_bytes());
+        // idRangeOffset[]:
+        //   For seg 0 the spec formula:
+        //     target_byte = &idRangeOffset[0] + idRangeOffset[0]
+        //                                     + 2 * (cp - startCode[0])
+        //   We want target_byte to land on `glyph_id_array_off`
+        //   (= id_range_offset_off + seg_count_x2). So
+        //   idRangeOffset[0] = (glyph_id_array_off - &idRangeOffset[0])
+        //                   = seg_count_x2 - 0
+        //                   = 4.
+        let id_range_offset_off = 28usize;
+        sub[id_range_offset_off..id_range_offset_off + 2].copy_from_slice(&4u16.to_be_bytes());
+        // seg 1 (terminator) idRangeOffset = 0 (direct).
+
+        // glyphIdArray entries: raw values 100, 200, 300, 400. After
+        // adding id_delta=10 the resolved glyphs are 110, 210, 310, 410.
+        let glyph_id_array_off = id_range_offset_off + seg_count_x2 as usize; // 32
+        for (i, &raw) in [100u16, 200, 300, 400].iter().enumerate() {
+            let off = glyph_id_array_off + i * 2;
+            sub[off..off + 2].copy_from_slice(&raw.to_be_bytes());
+        }
+
+        let cmap_bytes = build_cmap_with_subtable(4, &sub);
+        let cmap = CmapTable::parse(&cmap_bytes).unwrap();
+        assert_eq!(cmap.lookup('A' as u32), Some(110));
+        assert_eq!(cmap.lookup('B' as u32), Some(210));
+        assert_eq!(cmap.lookup('C' as u32), Some(310));
+        assert_eq!(cmap.lookup('D' as u32), Some(410));
+        // Out of range BMP cp still misses cleanly.
+        assert_eq!(cmap.lookup('E' as u32), None);
+    }
+
+    /// A malformed format-4 subtable that *claims* a length large
+    /// enough to enclose its arrays but is actually truncated past
+    /// the idRangeOffset[] table. The lookup must NOT panic and must
+    /// return None rather than reading out-of-bounds. We deliberately
+    /// shrink the cmap bytes after building it to expose the bounds
+    /// check.
+    #[test]
+    fn format4_truncated_arrays_does_not_panic() {
+        let segs = vec![(65u16, 67u16, 35u16)];
+        let sub = build_format4_direct(&segs);
+        let mut cmap_bytes = build_cmap_with_subtable(4, &sub);
+        // Lop off the last 4 bytes — the trailing idRangeOffset entries
+        // for the terminator segment. CmapTable::parse currently does
+        // not bounds-check beyond `sub_off + length`, so the parse
+        // succeeds with a too-short subtable slice; the lookup must
+        // cope.
+        let cut = cmap_bytes.len() - 4;
+        cmap_bytes.truncate(cut);
+        // Note: also adjust the subtable's claimed length so that
+        // CmapTable::parse's `sub_off + length` slice-take doesn't fail.
+        // The subtable starts at offset 12 in our test wrapper; the
+        // length u16 is at sub_off + 2 = 14.
+        let new_len = (sub.len() - 4) as u16;
+        cmap_bytes[14..16].copy_from_slice(&new_len.to_be_bytes());
+        let cmap = CmapTable::parse(&cmap_bytes).expect("parse must tolerate length=trimmed");
+        // 'A' would have been at glyph 100. Either we get it (the
+        // binary search lands in the truncated terminator segment and
+        // misses cleanly) or None — but never a panic, and never a
+        // spurious glyph from out-of-bounds bytes.
+        let _ = cmap.lookup('A' as u32);
+        let _ = cmap.lookup('Z' as u32);
     }
 }

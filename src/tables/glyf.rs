@@ -412,4 +412,142 @@ mod tests {
         let p2 = out.contours[0].points[2];
         assert_eq!((p2.x, p2.y), (1050, 2100));
     }
+
+    /// A minimal composite-glyph body referencing exactly one child
+    /// glyph at the given index (no XY offset, no transform, no MORE
+    /// components). Used to build long composite chains for the
+    /// depth-limit tests.
+    fn build_composite_referencing(child_index: u16) -> Vec<u8> {
+        let mut g = Vec::new();
+        // header: -1 contour (composite), zero bbox.
+        g.extend_from_slice(&(-1i16).to_be_bytes());
+        g.extend_from_slice(&0i16.to_be_bytes());
+        g.extend_from_slice(&0i16.to_be_bytes());
+        g.extend_from_slice(&0i16.to_be_bytes());
+        g.extend_from_slice(&0i16.to_be_bytes());
+        // flags: ARGS_ARE_XY_VALUES; arg1/arg2 are bytes (no
+        // ARG_1_AND_2_ARE_WORDS bit), so 2 bytes follow for offsets.
+        let flags = C_ARGS_ARE_XY_VALUES;
+        g.extend_from_slice(&flags.to_be_bytes());
+        g.extend_from_slice(&child_index.to_be_bytes());
+        // arg1=0 arg2=0 (i8 each)
+        g.push(0);
+        g.push(0);
+        g
+    }
+
+    /// A composite-glyph chain `0 -> 1 -> 2 -> ... -> N-1 -> triangle`
+    /// of total depth `N` must succeed when N <= MAX_COMPOSITE_DEPTH
+    /// and must fail with `CompositeTooDeep` when N exceeds it.
+    /// MAX_COMPOSITE_DEPTH is currently 16; we walk a 16-link chain
+    /// (passes) and then a 17-link chain (fails) so the boundary is
+    /// pinned on both sides.
+    ///
+    /// The chain layout in `glyf`:
+    ///   glyph 0  = triangle (leaf)
+    ///   glyph 1  = composite referencing glyph 0
+    ///   glyph 2  = composite referencing glyph 1
+    ///   …
+    ///   glyph K  = composite referencing glyph K-1
+    fn build_chained_glyf(depth: usize) -> (Vec<u8>, Vec<u32>) {
+        // Glyph 0 is the triangle leaf.
+        let triangle = build_triangle();
+        let mut glyf = triangle.clone();
+        let mut offsets: Vec<u32> = vec![0, triangle.len() as u32];
+        // Glyphs 1..=depth each reference the previous glyph.
+        for k in 1..=depth {
+            let comp = build_composite_referencing((k - 1) as u16);
+            glyf.extend_from_slice(&comp);
+            offsets.push(glyf.len() as u32);
+        }
+        (glyf, offsets)
+    }
+
+    #[test]
+    fn composite_chain_at_max_depth_succeeds() {
+        // The depth guard fires when `depth >= MAX_COMPOSITE_DEPTH`,
+        // and the root call enters at depth=0. So a chain whose
+        // outermost composite is glyph `MAX_COMPOSITE_DEPTH - 1` walks
+        // depths 0..=MAX_COMPOSITE_DEPTH-1 — the last depth tested is
+        // `MAX_COMPOSITE_DEPTH - 1`, which still passes the `<` check.
+        // The next deeper chain (one more link) would push the leaf
+        // call to depth=MAX_COMPOSITE_DEPTH and trip the guard.
+        let depth = (MAX_COMPOSITE_DEPTH as usize) - 1;
+        let (glyf_bytes, offsets) = build_chained_glyf(depth);
+
+        let mut loca_bytes = Vec::new();
+        for v in &offsets {
+            loca_bytes.extend_from_slice(&v.to_be_bytes());
+        }
+        let num_glyphs = (offsets.len() - 1) as u16;
+        let loca = LocaTable::parse(&loca_bytes, num_glyphs, 1).unwrap();
+        let glyf = GlyfTable::new(&glyf_bytes);
+
+        // Decode the outermost composite (glyph `depth`).
+        let top_start = offsets[depth] as usize;
+        let top_end = offsets[depth + 1] as usize;
+        let out = glyf
+            .glyph_outline(top_start..top_end, &loca, 0)
+            .expect("16-deep chain must decode");
+        // The leaf triangle has three on-curve points.
+        assert_eq!(out.contours.len(), 1);
+        assert_eq!(out.contours[0].points.len(), 3);
+    }
+
+    #[test]
+    fn composite_chain_over_max_depth_returns_composite_too_deep() {
+        // Outermost composite is glyph `MAX_COMPOSITE_DEPTH`; decoding
+        // it pushes the leaf call to depth = MAX_COMPOSITE_DEPTH, which
+        // trips the `>=` guard immediately and rejects.
+        let depth = MAX_COMPOSITE_DEPTH as usize;
+        let (glyf_bytes, offsets) = build_chained_glyf(depth);
+
+        let mut loca_bytes = Vec::new();
+        for v in &offsets {
+            loca_bytes.extend_from_slice(&v.to_be_bytes());
+        }
+        let num_glyphs = (offsets.len() - 1) as u16;
+        let loca = LocaTable::parse(&loca_bytes, num_glyphs, 1).unwrap();
+        let glyf = GlyfTable::new(&glyf_bytes);
+
+        let top_start = offsets[depth] as usize;
+        let top_end = offsets[depth + 1] as usize;
+        let err = glyf
+            .glyph_outline(top_start..top_end, &loca, 0)
+            .expect_err("17-deep chain must reject");
+        assert_eq!(err, Error::CompositeTooDeep);
+    }
+
+    /// A malicious / corrupted font in which a composite glyph
+    /// references itself (or a cycle including itself) must terminate
+    /// with `CompositeTooDeep` rather than recursing until stack
+    /// overflow. The depth guard at MAX_COMPOSITE_DEPTH = 16 caps the
+    /// cycle at 16 frames.
+    #[test]
+    fn composite_self_cycle_terminates_with_composite_too_deep() {
+        // Two glyphs:
+        //   glyph 0 = triangle (innocent bystander, used only so loca
+        //             has a valid first entry; the self-cycling glyph
+        //             below is glyph 1).
+        //   glyph 1 = composite referencing glyph 1 (itself).
+        let triangle = build_triangle();
+        let self_cycle = build_composite_referencing(1);
+
+        let mut glyf = triangle.clone();
+        let tri_len = glyf.len() as u32;
+        glyf.extend_from_slice(&self_cycle);
+        let total = glyf.len() as u32;
+
+        let mut loca_bytes = Vec::new();
+        for v in [0u32, tri_len, total] {
+            loca_bytes.extend_from_slice(&v.to_be_bytes());
+        }
+        let loca = LocaTable::parse(&loca_bytes, 2, 1).unwrap();
+        let glyf_t = GlyfTable::new(&glyf);
+
+        let err = glyf_t
+            .glyph_outline(tri_len as usize..total as usize, &loca, 0)
+            .expect_err("self-cycle must reject, not stack-overflow");
+        assert_eq!(err, Error::CompositeTooDeep);
+    }
 }
