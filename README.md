@@ -43,6 +43,14 @@ ligatures and kerning.
   `(index, effective_type, subtable_count)` for shapers that need to
   find e.g. every chained-context lookup without probing each index.
 - `GDEF` (glyph class definitions, used to skip mark glyphs).
+- Adobe Glyph List (AGL) glyph-name → Unicode resolution
+  (`glyph_name_to_codepoints` / `glyph_name_to_char`). Direct table
+  lookup against the embedded AGL 2.0 data: a PostScript glyph name
+  (e.g. from a `post` v2 table or a CFF charset) maps to its Unicode
+  scalar-value sequence; ligature / base+points names yield a short
+  sequence. The AGL Specification's algorithmic fallback (suffix
+  stripping, `uniXXXX` synthetic names) is intentionally out of scope —
+  only the staged `glyphlist.txt` data drives it.
 
 The companion [`oxideav-scribe`](https://github.com/OxideAV/oxideav-scribe)
 crate consumes the outlines + shaping output to rasterise text to RGBA

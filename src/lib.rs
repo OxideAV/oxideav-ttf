@@ -21,6 +21,9 @@
 //!   LookupType 4 (mark-to-base attachment for diacritics), and
 //!   LookupType 6 (mark-to-mark attachment for stacked diacritics).
 //! - `GDEF` (glyph class definitions).
+//! - Adobe Glyph List (AGL) glyph-name → Unicode resolution:
+//!   [`glyph_name_to_codepoints`] / [`glyph_name_to_char`] (direct
+//!   table lookup against the staged AGL data).
 //!
 //! The crate is read-only (parsing-only) and dependency-light: only
 //! `oxideav-core` for shared types. CFF/Type 2 charstrings live in the
@@ -37,11 +40,13 @@
 #![deny(missing_debug_implementations)]
 #![warn(rust_2018_idioms)]
 
+pub mod agl;
 pub mod collection;
 pub mod outline;
 pub mod parser;
 pub mod tables;
 
+pub use agl::{glyph_name_to_char, glyph_name_to_codepoints};
 pub use collection::{is_collection, CollectionHeader, TTC_MAGIC};
 
 use crate::parser::TableDirectory;

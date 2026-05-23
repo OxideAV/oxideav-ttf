@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — Adobe Glyph List (AGL) glyph-name → Unicode resolution (2026-05-23)
+
+New `agl` module with two public functions, re-exported at the crate
+root:
+
+- `glyph_name_to_codepoints(name) -> Option<&'static [u32]>` — resolves
+  a PostScript glyph name (as found in a `post` version-2.0 table or a
+  CFF charset) to its Unicode scalar-value sequence via a direct lookup
+  in the Adobe Glyph List. Most names map to a single codepoint;
+  ligature and Hebrew base+points names map to a short sequence
+  (e.g. `dalethatafpatah` → `[U+05D3, U+05B2]`).
+- `glyph_name_to_char(name) -> Option<char>` — convenience for names
+  that map to exactly one valid (non-surrogate) scalar value.
+
+The AGL data file (`agl-glyphlist.txt`, table version 2.0) is embedded
+verbatim via `include_str!` — a byte-identical copy of the staged
+`docs/text/opentype/spec/agl-glyphlist.txt`, BSD-style licence header
+preserved. The list is parsed lazily into a `HashMap` on first use
+(`OnceLock`-cached).
+
+Scope is the **direct table lookup only**. The AGL Specification's
+algorithmic fallback for names absent from the table (suffix stripping
+after the first period, underscore-split component names, and the
+`uniXXXX` / `uXXXXX...` synthetic-name convention) is **not**
+implemented: that algorithm lives in the AGL Specification §2/§6, which
+is not staged under `docs/text/opentype/`. Seven new unit tests cover
+basic Latin, accented, multi-codepoint sequences, presentation-form
+ligatures, unknown-name `None`, table size floor / `OnceLock` identity,
+and comment/blank-line skipping.
+
 ### Added — cmap format-4 binary search + composite-glyph depth-guard tests (2026-05-21)
 
 Two correctness-and-robustness improvements, no public-API change.
