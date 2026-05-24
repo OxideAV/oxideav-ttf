@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.5](https://github.com/OxideAV/oxideav-ttf/compare/v0.1.4...v0.1.5) - 2026-05-24
+
+### Other
+
+- full public accessor API + well-known nameID registry
+- glyph-name → Unicode resolver from staged Adobe Glyph List
+- binary-search format-4 + harden indirect path; glyf: composite depth-guard tests
+- drop committed Cargo.lock + relax oxideav-core to "0.1"
+
 ### Added — `name`-table public accessor API + well-known nameID registry (2026-05-24)
 
 The `name` table was parsed since round 1 but only `family_name()` and
