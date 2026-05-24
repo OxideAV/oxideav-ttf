@@ -65,6 +65,7 @@ pub use tables::colr::ColorLayer;
 pub use tables::fvar::{NamedInstance, VariationAxis};
 pub use tables::gpos::{CursiveAttachment, PosRecord, PosValue};
 pub use tables::gsub::GsubFeature;
+pub use tables::name::{name_id, platform, NameRecord};
 pub use tables::sbix::SbixGlyph;
 
 /// Errors emitted during font parsing or glyph lookup.
@@ -315,6 +316,119 @@ impl<'a> Font<'a> {
     pub fn full_name(&self) -> Option<&str> {
         // 4 = Full name
         self.name.find(4)
+    }
+
+    /// Subfamily (style) name from the `name` table — e.g. "Bold",
+    /// "Italic", "Regular". `nameID` 2 (Adobe TN5149 §1.4).
+    pub fn subfamily_name(&self) -> Option<&str> {
+        self.name.find(name_id::SUBFAMILY)
+    }
+
+    /// Typographic (preferred) family name — `nameID` 16 — falling back to
+    /// the standard family name (`nameID` 1) when the font omits it.
+    /// Adobe TN5149 §1.4: when `nameID` 16 equals `nameID` 1 it may be
+    /// omitted, so the fallback reconstructs the intended value.
+    pub fn typographic_family_name(&self) -> Option<&str> {
+        self.name
+            .find(name_id::TYPOGRAPHIC_FAMILY)
+            .or_else(|| self.name.find(name_id::FAMILY))
+    }
+
+    /// Typographic (preferred) subfamily name — `nameID` 17 — falling back
+    /// to the standard subfamily name (`nameID` 2). Same omission rule as
+    /// [`Self::typographic_family_name`] (TN5149 §1.4).
+    pub fn typographic_subfamily_name(&self) -> Option<&str> {
+        self.name
+            .find(name_id::TYPOGRAPHIC_SUBFAMILY)
+            .or_else(|| self.name.find(name_id::SUBFAMILY))
+    }
+
+    /// PostScript name — `nameID` 6 (TN5149 §1.5). The unique name a
+    /// PostScript interpreter uses to select the font.
+    pub fn postscript_name(&self) -> Option<&str> {
+        self.name.find(name_id::POSTSCRIPT)
+    }
+
+    /// Version string — `nameID` 5 (TN5149 §1.9), e.g. "Version 1.000".
+    pub fn version_string(&self) -> Option<&str> {
+        self.name.find(name_id::VERSION)
+    }
+
+    /// Copyright notice — `nameID` 0 (TN5149 §1.3).
+    pub fn copyright(&self) -> Option<&str> {
+        self.name.find(name_id::COPYRIGHT)
+    }
+
+    /// Trademark — `nameID` 7 (TN5149 §1.10).
+    pub fn trademark(&self) -> Option<&str> {
+        self.name.find(name_id::TRADEMARK)
+    }
+
+    /// Manufacturer name — `nameID` 8 (TN5149 §1.10).
+    pub fn manufacturer(&self) -> Option<&str> {
+        self.name.find(name_id::MANUFACTURER)
+    }
+
+    /// Designer name — `nameID` 9 (TN5149 §1.10).
+    pub fn designer(&self) -> Option<&str> {
+        self.name.find(name_id::DESIGNER)
+    }
+
+    /// Description — `nameID` 10 (TN5149 §1.10).
+    pub fn description(&self) -> Option<&str> {
+        self.name.find(name_id::DESCRIPTION)
+    }
+
+    /// Font vendor URL — `nameID` 11 (TN5149 §1.10).
+    pub fn vendor_url(&self) -> Option<&str> {
+        self.name.find(name_id::VENDOR_URL)
+    }
+
+    /// Font designer URL — `nameID` 12 (TN5149 §1.10).
+    pub fn designer_url(&self) -> Option<&str> {
+        self.name.find(name_id::DESIGNER_URL)
+    }
+
+    /// Licence description — `nameID` 13 (TN5149 §1.10).
+    pub fn license_description(&self) -> Option<&str> {
+        self.name.find(name_id::LICENSE)
+    }
+
+    /// Licence URL — `nameID` 14 (TN5149 §1.10).
+    pub fn license_url(&self) -> Option<&str> {
+        self.name.find(name_id::LICENSE_URL)
+    }
+
+    /// Arbitrary `name`-table string by `nameID`, picking the best-ranked
+    /// locale (Windows English first). The well-known IDs are exported as
+    /// [`name_id`] constants. Use [`Self::name_string_for`] to target a
+    /// specific platform + language.
+    pub fn name_string(&self, name_id: u16) -> Option<&str> {
+        self.name.find(name_id)
+    }
+
+    /// A specific `(nameID, platformID, languageID)` string — no ranking,
+    /// the exact locale you name (e.g. `(name_id::FAMILY,
+    /// platform::WINDOWS, 0x0411)` for the Japanese family name). Returns
+    /// an owned `String` because non-ASCII records are decoded into a new
+    /// buffer. `None` when no record matches or its encoding is one we
+    /// cannot decode without an unstaged legacy codepage table (Macintosh
+    /// non-Roman scripts — TN5149 §1.2).
+    pub fn name_string_for(
+        &self,
+        name_id: u16,
+        platform_id: u16,
+        language_id: u16,
+    ) -> Option<String> {
+        self.name.find_for(name_id, platform_id, language_id)
+    }
+
+    /// Every `name`-table record, decoded where possible (see
+    /// [`NameRecord`]). The locator tuple `(platformID, encodingID,
+    /// languageID, nameID)` is always present; `string` is `None` for
+    /// encodings we cannot decode in-crate.
+    pub fn name_records(&self) -> Vec<NameRecord> {
+        self.name.records()
     }
 
     /// `head.unitsPerEm`. Almost always 1024 or 2048; never zero in valid

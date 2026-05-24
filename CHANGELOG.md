@@ -7,6 +7,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — `name`-table public accessor API + well-known nameID registry (2026-05-24)
+
+The `name` table was parsed since round 1 but only `family_name()` and
+`full_name()` were exposed. This round surfaces the whole table: the
+registered nameID semantics (Adobe TN5149 §1.3–1.10), locale-targeted
+lookup, and full record enumeration with the `(platformID, encodingID,
+languageID, nameID)` locator tuple.
+
+- New `name_id` module of well-known nameID constants — `COPYRIGHT` (0),
+  `FAMILY` (1), `SUBFAMILY` (2), `UNIQUE_ID` (3), `FULL_NAME` (4),
+  `VERSION` (5), `POSTSCRIPT` (6), `TRADEMARK` (7), `MANUFACTURER` (8),
+  `DESIGNER` (9), `DESCRIPTION` (10), `VENDOR_URL` (11), `DESIGNER_URL`
+  (12), `LICENSE` (13), `LICENSE_URL` (14), `TYPOGRAPHIC_FAMILY` (16),
+  `TYPOGRAPHIC_SUBFAMILY` (17), `COMPATIBLE_FULL` (18), `SAMPLE_TEXT`
+  (19), `POSTSCRIPT_CID` (20) — and a `platform` module (`UNICODE` 0,
+  `MACINTOSH` 1, `WINDOWS` 3). Both re-exported at the crate root.
+- New `oxideav_ttf::NameRecord { platform_id, encoding_id, language_id,
+  name_id, string: Option<String> }`. `string` is `Some` for the
+  encodings we decode without an external legacy codepage table (Unicode
+  platform; Windows Unicode BMP / UCS-4; Macintosh Roman ASCII) and
+  `None` for Macintosh non-Roman scripts (Japanese / Chinese / Korean —
+  TN5149 §1.2), whose Shift-JIS / Big5 / EUC tables are not staged under
+  `docs/`. The locator tuple and raw bytes are surfaced regardless.
+- New `Font` accessors: `subfamily_name`, `typographic_family_name`
+  (nameID 16, falling back to 1 per TN5149 §1.4's omission rule),
+  `typographic_subfamily_name` (17 → 2), `postscript_name`,
+  `version_string`, `copyright`, `trademark`, `manufacturer`, `designer`,
+  `description`, `vendor_url`, `designer_url`, `license_description`,
+  `license_url`. Plus the general `name_string(name_id)` (best-ranked
+  locale, Windows English first), `name_string_for(name_id, platform_id,
+  language_id)` (exact locale, no ranking — e.g. the Japanese family
+  name `(FAMILY, WINDOWS, 0x0411)`), and `name_records()` (every record,
+  decoded where possible).
+- `NameTable` gains `len`, `is_empty`, `records`, `record_bytes`, and
+  `find_for`. The format-0/1 record walk is unchanged (the format-1
+  langTagRecord array is documented but not needed for the string data).
+- Tests: 5 new unit tests in `tables::name::tests` (nameID-registry
+  spot-check, record enumeration, exact-locale `find_for` vs. ranked
+  `find`, Mac non-Roman undecodable-but-surfaced, Mac Roman ASCII) and a
+  new `tests/name_records.rs` integration suite (4 tests) driving the
+  accessors against DejaVu Sans 2.37 (well-known accessors, generic vs.
+  typed lookup, exact-locale lookup, record-enumeration locator tuples).
+
+Spec: Adobe Technical Note #5149 "OpenType-CID/CFF CJK Fonts: 'name'
+Table Tutorial" §1.2 (Platform / Script / Language IDs) and §1.3–1.10
+(per-nameID semantics). Microsoft OpenType §"name — Naming Table".
+Apple TrueType Reference §"name".
+
 ### Added — Adobe Glyph List (AGL) glyph-name → Unicode resolution (2026-05-23)
 
 New `agl` module with two public functions, re-exported at the crate

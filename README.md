@@ -11,6 +11,16 @@ ligatures and kerning.
 - `head`, `hhea`, `maxp`, `cmap` (base formats 0, 4, 6, 12 + format 14
   Unicode Variation Sequences as a sidecar), `name`, `OS/2`, `hmtx`,
   `loca`, `glyf` (simple + composite), `post`.
+- `name` table: full accessor API beyond family / full name — the
+  registered nameID registry (`name_id` constants), typed accessors
+  (subfamily, PostScript, version, copyright, trademark, manufacturer,
+  designer, description, vendor / designer / licence URLs, typographic
+  family / subfamily with the TN5149 §1.4 fallback), exact-locale lookup
+  (`name_string_for(id, platform, language)`), and full record
+  enumeration (`name_records()` → `NameRecord` with the `(platform,
+  encoding, language, name)` locator tuple). Macintosh non-Roman scripts
+  surface their locator + raw bytes but decode to `None` (legacy
+  codepage tables not staged).
 - Legacy `kern` table (format 0).
 - `GSUB` LookupType 1 (single substitution: positional forms,
   small-caps, vertical alternates), LookupType 2 (multiple
@@ -71,6 +81,28 @@ let _ = font.glyph_count();
 let _ = font.ascent();
 let _ = font.descent();
 let _ = font.line_gap();
+
+// name-table strings — typed accessors for the well-known nameIDs.
+let _ = font.subfamily_name();      // Some("Book")
+let _ = font.postscript_name();     // Some("DejaVuSans")
+let _ = font.version_string();      // Some("Version 2.37")
+let _ = font.copyright();
+let _ = font.license_url();
+let _ = font.vendor_url();
+
+// Exact locale (no ranking): the Japanese family name, if the font
+// ships one. (name_id::FAMILY, platform::WINDOWS, 0x0411 = ja-JP)
+use oxideav_ttf::{name_id, platform};
+let _ = font.name_string_for(name_id::FAMILY, platform::WINDOWS, 0x0411);
+
+// Enumerate every name record with its (platform, encoding, language,
+// nameID) locator tuple.
+for rec in font.name_records() {
+    let _ = (rec.platform_id, rec.encoding_id, rec.language_id, rec.name_id);
+    if let Some(s) = &rec.string {
+        let _ = s; // decoded UTF-8 (None for Mac non-Roman scripts)
+    }
+}
 
 // Glyph lookup.
 let gid_a = font.glyph_index('A').unwrap();
