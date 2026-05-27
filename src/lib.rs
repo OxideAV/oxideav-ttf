@@ -66,7 +66,7 @@ pub use tables::fvar::{NamedInstance, VariationAxis};
 pub use tables::gpos::{CursiveAttachment, PosRecord, PosValue};
 pub use tables::gsub::GsubFeature;
 pub use tables::name::{name_id, platform, NameRecord};
-pub use tables::sbix::SbixGlyph;
+pub use tables::sbix::{SbixGlyph, MAX_DUPE_DEPTH as SBIX_MAX_DUPE_DEPTH};
 
 /// Errors emitted during font parsing or glyph lookup.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1149,11 +1149,23 @@ impl<'a> Font<'a> {
     /// `*b"tiff"`, or `*b"dupe"` — the consumer crate is expected to
     /// route the payload to the right decoder. The special `'dupe'`
     /// value indicates a 2-byte big-endian glyph id whose bitmap
-    /// should be substituted; chasing the indirection is the
-    /// caller's responsibility (we leave it explicit so the caller
-    /// can do its own cycle detection).
+    /// should be substituted; this method surfaces the indirection
+    /// sentinel as-is for byte-level introspection. Use
+    /// [`Self::sbix_glyph_resolved`] when the caller wants the
+    /// indirection chased for them.
     pub fn sbix_glyph(&self, glyph_id: u16, ppem: u16) -> Option<SbixGlyph<'a>> {
         self.sbix.as_ref()?.lookup_best_fit(glyph_id, ppem)
+    }
+
+    /// Like [`Self::sbix_glyph`], but chases `'dupe'` indirections
+    /// within the chosen strike — up to [`SBIX_MAX_DUPE_DEPTH`] hops
+    /// — with explicit cycle detection. Returns the first reachable
+    /// non-`'dupe'` entry, or `None` if the chain cycles, exceeds the
+    /// hop cap, or hits a malformed / out-of-range target. Callers
+    /// that need to introspect the raw `'dupe'` sentinel keep using
+    /// [`Self::sbix_glyph`].
+    pub fn sbix_glyph_resolved(&self, glyph_id: u16, ppem: u16) -> Option<SbixGlyph<'a>> {
+        self.sbix.as_ref()?.lookup_best_fit_resolved(glyph_id, ppem)
     }
 
     // ---- variable fonts (fvar / avar / gvar) -----------------------------

@@ -50,13 +50,25 @@
 //! When the per-glyph length is 0 there's no bitmap for that glyph in
 //! this strike (consumers should fall through to the next strike).
 //! Special graphicType `'dupe'` means "use the bitmap of glyph N
-//! instead", where N is a big-endian u16 in the 2-byte data payload —
-//! this crate exposes that as a `'dupe'` graphic type and lets the
-//! caller chase the indirection (we'd otherwise need recursion-cycle
-//! detection here).
+//! instead", where N is a big-endian u16 in the 2-byte data payload.
+//! This crate exposes the raw `'dupe'` entry as-is via
+//! [`SbixTable::glyph`] (so byte-level consumers can introspect the
+//! indirection target without follow-up work) *and* provides
+//! [`SbixTable::resolve_dupe_chain`] /
+//! [`SbixTable::lookup_best_fit_resolved`] that follow the
+//! indirection within the same strike up to [`MAX_DUPE_DEPTH`] hops
+//! with explicit cycle detection — every visited glyph id is recorded
+//! and revisiting one bails to `None` rather than recursing forever.
 
 use crate::parser::{read_i16, read_u16, read_u32};
 use crate::Error;
+
+/// Maximum number of `'dupe'` hops chased by
+/// [`SbixTable::resolve_dupe_chain`] / [`SbixTable::lookup_best_fit_resolved`]
+/// before the resolver gives up. Real-world fonts use a single hop (or
+/// none); the cap exists purely to defuse pathological / hostile
+/// indirection chains that don't form a strict cycle (e.g. A→B→C→…).
+pub const MAX_DUPE_DEPTH: usize = 8;
 
 /// One per-glyph bitmap entry resolved out of a strike.
 #[derive(Debug, Clone, Copy)]
@@ -72,6 +84,28 @@ pub struct SbixGlyph<'a> {
     pub origin_x: i16,
     /// Pen-origin → bitmap-bottom-edge in font units (Y up).
     pub origin_y: i16,
+}
+
+impl<'a> SbixGlyph<'a> {
+    /// `true` when this entry is a `'dupe'` indirection sentinel
+    /// pointing at another glyph id within the same strike. The
+    /// indirect glyph id is in [`Self::dupe_target`].
+    pub fn is_dupe(&self) -> bool {
+        &self.graphic_type == b"dupe"
+    }
+
+    /// Decode the `'dupe'` payload as a big-endian u16 glyph id and
+    /// return it; returns `None` when this entry isn't a `'dupe'`
+    /// or its payload is shorter than 2 bytes (malformed).
+    pub fn dupe_target(&self) -> Option<u16> {
+        if !self.is_dupe() {
+            return None;
+        }
+        if self.bytes.len() < 2 {
+            return None;
+        }
+        Some(u16::from_be_bytes([self.bytes[0], self.bytes[1]]))
+    }
 }
 
 /// Parsed sbix table walker.
@@ -217,6 +251,84 @@ impl<'a> SbixTable<'a> {
             origin_x,
             origin_y,
         })
+    }
+
+    /// Follow a `'dupe'` indirection chain inside a single strike,
+    /// returning the first non-`'dupe'` entry reachable from
+    /// `glyph_id`. Returns `None` when:
+    /// - `glyph_id` has no entry in this strike (zero-length / OOB),
+    /// - the chain length exceeds [`MAX_DUPE_DEPTH`],
+    /// - the chain hits a cycle (a previously-visited glyph id is
+    ///   revisited),
+    /// - a `'dupe'` payload is malformed (< 2 bytes), or
+    /// - a `'dupe'` target glyph id is out of range or itself absent
+    ///   from the strike.
+    ///
+    /// A non-`'dupe'` entry is returned untouched on the first hop.
+    pub fn resolve_dupe_chain(&self, strike_index: u32, glyph_id: u16) -> Option<SbixGlyph<'a>> {
+        // Tiny stack-backed visited set — MAX_DUPE_DEPTH is small enough
+        // that a linear scan beats hashing.
+        let mut visited: [u16; MAX_DUPE_DEPTH] = [0; MAX_DUPE_DEPTH];
+        let mut visited_len = 0usize;
+        let mut cur = glyph_id;
+        for _ in 0..MAX_DUPE_DEPTH {
+            // Cycle check before stepping.
+            if visited[..visited_len].contains(&cur) {
+                return None;
+            }
+            if visited_len < MAX_DUPE_DEPTH {
+                visited[visited_len] = cur;
+                visited_len += 1;
+            }
+            let entry = self.glyph(strike_index, cur)?;
+            if !entry.is_dupe() {
+                return Some(entry);
+            }
+            cur = entry.dupe_target()?;
+        }
+        None
+    }
+
+    /// Best-fit lookup that also resolves `'dupe'` indirection within
+    /// the chosen strike. Picks the closest-ppem strike that has *any*
+    /// entry for `glyph_id` (per [`Self::lookup_best_fit`]), then
+    /// follows [`Self::resolve_dupe_chain`] inside that strike.
+    ///
+    /// Returns `None` under the same conditions as
+    /// [`Self::lookup_best_fit`] *plus* the chain-resolution failure
+    /// cases enumerated on [`Self::resolve_dupe_chain`].
+    pub fn lookup_best_fit_resolved(
+        &self,
+        glyph_id: u16,
+        target_ppem: u16,
+    ) -> Option<SbixGlyph<'a>> {
+        // Walk strikes ourselves so we know the picked strike index for
+        // the dupe chase. Same closest-ppem-larger-tiebreak policy as
+        // `lookup_best_fit`.
+        let mut best: Option<(u32, u32)> = None; // (strike_idx, |ppem-target|)
+        for i in 0..self.num_strikes {
+            let ppem = match self.strike_ppem(i) {
+                Some(p) => p,
+                None => continue,
+            };
+            if self.glyph(i, glyph_id).is_none() {
+                continue;
+            }
+            let dist = (ppem as i32 - target_ppem as i32).unsigned_abs();
+            match best {
+                None => best = Some((i, dist)),
+                Some((bi, bd)) => {
+                    if dist < bd
+                        || (dist == bd
+                            && self.strike_ppem(i).unwrap_or(0) > self.strike_ppem(bi).unwrap_or(0))
+                    {
+                        best = Some((i, dist));
+                    }
+                }
+            }
+        }
+        let (strike_idx, _) = best?;
+        self.resolve_dupe_chain(strike_idx, glyph_id)
     }
 
     /// Best-fit lookup: return the bitmap for `glyph_id` from the
@@ -439,5 +551,179 @@ mod tests {
         assert!(sbix.glyph(0, 1).is_none());
         // Other glyphs in same strike still resolve.
         assert!(sbix.glyph(0, 0).is_some());
+    }
+
+    // ---- 'dupe' indirection ---------------------------------------------
+
+    /// Build a single-strike sbix where every glyph's blob is laid out
+    /// at offset = `strike_header_len + g * blob_len`. Each entry's
+    /// `graphic_type` and 2-byte payload are filled from `entries[g]`,
+    /// where the first 4 bytes of the tuple slice are the graphic tag
+    /// and the next 2 bytes are the payload (`'dupe'` => big-endian
+    /// target glyph id; everything else => raw bitmap payload).
+    fn synth_sbix_with_entries(entries: &[([u8; 4], [u8; 2])]) -> Vec<u8> {
+        let num_glyphs = entries.len() as u16;
+        let strike_header_len = 4 + (num_glyphs as usize + 1) * 4;
+        let payload_len = 2usize;
+        let blob_len = 8 + payload_len;
+        let strike_data = num_glyphs as usize * blob_len;
+        let strike_total = strike_header_len + strike_data;
+
+        let header_len = 8 + 4; // 1 strike → 1 offset
+        let strike0 = header_len;
+        let total = strike0 + strike_total;
+
+        let mut bytes = vec![0u8; total];
+        bytes[0..2].copy_from_slice(&1u16.to_be_bytes()); // version
+        bytes[2..4].copy_from_slice(&1u16.to_be_bytes()); // flags
+        bytes[4..8].copy_from_slice(&1u32.to_be_bytes()); // numStrikes
+        bytes[8..12].copy_from_slice(&(strike0 as u32).to_be_bytes());
+
+        // Strike 0: 32ppem / 96ppi.
+        bytes[strike0..strike0 + 2].copy_from_slice(&32u16.to_be_bytes());
+        bytes[strike0 + 2..strike0 + 4].copy_from_slice(&96u16.to_be_bytes());
+        for i in 0..=num_glyphs as usize {
+            let off = strike_header_len + i * blob_len;
+            let dst = strike0 + 4 + i * 4;
+            bytes[dst..dst + 4].copy_from_slice(&(off as u32).to_be_bytes());
+        }
+        for (g, (tag, payload)) in entries.iter().enumerate() {
+            let blob_off = strike0 + strike_header_len + g * blob_len;
+            // origin_x / origin_y = 0 here; the dupe tests don't care.
+            bytes[blob_off + 4..blob_off + 8].copy_from_slice(tag);
+            bytes[blob_off + 8..blob_off + 10].copy_from_slice(payload);
+        }
+        bytes
+    }
+
+    #[test]
+    fn dupe_predicates_decode_target_glyph_id() {
+        // glyph 0: real png, glyph 1: dupe -> 0
+        let bytes = synth_sbix_with_entries(&[(*b"png ", [0x12, 0x34]), (*b"dupe", [0x00, 0x00])]);
+        let sbix = SbixTable::parse(&bytes, 2).expect("parse");
+        let g0 = sbix.glyph(0, 0).unwrap();
+        let g1 = sbix.glyph(0, 1).unwrap();
+        assert!(!g0.is_dupe());
+        assert_eq!(g0.dupe_target(), None);
+        assert!(g1.is_dupe());
+        assert_eq!(g1.dupe_target(), Some(0));
+    }
+
+    #[test]
+    fn resolve_dupe_chain_follows_indirection_to_real_entry() {
+        // 0:png, 1:dupe->0, 2:dupe->1 (chain of two hops resolves to 0).
+        let bytes = synth_sbix_with_entries(&[
+            (*b"png ", [0xAA, 0xBB]),
+            (*b"dupe", [0x00, 0x00]),
+            (*b"dupe", [0x00, 0x01]),
+        ]);
+        let sbix = SbixTable::parse(&bytes, 3).expect("parse");
+        // Direct entry resolves to itself.
+        let r0 = sbix.resolve_dupe_chain(0, 0).expect("entry");
+        assert_eq!(&r0.graphic_type, b"png ");
+        // One-hop chain.
+        let r1 = sbix.resolve_dupe_chain(0, 1).expect("entry");
+        assert_eq!(&r1.graphic_type, b"png ");
+        assert_eq!(r1.bytes[0..2], [0xAA, 0xBB]);
+        // Two-hop chain.
+        let r2 = sbix.resolve_dupe_chain(0, 2).expect("entry");
+        assert_eq!(&r2.graphic_type, b"png ");
+    }
+
+    #[test]
+    fn resolve_dupe_chain_detects_two_glyph_cycle() {
+        // 0:dupe->1, 1:dupe->0 — A↔B cycle.
+        let bytes = synth_sbix_with_entries(&[(*b"dupe", [0x00, 0x01]), (*b"dupe", [0x00, 0x00])]);
+        let sbix = SbixTable::parse(&bytes, 2).expect("parse");
+        assert!(sbix.resolve_dupe_chain(0, 0).is_none());
+        assert!(sbix.resolve_dupe_chain(0, 1).is_none());
+    }
+
+    #[test]
+    fn resolve_dupe_chain_detects_self_cycle() {
+        // 0:dupe->0 — self-loop.
+        let bytes = synth_sbix_with_entries(&[(*b"dupe", [0x00, 0x00])]);
+        let sbix = SbixTable::parse(&bytes, 1).expect("parse");
+        assert!(sbix.resolve_dupe_chain(0, 0).is_none());
+    }
+
+    #[test]
+    fn resolve_dupe_chain_caps_depth() {
+        // Build a longest-possible non-cyclic chain that still exceeds
+        // MAX_DUPE_DEPTH: 0->1->2->...->MAX_DUPE_DEPTH where the final
+        // entry is itself a dupe. resolve_dupe_chain must give up
+        // before reaching a real entry.
+        let n = MAX_DUPE_DEPTH + 1;
+        let mut entries: Vec<([u8; 4], [u8; 2])> = Vec::with_capacity(n);
+        for g in 0..n - 1 {
+            let next = (g + 1) as u16;
+            entries.push((*b"dupe", next.to_be_bytes()));
+        }
+        // Last entry is also a dupe pointing forward off-chain at
+        // a non-existent glyph — but resolve must time out first.
+        entries.push((*b"dupe", (n as u16 + 100).to_be_bytes()));
+        let bytes = synth_sbix_with_entries(&entries);
+        let sbix = SbixTable::parse(&bytes, n as u16).expect("parse");
+        assert!(sbix.resolve_dupe_chain(0, 0).is_none());
+    }
+
+    #[test]
+    fn resolve_dupe_chain_returns_none_for_oob_dupe_target() {
+        // 0:dupe->99 (99 is past num_glyphs=1).
+        let bytes = synth_sbix_with_entries(&[(*b"dupe", [0x00, 0x63])]);
+        let sbix = SbixTable::parse(&bytes, 1).expect("parse");
+        assert!(sbix.resolve_dupe_chain(0, 0).is_none());
+    }
+
+    #[test]
+    fn lookup_best_fit_resolved_walks_through_dupe() {
+        // 0:png (payload AB CD), 1:dupe->0.
+        let bytes = synth_sbix_with_entries(&[(*b"png ", [0xAB, 0xCD]), (*b"dupe", [0x00, 0x00])]);
+        let sbix = SbixTable::parse(&bytes, 2).expect("parse");
+        // Raw access returns the dupe sentinel.
+        let raw = sbix.lookup_best_fit(1, 32).expect("entry");
+        assert!(raw.is_dupe());
+        assert_eq!(raw.dupe_target(), Some(0));
+        // Resolved access returns the underlying png entry.
+        let res = sbix.lookup_best_fit_resolved(1, 32).expect("entry");
+        assert!(!res.is_dupe());
+        assert_eq!(&res.graphic_type, b"png ");
+        assert_eq!(res.bytes[0..2], [0xAB, 0xCD]);
+    }
+
+    #[test]
+    fn dupe_predicates_return_none_on_short_payload() {
+        // Manually build a sbix where glyph 0 has graphic_type 'dupe'
+        // but a 0-byte payload (blob length = 8). dupe_target must
+        // surface None rather than reading past the slice.
+        let num_glyphs: u16 = 1;
+        let strike_header_len = 4 + (num_glyphs as usize + 1) * 4;
+        let blob_len = 8; // 8 header + 0 payload
+        let strike_data = num_glyphs as usize * blob_len;
+        let strike_total = strike_header_len + strike_data;
+        let header_len = 8 + 4;
+        let strike0 = header_len;
+        let total = strike0 + strike_total;
+
+        let mut bytes = vec![0u8; total];
+        bytes[0..2].copy_from_slice(&1u16.to_be_bytes());
+        bytes[2..4].copy_from_slice(&1u16.to_be_bytes());
+        bytes[4..8].copy_from_slice(&1u32.to_be_bytes());
+        bytes[8..12].copy_from_slice(&(strike0 as u32).to_be_bytes());
+        bytes[strike0..strike0 + 2].copy_from_slice(&32u16.to_be_bytes());
+        bytes[strike0 + 2..strike0 + 4].copy_from_slice(&96u16.to_be_bytes());
+        for i in 0..=num_glyphs as usize {
+            let off = strike_header_len + i * blob_len;
+            let dst = strike0 + 4 + i * 4;
+            bytes[dst..dst + 4].copy_from_slice(&(off as u32).to_be_bytes());
+        }
+        let blob_off = strike0 + strike_header_len;
+        bytes[blob_off + 4..blob_off + 8].copy_from_slice(b"dupe");
+
+        let sbix = SbixTable::parse(&bytes, 1).expect("parse");
+        let g = sbix.glyph(0, 0).expect("entry");
+        assert!(g.is_dupe());
+        assert_eq!(g.dupe_target(), None);
+        assert!(sbix.resolve_dupe_chain(0, 0).is_none());
     }
 }

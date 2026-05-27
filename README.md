@@ -53,6 +53,12 @@ ligatures and kerning.
   `(index, effective_type, subtable_count)` for shapers that need to
   find e.g. every chained-context lookup without probing each index.
 - `GDEF` (glyph class definitions, used to skip mark glyphs).
+- sbix `'dupe'` indirection chasing (`sbix_glyph_resolved`): walks
+  the per-strike indirection chain up to `SBIX_MAX_DUPE_DEPTH` (= 8)
+  hops with explicit cycle detection (two-glyph, self-loop, and
+  forward-chain overflow all bail to `None`). The raw `sbix_glyph`
+  accessor still surfaces the `'dupe'` sentinel untouched for
+  byte-level consumers.
 - Adobe Glyph List (AGL) glyph-name → Unicode resolution
   (`glyph_name_to_codepoints` / `glyph_name_to_char`). Direct table
   lookup against the embedded AGL 2.0 data: a PostScript glyph name
@@ -305,7 +311,15 @@ if font.has_color_bitmaps() {
     let _ = font.glyph_color_bitmap(gid_a, /* target_ppem */ 64);
 }
 if font.has_sbix() {
+    // Raw access — `'dupe'` entries are surfaced as-is for callers
+    // that want to introspect the indirection target themselves.
     let _ = font.sbix_glyph(gid_a, /* target_ppem */ 64);
+
+    // Resolved access — chases `'dupe'` indirections within the
+    // chosen strike up to `SBIX_MAX_DUPE_DEPTH` (= 8) hops with
+    // explicit cycle detection; returns the first non-`'dupe'`
+    // entry or `None` if the chain cycles / overflows / dangles.
+    let _ = font.sbix_glyph_resolved(gid_a, 64);
 }
 
 // TTC (TrueType Collection) — pick one subfont from a `.ttc` file.
@@ -351,8 +365,6 @@ if vfont.is_variable() {
   both at the sub-table and lookup level.
 - COLR **v1** paint graph (gradients, transforms, composites) — only
   the v0 flat layer stack is supported.
-- sbix `'dupe'` chasing (the indirection sentinel is surfaced
-  as-is; consumers chase it with their own cycle detection).
 - avar **v2** delta-set index map (variable-axis remap).
 - HVAR / VVAR / MVAR (per-glyph horizontal-metrics / vertical-metrics
   / per-table metric variations).

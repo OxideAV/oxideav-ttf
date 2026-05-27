@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — `sbix` `'dupe'` indirection chain resolver with cycle detection (2026-05-27)
+
+The previous round surfaced the `'dupe'` graphic-type sentinel as-is on
+[`SbixTable::glyph`] / [`Font::sbix_glyph`], deferring the indirection
+chase to the consumer (which was expected to do its own cycle
+detection). This round closes that follow-up: new APIs follow `'dupe'`
+links within the selected strike up to a bounded depth, with explicit
+cycle detection — visited glyph ids are tracked and a revisit bails
+to `None` rather than recursing.
+
+- `pub const oxideav_ttf::SBIX_MAX_DUPE_DEPTH: usize = 8` (re-exported
+  from `tables::sbix::MAX_DUPE_DEPTH`). The cap defuses pathological
+  forward chains that don't form a strict cycle (e.g. `A → B → C → …`).
+- `SbixGlyph::is_dupe()` — `true` when `graphic_type == *b"dupe"`.
+- `SbixGlyph::dupe_target() -> Option<u16>` — decodes the 2-byte
+  big-endian indirection target glyph id; returns `None` for
+  non-`'dupe'` entries or malformed (<2 byte) payloads.
+- `SbixTable::resolve_dupe_chain(strike_index, glyph_id) -> Option<SbixGlyph<'a>>`
+  — follow `'dupe'` indirections inside one strike, returning the
+  first non-`'dupe'` entry. `None` on: zero-length / out-of-range
+  entry, chain length > `MAX_DUPE_DEPTH`, two-glyph cycle, self-loop,
+  malformed payload, dangling target.
+- `SbixTable::lookup_best_fit_resolved(glyph_id, target_ppem)
+  -> Option<SbixGlyph<'a>>` — picks the closest-ppem strike covering
+  the glyph (same tie-break policy as `lookup_best_fit`: larger size
+  wins) and then chases the indirection within that strike.
+- `Font::sbix_glyph_resolved(glyph_id, ppem) -> Option<SbixGlyph<'_>>`
+  — Font-level convenience wired to `lookup_best_fit_resolved`.
+- New unit tests in `tables::sbix::tests` (8):
+  `dupe_predicates_decode_target_glyph_id`,
+  `dupe_predicates_return_none_on_short_payload`,
+  `resolve_dupe_chain_follows_indirection_to_real_entry` (zero / one /
+  two hops), `resolve_dupe_chain_detects_two_glyph_cycle`,
+  `resolve_dupe_chain_detects_self_cycle`,
+  `resolve_dupe_chain_caps_depth` (forward chain `MAX_DUPE_DEPTH + 1`
+  long, last entry still a dupe — must bail without reaching a real
+  blob), `resolve_dupe_chain_returns_none_for_oob_dupe_target`,
+  `lookup_best_fit_resolved_walks_through_dupe`.
+
+Spec: Microsoft OpenType §"sbix — Standard Bitmap Graphics Table"
+(graphicType `'dupe'` semantics — 2-byte big-endian glyph id payload
+substitutes the bitmap of the indirect glyph). Apple TrueType
+Reference §"sbix".
+
 ## [0.1.5](https://github.com/OxideAV/oxideav-ttf/compare/v0.1.4...v0.1.5) - 2026-05-24
 
 ### Other
