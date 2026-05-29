@@ -77,7 +77,7 @@ const LOOKUP_EXTENSION_POS: u16 = 9;
 /// Maximum recursion depth for nested chained-context positionings.
 /// Prevents pathological self-referential lookup graphs from blowing
 /// the stack — the spec doesn't bound this so we set the same
-/// conservative fence as GSUB (HarfBuzz uses 6).
+/// conservative fence as GSUB.
 const MAX_NESTED_LOOKUP_DEPTH: u8 = 8;
 
 // ValueFormat bits (low byte holds the four geometric flags).

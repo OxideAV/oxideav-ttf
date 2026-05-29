@@ -62,7 +62,7 @@ const LOOKUP_REVERSE_CHAIN_CONTEXT_SUBST: u16 = 8;
 /// Maximum recursion depth for nested chained-context substitutions.
 /// Prevents pathological self-referential lookup graphs from blowing
 /// the stack — the spec doesn't bound this so we set a conservative
-/// fence (HarfBuzz uses 6).
+/// fence well below stack-blow territory.
 const MAX_NESTED_LOOKUP_DEPTH: u8 = 8;
 
 /// One feature record from the GSUB FeatureList, resolved to the

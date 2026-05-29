@@ -147,8 +147,8 @@ impl<'a> CmapTable<'a> {
     ///   to a custom variant glyph.
     /// - `Some(base_glyph)` when the pair is in the *default* UVS table
     ///   — semantically "render the base glyph; the variation selector
-    ///   chooses the default presentation". This matches HarfBuzz's
-    ///   `hb_font_get_variation_glyph` contract.
+    ///   chooses the default presentation", per OpenType cmap
+    ///   format-14 default-UVS semantics.
     /// - `None` if the font has no format-14 subtable, the variation
     ///   selector record isn't listed, or the codepoint isn't in either
     ///   of the record's two UVS tables.

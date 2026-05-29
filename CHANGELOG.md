@@ -789,8 +789,9 @@ Apple TrueType Reference §"sbix" (version 1 only).
   — resolves a `(base codepoint, variation selector)` pair through the
   cmap format-14 subtable. Returns the per-pair glyph from the
   non-default UVS table when present, the base codepoint's glyph when
-  the pair is in the default UVS table (matches HarfBuzz's
-  `hb_font_get_variation_glyph` contract), or `None` otherwise.
+  the pair is in the default UVS table (format-14 default-UVS
+  semantic — variation selector chooses default presentation),
+  or `None` otherwise.
 - `CmapTable::lookup_variation` — internal walker that binary-searches
   the variation selector record list, then within each record's
   `DefaultUVS` (UnicodeRange list) and `NonDefaultUVS` (UVSMapping
