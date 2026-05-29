@@ -7,6 +7,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — `kern` header sniff conflated Microsoft and Apple variants (2026-05-29)
+
+The `kern` table parser previously dispatched both Microsoft (`u16
+version = 0, u16 nTables`) and Apple (`u32 version = 0x00010000,
+u32 nTables`) headers through the Microsoft body walker on the
+spurious-but-symmetric condition "first u16 == 0". In big-endian
+the Apple version u32 reads as bytes `00 01 00 00`, so the high u16
+is actually `0x0001`, not `0` — the previous detection branch was
+dead. Apple-headered fonts therefore mis-parsed: nTables read as
+garbage from the low half of the version field, and either bogus
+pair lists got populated or the subtable walk bailed with a typed
+error. Symptom: every macOS-bundled `.ttf` that ships a legacy
+`kern` table (Helvetica, Lucida, Times, the Snow Leopard / Mavericks
+system stack) couldn't get its kerning data surfaced.
+
+- Header sniff now reads the first u16 and dispatches: `0` ⇒
+  Microsoft variant (4-byte header, decoded as before); `0x0001` ⇒
+  Apple variant (8-byte header; the parser confirms the low u16 of
+  the version field is also zero, reads `u32 nTables`, and accepts
+  the table without walking the subtable list); any other value ⇒
+  typed `Error::BadStructure("kern: bad version")`.
+- Apple-format subtable bodies are NOT decoded — the per-subtable
+  header layout differs from the Microsoft variant (`u32 length,
+  u16 coverage, u16 tupleIndex` instead of `u16 version, u16 length,
+  u16 coverage`) and the byte-level details aren't fully covered by
+  the staged `docs/text/opentype/` spec material. The parser
+  therefore surfaces Apple-headered tables as "structurally valid,
+  zero kerning pairs"; `lookup` returns 0 for every glyph pair,
+  letting consumer-crate shapers degrade to "no legacy kerning"
+  rather than crashing on a misparsed body. A clean-room reference
+  for the Apple `kern` / `kerx` subtable bodies is queued as a docs
+  follow-up.
+- New `pub enum tables::kern::HeaderVariant { Microsoft, Apple }`
+  re-exported at the crate root as `oxideav_ttf::KernHeaderVariant`.
+- New `KernTable::header_variant() -> HeaderVariant` and
+  `KernTable::pair_count() -> usize` accessors.
+- New `Font::kern_header_variant() -> Option<KernHeaderVariant>`
+  Font-level convenience; returns `None` for fonts that lack a `kern`
+  table altogether (every modern OpenType font that ships GPOS
+  LookupType 2 instead).
+- New unit tests in `tables::kern::tests` (5):
+  `apple_header_parses_as_empty_table` (minimal Apple table —
+  nTables = 0; previously rejected),
+  `apple_header_with_nonzero_n_tables_parses` (Apple with
+  nTables = 3 — the realistic shape; previously misparsed),
+  `apple_header_truncated_returns_eof` (short input bailing as
+  `UnexpectedEof` rather than indexing OOB),
+  `unknown_version_rejected` (first u16 ≠ {0, 1} surfaces
+  `BadStructure`),
+  `apple_header_with_dirty_low_half_rejected` (version field with
+  high u16 = 0x0001 but low u16 ≠ 0 is malformed and rejected
+  rather than dispatched into the Apple body path).
+  `round_trips_one_pair` is extended to assert the Microsoft
+  variant is reported and `pair_count == 1`.
+
+Spec: Microsoft OpenType §"kern — Kerning Table" (the
+spec-canonical Microsoft variant); Apple TrueType Reference
+§"kern" (the Apple-format variant — TOC-only in the staged HTML,
+hence the "accept structurally but don't decode subtable bodies"
+posture).
+
 ### Added — `sbix` `'dupe'` indirection chain resolver with cycle detection (2026-05-27)
 
 The previous round surfaced the `'dupe'` graphic-type sentinel as-is on

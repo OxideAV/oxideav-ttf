@@ -65,6 +65,7 @@ pub use tables::colr::ColorLayer;
 pub use tables::fvar::{NamedInstance, VariationAxis};
 pub use tables::gpos::{CursiveAttachment, PosRecord, PosValue};
 pub use tables::gsub::GsubFeature;
+pub use tables::kern::HeaderVariant as KernHeaderVariant;
 pub use tables::name::{name_id, platform, NameRecord};
 pub use tables::sbix::{SbixGlyph, MAX_DUPE_DEPTH as SBIX_MAX_DUPE_DEPTH};
 
@@ -789,6 +790,23 @@ impl<'a> Font<'a> {
         self.gsub
             .as_ref()?
             .apply_lookup_type_8(lookup_index, gids, pos)
+    }
+
+    /// On-disk header variant of the legacy `kern` table, if present.
+    ///
+    /// Two header layouts coexist: Microsoft-format `kern` (every
+    /// Windows-authored / most Adobe / Google TTF — `u16 version,
+    /// u16 nTables`) and Apple-format `kern` (macOS-bundled TTFs —
+    /// `u32 version = 0x00010000, u32 nTables`, with different
+    /// per-subtable header bytes). This crate decodes Microsoft-format
+    /// Format-0 horizontal kerning subtables; Apple-format tables
+    /// parse cleanly but their subtable bodies surface as zero pairs
+    /// (see [`KernHeaderVariant::Apple`]).
+    ///
+    /// Returns `None` for fonts that don't ship a `kern` table at all
+    /// (modern OpenType fonts use GPOS LookupType 2 instead).
+    pub fn kern_header_variant(&self) -> Option<KernHeaderVariant> {
+        self.kern.as_ref().map(|k| k.header_variant())
     }
 
     /// Look up the kerning between an ordered glyph pair, in font units.
