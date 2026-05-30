@@ -2,9 +2,19 @@
 //!
 //! We pick a single subtable at parse time (preferred order: 32-bit
 //! formats first, BMP formats second, legacy single-byte last) and run
-//! all `lookup` calls through it. Supported base formats: 0, 4, 6, 12,
-//! 13. Plus format 14 (Unicode Variation Sequences) as a sidecar that
-//! drives `lookup_variation` for codepoint+variation-selector pairs.
+//! all `lookup` calls through it. Supported base formats: 0, 2, 4, 6,
+//! 12, 13. Plus format 14 (Unicode Variation Sequences) as a sidecar
+//! that drives `lookup_variation` for codepoint+variation-selector pairs.
+//!
+//! Format 2 (high-byte mapping through table) is the legacy
+//! mixed-8-/16-bit encoding the cmap chapter describes for older
+//! Japanese / Chinese / Korean fonts. It is "not commonly used today"
+//! per the spec but still appears in pre-Unicode CJK system fonts.
+//! Lookup input is the raw codeunit (single byte for 1-byte chars, the
+//! 2-byte value `(high << 8) | low` for 2-byte chars). We do NOT do
+//! Shift-JIS / GB2312 / KSC-5601 → Unicode transcoding; the caller
+//! does that mapping itself if it wants to drive a format-2 font from
+//! a Unicode codepoint.
 //!
 //! Format 13 (many-to-one range mappings) shares its on-wire structure
 //! with format 12 but differs in semantics: every codepoint inside a
@@ -39,6 +49,7 @@ pub struct CmapTable<'a> {
 #[derive(Debug, Clone)]
 enum Subtable<'a> {
     Format0(&'a [u8]),
+    Format2(&'a [u8]),
     Format4(&'a [u8]),
     Format6(&'a [u8]),
     Format12(&'a [u8]),
@@ -122,6 +133,7 @@ impl<'a> CmapTable<'a> {
 
             let candidate = match format {
                 0 => Subtable::Format0(sub),
+                2 => Subtable::Format2(sub),
                 4 => Subtable::Format4(sub),
                 6 => Subtable::Format6(sub),
                 12 => Subtable::Format12(sub),
@@ -142,9 +154,15 @@ impl<'a> CmapTable<'a> {
     }
 
     /// Map a Unicode codepoint to a glyph id, or `None` if absent.
+    ///
+    /// For format-2 subtables (legacy mixed-8-/16-bit CJK fonts) the
+    /// `codepoint` argument is interpreted as a raw codeunit in the
+    /// font's native encoding — not as a Unicode scalar value. See the
+    /// `Format2` discussion in the module-level docs.
     pub fn lookup(&self, codepoint: u32) -> Option<u16> {
         match &self.subtable {
             Subtable::Format0(b) => lookup_format0(b, codepoint),
+            Subtable::Format2(b) => lookup_format2(b, codepoint),
             Subtable::Format4(b) => lookup_format4(b, codepoint),
             Subtable::Format6(b) => lookup_format6(b, codepoint),
             Subtable::Format12(b) => lookup_format12(b, codepoint),
@@ -312,7 +330,7 @@ fn range_contains(bytes: &[u8], table_off: usize, codepoint: u32) -> bool {
 }
 
 fn is_supported_format(format: u16) -> bool {
-    matches!(format, 0 | 4 | 6 | 12 | 13)
+    matches!(format, 0 | 2 | 4 | 6 | 12 | 13)
 }
 
 fn subtable_length(bytes: &[u8], off: usize, format: u16) -> Result<usize, Error> {
@@ -345,6 +363,14 @@ fn subtable_rank(format: u16, platform: u16, encoding: u16) -> i32 {
         4 => 300,
         6 => 200,
         0 => 100,
+        // Format 2 is a legacy mixed-8/16-bit CJK encoding ("not
+        // commonly used today" per the spec). Rank it BELOW the
+        // legacy 256-glyph format 0 and just above the last-resort
+        // format 13: a font that ships both a real Unicode subtable
+        // and a format-2 sidecar always picks the Unicode subtable;
+        // a font that ships ONLY format 2 (a true legacy CJK font)
+        // can still be parsed.
+        2 => 60,
         13 => 50,
         _ => 0,
     };
@@ -352,6 +378,10 @@ fn subtable_rank(format: u16, platform: u16, encoding: u16) -> i32 {
         (0, _) => 30,
         (3, 10) => 25, // Windows Unicode UCS-4
         (3, 1) => 20,  // Windows Unicode BMP
+        // Legacy Macintosh ScriptManager codes ride here; we don't
+        // single any encoding ID out because format-2 sees the same
+        // platform/encoding shape across Shift-JIS / GB2312 / Big5 /
+        // KSC-5601 (platform 1, encoding 1/2/3/5 respectively).
         _ => 5,
     };
     format_score + platform_score
@@ -374,6 +404,131 @@ fn lookup_format0(bytes: &[u8], codepoint: u32) -> Option<u16> {
     } else {
         Some(g as u16)
     }
+}
+
+// --- Format 2 --------------------------------------------------------------
+
+/// Format 2 — high-byte mapping through table.
+///
+/// Layout per the OpenType cmap chapter, "Format 2: High byte mapping
+/// through table":
+///
+/// ```text
+///   0  / 2 / format (= 2)
+///   2  / 2 / length
+///   4  / 2 / language
+///   6  / 512 / subHeaderKeys[256]   each entry = (subHeader index) × 8
+///  518 / 8 * N / subHeaders[]       SubHeader { firstCode, entryCount, idDelta, idRangeOffset }
+///   ?  /     / glyphIdArray[]        u16 entries; offsets into here come from idRangeOffset
+/// ```
+///
+/// Encoding the lookup of one codeunit:
+///
+/// 1. Split the input. For a single-byte codeunit (e.g. ASCII in a
+///    Shift-JIS font), let `high = 0`, `low = codepoint`. For a 2-byte
+///    codeunit, `high = (codepoint >> 8) & 0xFF`, `low = codepoint & 0xFF`.
+/// 2. Index `subHeaderKeys[high]` → `k`. The selected SubHeader is the
+///    one at byte-offset `518 + k` (i.e. `subHeaders[k / 8]`). `k = 0`
+///    is the special "single-byte" SubHeader (SubHeader 0). Per the
+///    spec a non-zero `k` for a single-byte code means the high byte
+///    is a lead byte and the caller must follow with a second byte.
+/// 3. Inside the SubHeader, the `low` byte must lie in
+///    `[firstCode, firstCode + entryCount)`; otherwise the codepoint
+///    maps to the missing glyph.
+/// 4. Read the per-entry `u16` from the glyph-id sub-array. The spec
+///    formula for that location is
+///    `*(idRangeOffset/2 + (low - firstCode) + &idRangeOffset)`,
+///    which expands in bytes to
+///    `(&idRangeOffset) + idRangeOffset + 2 * (low - firstCode)`.
+/// 5. If the raw value is 0 the glyph is missing (`None`). Otherwise
+///    add `idDelta` (modulo 65536) to obtain the final glyph id.
+///
+/// SubHeader 0 ("single-byte chars use this") is used when the input
+/// is a single byte AND `subHeaderKeys[0] == 0`. For a 2-byte input
+/// whose high byte's key is also zero we still go through SubHeader 0
+/// — but the input value must fit in 8 bits; if `high != 0` and the
+/// key is zero, the spec considers it an invalid encoding and we
+/// return `None`.
+fn lookup_format2(bytes: &[u8], codepoint: u32) -> Option<u16> {
+    // The input is a raw codeunit, not a Unicode scalar value. The
+    // largest legal value is 0xFFFF (a 2-byte codeunit).
+    if codepoint > 0xFFFF {
+        return None;
+    }
+    let high = ((codepoint >> 8) & 0xFF) as u8;
+    let low = (codepoint & 0xFF) as u8;
+
+    // Header sanity: we need at least the 6-byte fixed prefix plus the
+    // 256-entry subHeaderKeys array (= 518 bytes) before the first
+    // SubHeader can begin.
+    let sub_header_keys_off = 6usize;
+    let sub_headers_off = sub_header_keys_off + 512;
+    if bytes.len() < sub_headers_off {
+        return None;
+    }
+
+    // subHeaderKeys[high] is a u16 already pre-multiplied by 8 — the
+    // value is the byte offset *into the subHeaders array region* of
+    // the SubHeader for this lead byte.
+    let key = read_u16(bytes, sub_header_keys_off + (high as usize) * 2).ok()?;
+    if key % 8 != 0 {
+        // Malformed: each entry indexes 8-byte SubHeader records.
+        return None;
+    }
+    let sub_header_offset = sub_headers_off + key as usize;
+    if sub_header_offset + 8 > bytes.len() {
+        return None;
+    }
+
+    let first_code = read_u16(bytes, sub_header_offset).ok()?;
+    let entry_count = read_u16(bytes, sub_header_offset + 2).ok()?;
+    // idDelta is documented int16 — read as u16 then reinterpret. The
+    // spec mandates modulo-65536 arithmetic for the final addition so
+    // we do the math in i32 and mask the low 16 bits at the end.
+    let id_delta = read_u16(bytes, sub_header_offset + 4).ok()? as i16 as i32;
+    let id_range_offset = read_u16(bytes, sub_header_offset + 6).ok()? as usize;
+
+    // The SubHeader at offset 0 ("k = 0") is the special single-byte
+    // SubHeader. The high byte for an ASCII-style single-byte char is
+    // 0; for those, the low byte IS the whole codeunit and falls into
+    // SubHeader 0's range. If the user hands us a 2-byte codeunit whose
+    // high byte maps to SubHeader 0 (key = 0), the spec considers that
+    // an encoder-side malformed input; we return None rather than
+    // silently double-counting it.
+    if key == 0 && high != 0 {
+        return None;
+    }
+
+    // Bounds-check the low byte against [firstCode, firstCode + entryCount).
+    // Both firstCode and entryCount are u16-bounded and entryCount may
+    // legally be 0 for a SubHeader that exists only to act as a lead
+    // byte sentinel; a zero-entry SubHeader matches nothing.
+    if entry_count == 0 {
+        return None;
+    }
+    let low_u16 = low as u16;
+    if low_u16 < first_code {
+        return None;
+    }
+    let idx = (low_u16 - first_code) as usize;
+    if idx >= entry_count as usize {
+        return None;
+    }
+
+    // Spec formula in bytes:
+    //   target = (address of idRangeOffset field) + idRangeOffset + 2 * idx
+    // The idRangeOffset field sits at sub_header_offset + 6.
+    let id_range_field_addr = sub_header_offset + 6;
+    let target = id_range_field_addr
+        .checked_add(id_range_offset)?
+        .checked_add(2 * idx)?;
+    let raw = read_u16(bytes, target).ok()?;
+    if raw == 0 {
+        return None;
+    }
+    // (raw + idDelta) mod 65536. Cast back to u16 via the low 16 bits.
+    let g = (raw as i32 + id_delta) & 0xFFFF;
+    Some(g as u16)
 }
 
 // --- Format 4 --------------------------------------------------------------
@@ -601,6 +756,10 @@ mod tests {
         //   format 13 → (0, 6) "Unicode full repertoire — for use with
         //                       subtable format 13" per spec.
         //   format 12 → (3, 10) Windows Unicode UCS-4
+        //   format 2  → (1, 1)  Macintosh Japanese (Shift-JIS-ish) — a
+        //                       legacy script-platform pair that goes
+        //                       through the catch-all platform branch
+        //                       of subtable_rank.
         //   else      → (3, 1)  Windows Unicode BMP
         let mut out = vec![0u8; 4 + 8];
         out[0..2].copy_from_slice(&0u16.to_be_bytes()); // version
@@ -608,6 +767,7 @@ mod tests {
         let (platform, enc): (u16, u16) = match format {
             13 => (0, 6),
             12 => (3, 10),
+            2 => (1, 1),
             _ => (3, 1),
         };
         out[4..6].copy_from_slice(&platform.to_be_bytes());
@@ -1304,5 +1464,315 @@ mod tests {
         assert_eq!(cmap.lookup(0x0041), Some(1));
         assert_eq!(cmap.lookup(0x1F600), Some(1));
         assert_eq!(cmap.lookup(0x10FFFF), Some(1));
+    }
+
+    // --- Format 2 ----------------------------------------------------------
+
+    /// Build a format-2 subtable manually.
+    ///
+    /// `sub_header_keys` is a 256-entry array of u16 values; each value
+    /// is the SubHeader index already multiplied by 8 (the spec's
+    /// pre-baked offset). `sub_headers` is a list of
+    /// `(firstCode, entryCount, idDelta, idRangeOffset)` SubHeader
+    /// records. `glyph_id_array` is the trailing flat list of u16
+    /// glyph IDs that the SubHeaders' `idRangeOffset` fields point
+    /// into; this helper does NOT compute idRangeOffset for you —
+    /// callers hand-craft it so the test exercises the spec formula.
+    fn build_format2(
+        sub_header_keys: &[u16; 256],
+        sub_headers: &[(u16, u16, i16, u16)],
+        glyph_id_array: &[u16],
+    ) -> Vec<u8> {
+        let header_len = 6;
+        let keys_len = 512;
+        let sub_headers_len = sub_headers.len() * 8;
+        let glyph_array_len = glyph_id_array.len() * 2;
+        let total = header_len + keys_len + sub_headers_len + glyph_array_len;
+        let mut sub = vec![0u8; total];
+        sub[0..2].copy_from_slice(&2u16.to_be_bytes()); // format
+        sub[2..4].copy_from_slice(&(total as u16).to_be_bytes()); // length
+                                                                  // language at 4..6 stays zero
+        for (i, k) in sub_header_keys.iter().enumerate() {
+            let off = 6 + i * 2;
+            sub[off..off + 2].copy_from_slice(&k.to_be_bytes());
+        }
+        let sub_headers_off = header_len + keys_len;
+        for (i, &(first_code, entry_count, id_delta, id_range_offset)) in
+            sub_headers.iter().enumerate()
+        {
+            let off = sub_headers_off + i * 8;
+            sub[off..off + 2].copy_from_slice(&first_code.to_be_bytes());
+            sub[off + 2..off + 4].copy_from_slice(&entry_count.to_be_bytes());
+            sub[off + 4..off + 6].copy_from_slice(&(id_delta as u16).to_be_bytes());
+            sub[off + 6..off + 8].copy_from_slice(&id_range_offset.to_be_bytes());
+        }
+        let glyph_array_off = sub_headers_off + sub_headers_len;
+        for (i, &g) in glyph_id_array.iter().enumerate() {
+            let off = glyph_array_off + i * 2;
+            sub[off..off + 2].copy_from_slice(&g.to_be_bytes());
+        }
+        sub
+    }
+
+    /// Smallest format-2 case: SubHeader 0 maps the seven ASCII digits
+    /// '0'..'9' to glyphs 100..109 via a direct `idRangeOffset`. There
+    /// are no lead bytes — every key entry is 0, so every byte input
+    /// falls through SubHeader 0.
+    #[test]
+    fn format2_subheader_zero_maps_single_byte() {
+        // sub_header_keys: all zero (every high byte → SubHeader 0).
+        let keys = [0u16; 256];
+        // SubHeader 0: firstCode = 0x30, entryCount = 10, idDelta = 0,
+        //   idRangeOffset points from this SubHeader's idRangeOffset
+        //   field to the start of glyph_id_array.
+        // Address of SubHeader[0].idRangeOffset = 6 + 512 + 6 = 524.
+        // Glyph-id array starts at byte 6 + 512 + 8 = 526.
+        // idRangeOffset = 526 - 524 = 2.
+        let sub_headers = [(0x30u16, 10u16, 0i16, 2u16)];
+        let glyph_ids: Vec<u16> = (100..110).collect();
+        let sub = build_format2(&keys, &sub_headers, &glyph_ids);
+        let cmap_bytes = build_cmap_with_subtable(2, &sub);
+        let cmap = CmapTable::parse(&cmap_bytes).unwrap();
+        for (i, cp) in (0x30u32..0x3A).enumerate() {
+            assert_eq!(cmap.lookup(cp), Some(100 + i as u16), "cp {cp:#x}");
+        }
+        // Codes outside [firstCode, firstCode + entryCount) miss.
+        assert_eq!(cmap.lookup(0x2F), None);
+        assert_eq!(cmap.lookup(0x3A), None);
+    }
+
+    /// id_delta is applied to a non-zero glyph-array entry. Spec:
+    /// "Finally, if the value obtained from the sub-array is not 0 …
+    /// you should add idDelta to it in order to get the glyphIndex."
+    /// A zero entry stays a miss regardless of idDelta.
+    #[test]
+    fn format2_id_delta_offsets_nonzero_entries() {
+        let keys = [0u16; 256];
+        // Same SubHeader as above but with idDelta = +1000. The three
+        // glyph-id-array slots are {200, 0, 300}: the middle 0 should
+        // still resolve to None even though delta would carry it to 1000.
+        let sub_headers = [(0x30u16, 3u16, 1000i16, 2u16)];
+        let glyph_ids = [200u16, 0u16, 300u16];
+        let sub = build_format2(&keys, &sub_headers, &glyph_ids);
+        let cmap_bytes = build_cmap_with_subtable(2, &sub);
+        let cmap = CmapTable::parse(&cmap_bytes).unwrap();
+        assert_eq!(cmap.lookup(0x30), Some(1200));
+        assert_eq!(cmap.lookup(0x31), None);
+        assert_eq!(cmap.lookup(0x32), Some(1300));
+    }
+
+    /// idDelta modulo-65536 arithmetic. The spec is explicit: "The
+    /// idDelta arithmetic is modulo 65536." A delta of -1 applied to
+    /// glyph 5 yields glyph 4; a delta of -10 applied to glyph 5
+    /// would naively be -5 but the spec mandates wraparound. We pick
+    /// numbers that wrap cleanly: raw = 5, idDelta = -6, expected = 65535.
+    #[test]
+    fn format2_id_delta_wraps_modulo_65536() {
+        let keys = [0u16; 256];
+        let sub_headers = [(0x30u16, 1u16, -6i16, 2u16)];
+        let glyph_ids = [5u16];
+        let sub = build_format2(&keys, &sub_headers, &glyph_ids);
+        let cmap_bytes = build_cmap_with_subtable(2, &sub);
+        let cmap = CmapTable::parse(&cmap_bytes).unwrap();
+        // (5 + (-6)) mod 65536 = 65535. Spec: "If the result … is less
+        // than zero, add 65536 to obtain a valid glyph ID."
+        assert_eq!(cmap.lookup(0x30), Some(0xFFFF));
+    }
+
+    /// Two-byte lookup through a non-zero SubHeader.
+    ///
+    /// Encoding: high byte 0x81 is a lead byte; the spec stores its
+    /// SubHeader-index-times-8 at `subHeaderKeys[0x81]`. SubHeader 0
+    /// is single-byte (covers 0x20..0x7F). SubHeader 1 is for high
+    /// byte 0x81 and covers low byte 0x40..0x42.
+    #[test]
+    fn format2_lead_byte_routes_to_subheader() {
+        let mut keys = [0u16; 256];
+        // SubHeader 1 → byte offset 8 in the SubHeaders region.
+        keys[0x81] = 8;
+
+        // SubHeader 0 (single-byte fallback): firstCode = 0x20,
+        //   entryCount = 1, idDelta = 0.
+        //   Its idRangeOffset field sits at byte 6 + 512 + 0 + 6 = 524.
+        //   Glyph-id array starts at byte 6 + 512 + 16 = 534 (two
+        //   SubHeaders × 8 bytes).
+        //   SubHeader 0's entry occupies glyph_id_array[0]; we want
+        //   that pointer to land at byte 534 → idRangeOffset = 534 - 524
+        //   = 10.
+        // SubHeader 1 (lead-byte 0x81): firstCode = 0x40, entryCount = 3,
+        //   idDelta = 0.
+        //   Its idRangeOffset field sits at byte 6 + 512 + 8 + 6 = 532.
+        //   We want it to point at glyph_id_array[1] = byte 536 →
+        //   idRangeOffset = 536 - 532 = 4.
+        let sub_headers = [
+            (0x20u16, 1u16, 0i16, 10u16), // SubHeader 0
+            (0x40u16, 3u16, 0i16, 4u16),  // SubHeader 1
+        ];
+        // glyph_id_array layout:
+        //   [0] = glyph for SubHeader 0 / single-byte 0x20      → 7
+        //   [1..=3] = glyphs for SubHeader 1 / 0x40 / 0x41 / 0x42
+        let glyph_ids = [7u16, 1001u16, 1002u16, 1003u16];
+        let sub = build_format2(&keys, &sub_headers, &glyph_ids);
+        let cmap_bytes = build_cmap_with_subtable(2, &sub);
+        let cmap = CmapTable::parse(&cmap_bytes).unwrap();
+        // Single-byte ASCII space goes through SubHeader 0.
+        assert_eq!(cmap.lookup(0x20), Some(7));
+        // 2-byte codeunit 0x8140 / 0x8141 / 0x8142 go through SubHeader 1.
+        assert_eq!(cmap.lookup(0x8140), Some(1001));
+        assert_eq!(cmap.lookup(0x8141), Some(1002));
+        assert_eq!(cmap.lookup(0x8142), Some(1003));
+        // Out of SubHeader 1's [firstCode, firstCode + entryCount).
+        assert_eq!(cmap.lookup(0x8143), None);
+        assert_eq!(cmap.lookup(0x813F), None);
+        // High byte 0x82 isn't a lead byte (its key is 0) and the
+        // would-be low byte is 0x40 — outside SubHeader 0's range —
+        // so this is rejected as an invalid encoding rather than
+        // accidentally double-dispatched.
+        assert_eq!(cmap.lookup(0x8240), None);
+    }
+
+    /// Two SubHeaders sharing a single sub-array. The spec calls this
+    /// out as the reason idDelta exists: "The value idDelta permits
+    /// the same sub-array to be used for several different
+    /// subheaders." Two lead bytes (0x81 and 0x82) both use the same
+    /// 3-entry sub-array but with different idDeltas, so the same
+    /// underlying glyph slots produce different glyph IDs.
+    #[test]
+    fn format2_id_delta_lets_subheaders_share_sub_array() {
+        let mut keys = [0u16; 256];
+        keys[0x81] = 8; // SubHeader 1
+        keys[0x82] = 16; // SubHeader 2
+
+        // Three SubHeaders × 8 bytes = 24 bytes of SubHeader region.
+        //   SubHeader 0 (single-byte fallback): no usable glyphs;
+        //     firstCode = 0, entryCount = 0 disables it.
+        //   SubHeader 1 (lead 0x81): idRangeOffset field at byte
+        //     6 + 512 + 8 + 6 = 532. Points at glyph_id_array[0] @ byte
+        //     6 + 512 + 24 = 542; idRangeOffset = 542 - 532 = 10.
+        //     idDelta = +100.
+        //   SubHeader 2 (lead 0x82): idRangeOffset field at byte
+        //     6 + 512 + 16 + 6 = 540. Points at SAME glyph_id_array[0]
+        //     @ byte 542; idRangeOffset = 542 - 540 = 2.
+        //     idDelta = +200.
+        let sub_headers = [
+            (0x00u16, 0u16, 0i16, 0u16),
+            (0x40u16, 3u16, 100i16, 10u16),
+            (0x40u16, 3u16, 200i16, 2u16),
+        ];
+        let glyph_ids = [1u16, 2u16, 3u16];
+        let sub = build_format2(&keys, &sub_headers, &glyph_ids);
+        let cmap_bytes = build_cmap_with_subtable(2, &sub);
+        let cmap = CmapTable::parse(&cmap_bytes).unwrap();
+        // Through SubHeader 1: (1, 2, 3) + 100.
+        assert_eq!(cmap.lookup(0x8140), Some(101));
+        assert_eq!(cmap.lookup(0x8141), Some(102));
+        assert_eq!(cmap.lookup(0x8142), Some(103));
+        // Through SubHeader 2: (1, 2, 3) + 200, same underlying slots.
+        assert_eq!(cmap.lookup(0x8240), Some(201));
+        assert_eq!(cmap.lookup(0x8241), Some(202));
+        assert_eq!(cmap.lookup(0x8242), Some(203));
+    }
+
+    /// A SubHeader's raw glyph-array entry of 0 stays "missing glyph"
+    /// even when idDelta would push it to a non-zero value. This is
+    /// the spec's "not 0" guard before the addition.
+    #[test]
+    fn format2_zero_glyph_array_entry_is_missing_glyph() {
+        let mut keys = [0u16; 256];
+        keys[0x81] = 8;
+        let sub_headers = [
+            (0x00u16, 0u16, 0i16, 0u16),
+            // SubHeader 1: idRangeOffset field at byte 532; glyph-array
+            // at byte 6 + 512 + 16 = 534. idRangeOffset = 534 - 532 = 2.
+            (0x40u16, 2u16, 500i16, 2u16),
+        ];
+        let glyph_ids = [0u16, 42u16];
+        let sub = build_format2(&keys, &sub_headers, &glyph_ids);
+        let cmap_bytes = build_cmap_with_subtable(2, &sub);
+        let cmap = CmapTable::parse(&cmap_bytes).unwrap();
+        // 0x8140 → raw 0 → None, despite idDelta = +500.
+        assert_eq!(cmap.lookup(0x8140), None);
+        // 0x8141 → raw 42 → 542.
+        assert_eq!(cmap.lookup(0x8141), Some(542));
+    }
+
+    /// A 2-byte codeunit whose high byte routes through SubHeader 0 is
+    /// rejected. The spec considers SubHeader 0 the "single-byte
+    /// character" SubHeader; a high byte that is NOT a registered lead
+    /// byte but is also non-zero is a malformed input rather than a
+    /// silent fall-through.
+    #[test]
+    fn format2_high_byte_through_subheader_zero_is_rejected() {
+        let keys = [0u16; 256]; // every high byte → SubHeader 0
+        let sub_headers = [(0x20u16, 0xE0u16, 0i16, 2u16)];
+        let glyph_ids: Vec<u16> = (1u16..(1 + 0xE0)).collect();
+        let sub = build_format2(&keys, &sub_headers, &glyph_ids);
+        let cmap_bytes = build_cmap_with_subtable(2, &sub);
+        let cmap = CmapTable::parse(&cmap_bytes).unwrap();
+        // Single-byte 'A' → fine.
+        assert_eq!(cmap.lookup(0x41), Some(1 + (0x41 - 0x20) as u16));
+        // 2-byte 0x4141 has high byte 0x41 routed through SubHeader 0;
+        // we reject this rather than treating it as a 1-byte 0x41.
+        assert_eq!(cmap.lookup(0x4141), None);
+    }
+
+    /// A real-coverage subtable (format 4 / 12) must always outrank a
+    /// format-2 sidecar. Real-world: a CJK font that ships both a
+    /// modern format-4 Unicode subtable AND a legacy format-2 sidecar
+    /// for old non-Unicode renderers — we want the Unicode map active.
+    #[test]
+    fn format2_does_not_displace_format12() {
+        // -- format-12 subtable: U+0041 ('A') → glyph 7, distinct.
+        let sub12_len = 16 + 12;
+        let mut sub12 = vec![0u8; sub12_len];
+        sub12[0..2].copy_from_slice(&12u16.to_be_bytes());
+        sub12[4..8].copy_from_slice(&(sub12_len as u32).to_be_bytes());
+        sub12[12..16].copy_from_slice(&1u32.to_be_bytes());
+        sub12[16..20].copy_from_slice(&0x0041u32.to_be_bytes());
+        sub12[20..24].copy_from_slice(&0x0041u32.to_be_bytes());
+        sub12[24..28].copy_from_slice(&7u32.to_be_bytes());
+
+        // -- format-2 subtable: byte 0x41 → glyph 99 (would-be hijack).
+        let keys = [0u16; 256];
+        let sub_headers = [(0x41u16, 1u16, 0i16, 2u16)];
+        let glyph_ids = [99u16];
+        let sub2 = build_format2(&keys, &sub_headers, &glyph_ids);
+
+        // Hand-roll the cmap header: 2 encoding records.
+        let header_len = 4 + 2 * 8;
+        let sub12_off = header_len;
+        let sub2_off = sub12_off + sub12.len();
+        let mut out = vec![0u8; header_len];
+        out[0..2].copy_from_slice(&0u16.to_be_bytes());
+        out[2..4].copy_from_slice(&2u16.to_be_bytes());
+        // record 0: (3, 10) format-12 — rank 425.
+        out[4..6].copy_from_slice(&3u16.to_be_bytes());
+        out[6..8].copy_from_slice(&10u16.to_be_bytes());
+        out[8..12].copy_from_slice(&(sub12_off as u32).to_be_bytes());
+        // record 1: (1, 1) format-2 — rank 60 + 5 = 65.
+        out[12..14].copy_from_slice(&1u16.to_be_bytes());
+        out[14..16].copy_from_slice(&1u16.to_be_bytes());
+        out[16..20].copy_from_slice(&(sub2_off as u32).to_be_bytes());
+        out.extend_from_slice(&sub12);
+        out.extend_from_slice(&sub2);
+
+        let cmap = CmapTable::parse(&out).unwrap();
+        // Must resolve through format 12, NOT format 2.
+        assert_eq!(cmap.lookup(0x0041), Some(7));
+    }
+
+    /// A font that ships ONLY a format-2 subtable still parses and
+    /// looks up. (Legacy pre-Unicode CJK font scenario.)
+    #[test]
+    fn format2_only_is_pickable() {
+        let keys = [0u16; 256];
+        let sub_headers = [(0x30u16, 10u16, 0i16, 2u16)];
+        let glyph_ids: Vec<u16> = (1u16..11).collect();
+        let sub = build_format2(&keys, &sub_headers, &glyph_ids);
+        let cmap_bytes = build_cmap_with_subtable(2, &sub);
+        let cmap = CmapTable::parse(&cmap_bytes).unwrap();
+        for (i, cp) in (0x30u32..0x3A).enumerate() {
+            assert_eq!(cmap.lookup(cp), Some(1 + i as u16));
+        }
     }
 }

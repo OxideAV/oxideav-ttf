@@ -7,6 +7,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — `cmap` format 2 (high-byte mapping through table) (2026-05-30)
+
+OpenType cmap subtable format 2 decoder. Format 2 is the legacy
+mixed-8-/16-bit encoding the cmap chapter describes for pre-Unicode
+Japanese / Chinese / Korean fonts ("not commonly used today" per the
+spec but still present in older system fonts).
+
+Lookup input for a format-2 subtable is interpreted as a raw codeunit
+in the font's native encoding (Shift-JIS / GB2312 / Big5 / KSC-5601 /
+etc.), NOT as a Unicode scalar value: a single-byte character is the
+8-bit code, a 2-byte character is `(high << 8) | low`. Callers that
+want to drive a format-2 font from Unicode are responsible for the
+Unicode → native-encoding transcoding step.
+
+- `lookup_format2` walks `subHeaderKeys[256]` to pick a SubHeader
+  record from the variable-length `subHeaders[]` region, then evaluates
+  the spec's `*(idRangeOffset/2 + (low - firstCode) + &idRangeOffset)`
+  formula against the trailing `glyphIdArray[]`. `idDelta` is added
+  modulo 65536 (spec-explicit) so deltas that underflow wrap into the
+  upper-half u16 range. A zero raw entry returns `None` regardless of
+  `idDelta`, matching the "if the value … is not 0" guard.
+- `Subtable::Format2(&[u8])` variant; `is_supported_format` now
+  accepts `2`; `subtable_length` already routed format 2 through the
+  u16-length-at-offset+2 branch and needed no change.
+- A 2-byte codeunit whose high byte's `subHeaderKey` is 0 (i.e. the
+  high byte is NOT a registered lead byte) would otherwise route to
+  SubHeader 0, which the spec reserves for single-byte chars; we
+  reject such an input rather than treating it as a 1-byte char with
+  the low byte.
+- Picker ranks format 2 at `60` — below format 0 (`100`) so a font
+  shipping both a Unicode subtable and a format-2 sidecar always
+  picks Unicode, but above format 13 (`50`) so a true legacy CJK font
+  that ships ONLY format 2 still parses. Platform/encoding scoring
+  uses the catch-all branch for the legacy Macintosh (1, 1/2/3/5)
+  script pairs that historically hosted format 2.
+- Nine new unit tests covering: SubHeader 0 single-byte fallback,
+  `idDelta` applied to non-zero glyph-array entries with a zero entry
+  still missing, modulo-65536 wraparound on negative deltas, 2-byte
+  lookup routing through a non-zero SubHeader (lead byte 0x81 covers
+  0x40..0x42), two SubHeaders sharing one sub-array with distinct
+  `idDelta` (the headline "why idDelta exists" case), the
+  zero-glyph-array-entry → `None` guard, the
+  high-byte-through-SubHeader-0 rejection, format-2 not displacing a
+  format-12 sidecar, and format-2-only fonts staying pickable.
+
+Out of scope: cmap formats 8 and 10 (Unicode supplementary-plane
+mixed-length encodings that the spec calls out as also rare).
+
 ## [0.1.6](https://github.com/OxideAV/oxideav-ttf/compare/v0.1.5...v0.1.6) - 2026-05-30
 
 ### Other
