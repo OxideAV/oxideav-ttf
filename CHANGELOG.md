@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.6](https://github.com/OxideAV/oxideav-ttf/compare/v0.1.5...v0.1.6) - 2026-05-30
+
+### Other
+
+- format 13 (many-to-one range mappings) for last-resort fonts
+- drop HarfBuzz behavioural-citation comments (clean-room)
+- distinguish Apple from Microsoft header; expose HeaderVariant
+- `'dupe'` indirection chain resolver with bounded depth + cycle detection
+
 ### Added — `cmap` format 13 (many-to-one range mappings) (2026-05-30)
 
 OpenType cmap subtable format 13 decoder. Shares its on-wire layout
