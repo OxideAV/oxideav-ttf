@@ -8,9 +8,10 @@ ligatures and kerning.
 ## Round-1 scope (this release)
 
 - sfnt + table directory walker.
-- `head`, `hhea`, `maxp`, `cmap` (base formats 0, 4, 6, 12 + format 14
-  Unicode Variation Sequences as a sidecar), `name`, `OS/2`, `hmtx`,
-  `loca`, `glyf` (simple + composite), `post`.
+- `head`, `hhea`, `maxp`, `cmap` (base formats 0, 4, 6, 12, 13 +
+  format 14 Unicode Variation Sequences as a sidecar — format 13 is
+  the "many-to-one range mappings" layout used by last-resort fonts),
+  `name`, `OS/2`, `hmtx`, `loca`, `glyf` (simple + composite), `post`.
 - `name` table: full accessor API beyond family / full name — the
   registered nameID registry (`name_id` constants), typed accessors
   (subfamily, PostScript, version, copyright, trademark, manufacturer,
@@ -352,7 +353,8 @@ if vfont.is_variable() {
 - CFF / Type 2 charstrings — moves to a sibling `oxideav-otf` crate.
 - Bidi, Arabic shaping, Indic conjuncts, complex contextual GSUB/GPOS.
 - TrueType bytecode hinting (modern AA at ≥ 16 px does not need it).
-- cmap formats 2, 8, 10, 13.
+- cmap formats 2, 8, 10. (Format 13 — many-to-one ranges for
+  last-resort fonts — landed; see above.)
 - All GPOS lookup types except LookupType 7 (the now-fully-handled
   LookupType 9 ExtensionPos wrapper plays its role) are implemented:
   1 (single), 2 (pair), 3 (cursive attachment), 4 (mark-to-base),

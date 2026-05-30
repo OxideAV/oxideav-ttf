@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — `cmap` format 13 (many-to-one range mappings) (2026-05-30)
+
+OpenType cmap subtable format 13 decoder. Shares its on-wire layout
+with format 12 (`u32 numGroups` + groups of `u32 startCharCode,
+u32 endCharCode, u32 glyphID`) but differs in semantics: every
+codepoint in `[startCharCode..=endCharCode]` maps to the SAME
+`glyphID`, not to a running sequence anchored on `startGlyphID`.
+The OpenType cmap chapter calls this out explicitly: *"Subtable
+format 13 has the same structure as format 12; it differs only in
+the interpretation of the startGlyphID/glyphID fields."*
+
+- New `lookup_format13` walker with the same binary search the
+  format-12 walker uses. Group records carrying `glyphID = 0`
+  return `None` (consistent with how every other format handles a
+  hit on `.notdef`).
+- `Subtable::Format13(&[u8])` variant; `is_supported_format` now
+  accepts `13`.
+- Picker ranks format 13 at `50` (below format 0 = `100`), so a
+  font shipping both a real-coverage subtable and a format-13
+  last-resort fallback always picks the real one. The dedicated
+  (platform 0, encoding 6) "Unicode full repertoire — for use with
+  subtable format 13" platform/encoding pair from the cmap chapter
+  is recognised by `subtable_rank` so true last-resort fonts
+  (format-13-only) still parse.
+- Seven new unit tests covering: single all-BMP range, multi-range
+  with distinct per-range glyphs, the headline many-to-one property
+  (a 3-codepoint range with `glyphID = 7` resolves to glyph 7 for
+  ALL three inputs, NOT to 7/8/9), `glyphID = 0` → `None`,
+  binary-search-many-ranges regression at 200 single-codepoint
+  ranges, mixed format-12 + format-13 fonts (the format-12 base map
+  wins), and format-13-only fonts (still pickable).
+
+Out of scope: per the cmap chapter we do not gate format-13
+decoding on the `head` table's flag bit 14 (last-resort marker);
+the spec only suggests format-13 is most often paired with that
+flag, it does not require it.
+
 ### Fixed — `kern` header sniff conflated Microsoft and Apple variants (2026-05-29)
 
 The `kern` table parser previously dispatched both Microsoft (`u16

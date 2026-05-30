@@ -2,17 +2,27 @@
 //!
 //! We pick a single subtable at parse time (preferred order: 32-bit
 //! formats first, BMP formats second, legacy single-byte last) and run
-//! all `lookup` calls through it. Round-1 supports formats 0, 4, 6, 12
-//! for the base codepoint→glyph map, plus format 14 (Unicode Variation
-//! Sequences) for codepoint+variation-selector → variant-glyph lookups.
+//! all `lookup` calls through it. Supported base formats: 0, 4, 6, 12,
+//! 13. Plus format 14 (Unicode Variation Sequences) as a sidecar that
+//! drives `lookup_variation` for codepoint+variation-selector pairs.
+//!
+//! Format 13 (many-to-one range mappings) shares its on-wire structure
+//! with format 12 but differs in semantics: every codepoint inside a
+//! group maps to the SAME `glyphID` rather than to a running sequence
+//! anchored on `startGlyphID`. Per the OpenType cmap chapter, this is
+//! the "last-resort" font layout — a single tofu glyph is reused
+//! across thousands of codepoints to indicate "this codepoint exists
+//! but the font cannot render it specifically". The `head` table's
+//! flag bit 14 marks a font as last-resort; we do not gate format-13
+//! decoding on that bit, since a non-last-resort font is also free to
+//! ship format 13.
 //!
 //! Format 14 is layered on top of the picked base subtable: it never
-//! competes with formats 0/4/6/12 for the "best base map" rank and is
-//! always stored alongside it when present. Real-world fonts that ship
-//! format 14 include Noto Color Emoji (variant emoji presentation /
-//! skin-tone modifiers), Apple Color Emoji, and most CJK fonts that
-//! expose Unicode Ideographic Variation Sequences (registered IVD
-//! collections).
+//! competes with the base-map ranking and is always stored alongside
+//! it when present. Real-world fonts that ship format 14 include Noto
+//! Color Emoji (variant emoji presentation / skin-tone modifiers),
+//! Apple Color Emoji, and most CJK fonts that expose Unicode
+//! Ideographic Variation Sequences (registered IVD collections).
 
 use crate::parser::{read_u16, read_u24, read_u32};
 use crate::Error;
@@ -32,6 +42,7 @@ enum Subtable<'a> {
     Format4(&'a [u8]),
     Format6(&'a [u8]),
     Format12(&'a [u8]),
+    Format13(&'a [u8]),
 }
 
 impl<'a> CmapTable<'a> {
@@ -114,6 +125,7 @@ impl<'a> CmapTable<'a> {
                 4 => Subtable::Format4(sub),
                 6 => Subtable::Format6(sub),
                 12 => Subtable::Format12(sub),
+                13 => Subtable::Format13(sub),
                 _ => unreachable!("filtered by is_supported_format above"),
             };
             let rank = subtable_rank(format, platform_id, encoding_id);
@@ -136,6 +148,7 @@ impl<'a> CmapTable<'a> {
             Subtable::Format4(b) => lookup_format4(b, codepoint),
             Subtable::Format6(b) => lookup_format6(b, codepoint),
             Subtable::Format12(b) => lookup_format12(b, codepoint),
+            Subtable::Format13(b) => lookup_format13(b, codepoint),
         }
     }
 
@@ -299,7 +312,7 @@ fn range_contains(bytes: &[u8], table_off: usize, codepoint: u32) -> bool {
 }
 
 fn is_supported_format(format: u16) -> bool {
-    matches!(format, 0 | 4 | 6 | 12)
+    matches!(format, 0 | 4 | 6 | 12 | 13)
 }
 
 fn subtable_length(bytes: &[u8], off: usize, format: u16) -> Result<usize, Error> {
@@ -318,11 +331,21 @@ fn subtable_rank(format: u16, platform: u16, encoding: u16) -> i32 {
     // Ranking heuristic — higher = preferred.
     //  - format 12 wins over format 4 (full Unicode > BMP).
     //  - Unicode platform (0) wins over Windows (3) wins over Mac (1).
+    //  - Format 13 is the lowest-rank base-map because its semantic is
+    //    "this codepoint is intentionally not rendered as itself" —
+    //    a real font would never want it chosen ahead of a format-4
+    //    BMP subtable that maps actual glyphs. The OpenType cmap
+    //    chapter pairs format 13 with platform (0, 6) "Unicode full
+    //    repertoire — for use with subtable format 13"; we give that
+    //    pair the standard Unicode-platform bonus so that, when a font
+    //    really does ship ONLY format 13 (a true last-resort font),
+    //    the picker still selects it.
     let format_score = match format {
         12 => 400,
         4 => 300,
         6 => 200,
         0 => 100,
+        13 => 50,
         _ => 0,
     };
     let platform_score = match (platform, encoding) {
@@ -520,19 +543,74 @@ fn lookup_format12(bytes: &[u8], codepoint: u32) -> Option<u16> {
     None
 }
 
+// --- Format 13 -------------------------------------------------------------
+
+/// Format 13 — many-to-one range mappings.
+///
+/// On-wire structure is identical to format 12 (`u32 numGroups`
+/// followed by groups of `u32 startCharCode`, `u32 endCharCode`,
+/// `u32 glyphID`). The semantic difference: every codepoint in
+/// `[startCharCode..=endCharCode]` maps to the SAME `glyphID`, not to
+/// `glyphID + (cp - startCharCode)`. The cmap chapter calls out this
+/// distinction explicitly under "Subtable format 13 has the same
+/// structure as format 12; it differs only in the interpretation of
+/// the startGlyphID/glyphID fields."
+///
+/// glyphID 0 is the `.notdef` slot and is treated the same way the
+/// other formats treat a hit on glyph 0: returned as `None`. A real
+/// last-resort font would map gaps in its coverage to glyph 0 to mean
+/// "no opinion on this codepoint" while pointing the covered ranges
+/// at a distinct tofu glyph; the `None` is the explicit "no opinion"
+/// signal.
+fn lookup_format13(bytes: &[u8], codepoint: u32) -> Option<u16> {
+    let num_groups = read_u32(bytes, 12).ok()? as usize;
+    if 16 + num_groups * 12 > bytes.len() {
+        return None;
+    }
+    // Binary search by start ≤ cp ≤ end. Identical traversal to
+    // format 12; only the per-group glyph derivation differs.
+    let mut lo = 0usize;
+    let mut hi = num_groups;
+    while lo < hi {
+        let mid = (lo + hi) / 2;
+        let off = 16 + mid * 12;
+        let start = read_u32(bytes, off).ok()?;
+        let end = read_u32(bytes, off + 4).ok()?;
+        if codepoint < start {
+            hi = mid;
+        } else if codepoint > end {
+            lo = mid + 1;
+        } else {
+            let glyph = read_u32(bytes, off + 8).ok()?;
+            if glyph == 0 || glyph > u16::MAX as u32 {
+                return None;
+            }
+            return Some(glyph as u16);
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn build_cmap_with_subtable(format: u16, sub: &[u8]) -> Vec<u8> {
-        // 1 encoding record, Windows (3,1) for format 4, Unicode (0,3)
-        // for format 12 — picked just so the rank ordering picks our sole
-        // subtable.
+        // 1 encoding record. Platform / encoding picked so the rank
+        // ordering picks our sole subtable:
+        //   format 13 → (0, 6) "Unicode full repertoire — for use with
+        //                       subtable format 13" per spec.
+        //   format 12 → (3, 10) Windows Unicode UCS-4
+        //   else      → (3, 1)  Windows Unicode BMP
         let mut out = vec![0u8; 4 + 8];
         out[0..2].copy_from_slice(&0u16.to_be_bytes()); // version
         out[2..4].copy_from_slice(&1u16.to_be_bytes()); // numTables
-        out[4..6].copy_from_slice(&3u16.to_be_bytes()); // platform
-        let enc: u16 = if format == 12 { 10 } else { 1 };
+        let (platform, enc): (u16, u16) = match format {
+            13 => (0, 6),
+            12 => (3, 10),
+            _ => (3, 1),
+        };
+        out[4..6].copy_from_slice(&platform.to_be_bytes());
         out[6..8].copy_from_slice(&enc.to_be_bytes());
         out[8..12].copy_from_slice(&12u32.to_be_bytes()); // offset to subtable
         out.extend_from_slice(sub);
@@ -1041,5 +1119,190 @@ mod tests {
         // spurious glyph from out-of-bounds bytes.
         let _ = cmap.lookup('A' as u32);
         let _ = cmap.lookup('Z' as u32);
+    }
+
+    // --- Format 13 ---------------------------------------------------------
+
+    /// Build a format-13 subtable from a slice of
+    /// `(startCharCode, endCharCode, glyphID)` ConstantMapGroup
+    /// records. Caller is responsible for keeping the records sorted
+    /// by `startCharCode` ascending (the lookup binary-searches them).
+    fn build_format13(groups: &[(u32, u32, u32)]) -> Vec<u8> {
+        let num_groups = groups.len() as u32;
+        let sub_len = 16 + num_groups as usize * 12;
+        let mut sub = vec![0u8; sub_len];
+        sub[0..2].copy_from_slice(&13u16.to_be_bytes()); // format
+                                                         // reserved at 2..4 stays zero
+        sub[4..8].copy_from_slice(&(sub_len as u32).to_be_bytes()); // length
+                                                                    // language at 8..12 stays zero
+        sub[12..16].copy_from_slice(&num_groups.to_be_bytes()); // numGroups
+        for (i, &(start, end, glyph)) in groups.iter().enumerate() {
+            let off = 16 + i * 12;
+            sub[off..off + 4].copy_from_slice(&start.to_be_bytes());
+            sub[off + 4..off + 8].copy_from_slice(&end.to_be_bytes());
+            sub[off + 8..off + 12].copy_from_slice(&glyph.to_be_bytes());
+        }
+        sub
+    }
+
+    /// Smallest format-13 case: a single range across the whole BMP
+    /// pointing at a single tofu glyph. This is the canonical
+    /// "LastResort"-style layout.
+    #[test]
+    fn format13_single_range_maps_all_to_one_glyph() {
+        let sub = build_format13(&[(0x0000, 0xFFFF, 1)]);
+        let cmap_bytes = build_cmap_with_subtable(13, &sub);
+        let cmap = CmapTable::parse(&cmap_bytes).unwrap();
+        assert_eq!(cmap.lookup(0x0041), Some(1)); // 'A'
+        assert_eq!(cmap.lookup(0x4E00), Some(1)); // CJK U+4E00
+        assert_eq!(cmap.lookup(0xFFFF), Some(1));
+        // Above the covered range: out of the only group, so misses.
+        assert_eq!(cmap.lookup(0x10000), None);
+    }
+
+    /// Multiple ranges that each point at distinct glyphs. The
+    /// many-to-one property is per-range: every codepoint inside a
+    /// given range collapses to that range's `glyphID`.
+    #[test]
+    fn format13_multi_range_each_collapses_to_its_glyph() {
+        let sub = build_format13(&[
+            // BMP Hiragana → glyph 2 (one tofu for "Japanese hiragana
+            // is here but we don't have proper coverage").
+            (0x3040, 0x309F, 2),
+            // BMP CJK Unified Ideographs → glyph 3.
+            (0x4E00, 0x9FFF, 3),
+            // Supplementary plane emoji → glyph 4.
+            (0x1F600, 0x1F64F, 4),
+        ]);
+        let cmap_bytes = build_cmap_with_subtable(13, &sub);
+        let cmap = CmapTable::parse(&cmap_bytes).unwrap();
+        // Every codepoint in each range hits the range's glyph.
+        assert_eq!(cmap.lookup(0x3040), Some(2));
+        assert_eq!(cmap.lookup(0x3060), Some(2));
+        assert_eq!(cmap.lookup(0x309F), Some(2));
+        assert_eq!(cmap.lookup(0x4E00), Some(3));
+        assert_eq!(cmap.lookup(0x5000), Some(3));
+        assert_eq!(cmap.lookup(0x9FFF), Some(3));
+        assert_eq!(cmap.lookup(0x1F600), Some(4));
+        assert_eq!(cmap.lookup(0x1F62D), Some(4));
+        assert_eq!(cmap.lookup(0x1F64F), Some(4));
+        // Codepoints between ranges miss cleanly.
+        assert_eq!(cmap.lookup(0x303F), None);
+        assert_eq!(cmap.lookup(0x30A0), None);
+        assert_eq!(cmap.lookup(0xA000), None);
+        assert_eq!(cmap.lookup(0x1F5FF), None);
+    }
+
+    /// Format 13 semantic difference from format 12: a 3-codepoint
+    /// range with `glyphID = 7` resolves to glyph 7 for ALL three
+    /// inputs, NOT to 7/8/9. This is the headline test that
+    /// distinguishes the two formats.
+    #[test]
+    fn format13_does_not_add_running_offset() {
+        // If we mis-decoded as format 12 we'd see (7, 8, 9) for the
+        // three covered codepoints. Format 13 must hand back (7, 7, 7).
+        let sub = build_format13(&[(0x0061, 0x0063, 7)]);
+        let cmap_bytes = build_cmap_with_subtable(13, &sub);
+        let cmap = CmapTable::parse(&cmap_bytes).unwrap();
+        assert_eq!(cmap.lookup(0x0061), Some(7));
+        assert_eq!(cmap.lookup(0x0062), Some(7));
+        assert_eq!(cmap.lookup(0x0063), Some(7));
+        // Boundary off-by-one: cp = end + 1 must miss.
+        assert_eq!(cmap.lookup(0x0064), None);
+    }
+
+    /// A group whose `glyphID = 0` is a "no opinion" marker. We
+    /// surface it the same way the other formats do: as `None`. A
+    /// real last-resort font wouldn't use glyph 0 as the tofu (it
+    /// would pick a visible one); the 0 hit means "explicitly absent".
+    #[test]
+    fn format13_glyph_zero_returns_none() {
+        let sub = build_format13(&[(0x0030, 0x0039, 0)]);
+        let cmap_bytes = build_cmap_with_subtable(13, &sub);
+        let cmap = CmapTable::parse(&cmap_bytes).unwrap();
+        for cp in 0x0030..=0x0039 {
+            assert_eq!(cmap.lookup(cp), None, "cp {cp:#04x} should miss");
+        }
+    }
+
+    /// Binary-search regression: many single-codepoint ranges all
+    /// pointing at the same glyph. The binary search must find every
+    /// covered codepoint and reject every gap.
+    #[test]
+    fn format13_binary_search_resolves_many_ranges() {
+        let mut groups: Vec<(u32, u32, u32)> = Vec::with_capacity(200);
+        for i in 0..200u32 {
+            let cp = 0x10000 + i * 2; // every other supplementary cp
+            groups.push((cp, cp, 5));
+        }
+        let sub = build_format13(&groups);
+        let cmap_bytes = build_cmap_with_subtable(13, &sub);
+        let cmap = CmapTable::parse(&cmap_bytes).unwrap();
+        for i in 0..200u32 {
+            let cp = 0x10000 + i * 2;
+            assert_eq!(cmap.lookup(cp), Some(5), "cp {cp:#06x}");
+            // The gap cp+1 is between two covered single-cp ranges.
+            if i + 1 < 200 {
+                assert_eq!(cmap.lookup(cp + 1), None, "gap after {cp:#06x}");
+            }
+        }
+        // Below the first range.
+        assert_eq!(cmap.lookup(0x0FFFF), None);
+    }
+
+    /// When a font ships both format 12 and format 13, the picker
+    /// must keep the format-12 (sequential, real glyphs) subtable as
+    /// the active base map. Format 13 is intentionally ranked below
+    /// format 0 so it never displaces a real-coverage subtable.
+    #[test]
+    fn format13_does_not_displace_format12() {
+        // -- format-12 subtable: U+0041 ('A') → glyph 100, distinct.
+        let sub12_len = 16 + 12;
+        let mut sub12 = vec![0u8; sub12_len];
+        sub12[0..2].copy_from_slice(&12u16.to_be_bytes());
+        sub12[4..8].copy_from_slice(&(sub12_len as u32).to_be_bytes());
+        sub12[12..16].copy_from_slice(&1u32.to_be_bytes());
+        sub12[16..20].copy_from_slice(&0x0041u32.to_be_bytes());
+        sub12[20..24].copy_from_slice(&0x0041u32.to_be_bytes());
+        sub12[24..28].copy_from_slice(&100u32.to_be_bytes());
+
+        // -- format-13 subtable: U+0041 → glyph 1 (tofu).
+        let sub13 = build_format13(&[(0x0041, 0x0041, 1)]);
+
+        // Hand-roll the cmap header: 2 encoding records.
+        let header_len = 4 + 2 * 8;
+        let sub12_off = header_len;
+        let sub13_off = sub12_off + sub12.len();
+        let mut out = vec![0u8; header_len];
+        out[0..2].copy_from_slice(&0u16.to_be_bytes());
+        out[2..4].copy_from_slice(&2u16.to_be_bytes());
+        // record 0: (3, 10) format-12 — rank 425.
+        out[4..6].copy_from_slice(&3u16.to_be_bytes());
+        out[6..8].copy_from_slice(&10u16.to_be_bytes());
+        out[8..12].copy_from_slice(&(sub12_off as u32).to_be_bytes());
+        // record 1: (0, 6) format-13 — rank 80 (= 50 + 30).
+        out[12..14].copy_from_slice(&0u16.to_be_bytes());
+        out[14..16].copy_from_slice(&6u16.to_be_bytes());
+        out[16..20].copy_from_slice(&(sub13_off as u32).to_be_bytes());
+        out.extend_from_slice(&sub12);
+        out.extend_from_slice(&sub13);
+
+        let cmap = CmapTable::parse(&out).unwrap();
+        // Must resolve through format 12, NOT format 13.
+        assert_eq!(cmap.lookup(0x0041), Some(100));
+    }
+
+    /// Sanity: a font that only ships a format-13 subtable still picks
+    /// it. (This is the "true last-resort font" scenario.) The rank
+    /// score for (format 13, platform 0, encoding 6) is 50 + 30 = 80,
+    /// which beats the i32::MIN initial sentinel; the picker selects it.
+    #[test]
+    fn format13_only_is_pickable_as_last_resort() {
+        let sub = build_format13(&[(0x0000, 0x10FFFF, 1)]);
+        let cmap_bytes = build_cmap_with_subtable(13, &sub);
+        let cmap = CmapTable::parse(&cmap_bytes).unwrap();
+        assert_eq!(cmap.lookup(0x0041), Some(1));
+        assert_eq!(cmap.lookup(0x1F600), Some(1));
+        assert_eq!(cmap.lookup(0x10FFFF), Some(1));
     }
 }
