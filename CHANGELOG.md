@@ -7,6 +7,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — `MVAR` metrics-variations table (2026-05-31)
+
+OpenType Font Variations `MVAR` table (ISO/IEC 14496-22:2019 §7.3.6),
+plus the shared `ItemVariationStore` substructure (§7.2.3) it embeds.
+MVAR carries per-instance adjustments for font-wide metric fields in
+`OS/2` (sxHeight, sCapHeight, sTypoAscender, …), `hhea` / `vhea`
+(caret slope, line gap), `post` (underline thickness / position), and
+`gasp` (rangeMaxPPEM) keyed by the §7.3.6.3 four-byte tag registry.
+
+- `MvarTable::parse` decodes the header (majorVersion=1, valueRecordSize,
+  valueRecordCount, itemVariationStoreOffset) and the value-record array,
+  using `valueRecordSize` as the per-record stride so the future-version
+  minor-bump path the spec mentions in §7.3.6.1 parses cleanly with
+  unknown trailing bytes ignored.
+- `ItemVariationStore::parse` decodes format 1 stores: VariationRegionList
+  with `(start, peak, end)` triples per axis per region, plus the array
+  of `ItemVariationData` subtables (itemCount × regionIndexCount delta
+  matrix where the leading shortDeltaCount columns are int16 and the
+  rest int8).
+- `Font::metric_variation_delta(tag)` returns the interpolated
+  adjustment at the current variation coordinates (the existing
+  `set_variation_coords` + `normalised_coords` path), with `avar`
+  bending applied for axes that publish a non-identity axis-value map
+  (Inter's wght=700 → +0.6 → +0.54 covered by an integration test).
+- Region-scalar computation follows §7.1 / §7.2.3.1: peak=0 axes are
+  ignored (multiplier 1), coords outside `[start, end]` zero the
+  scalar, and the rising and falling edges interpolate linearly between
+  start, peak, and end.
+- `Font::mvar_table()` and `MvarTable::value_records()` /
+  `item_variation_store()` accessors expose the raw payload for tests
+  / debugging.
+- Eleven unit tests on `tables::mvar` cover the minimal happy path,
+  delta interpolation along a single axis, the zero-record fast-path
+  with a missing IVS, valueRecordSize<8 rejection, larger-stride
+  forward-compatibility, the region-scalar function in isolation
+  (axis-ignored / opposite-sign / falling-edge cases), and rejection of
+  IVS format ≠ 1 and out-of-range region indices in an IVD.
+- Eight integration tests against `tests/fixtures/InterVariable.ttf`
+  exercise the table end-to-end: value-record set, IVS shape, zero
+  delta at axis defaults, the four corner-of-design-space deltas
+  (max-wght / max-opsz / min-wght / max-wght+max-opsz), the interior
+  point at wght=700 (which honours Inter's avar wght-axis bend), and
+  the `None` return for tags absent from the font's MVAR.
+
+Out of scope this round (per ## Roadmap): `HVAR` / `VVAR` per-glyph
+metric variations (the IVS plumbing lands here; the index-map decoder
++ per-glyph resolution path remain), `STAT` style attributes,
+`COLR v1` paint graph, `avar v2` delta-set index map, gvar delta
+propagation into composite-glyph component offsets and phantom points.
+
 ### Added — `cmap` format 2 (high-byte mapping through table) (2026-05-30)
 
 OpenType cmap subtable format 2 decoder. Format 2 is the legacy

@@ -54,8 +54,8 @@ use crate::tables::{
     avar::AvarTable, cbdt::CbdtTable, cblc::CblcTable, cmap::CmapTable, colr::ColrTable,
     cpal::CpalTable, fvar::FvarTable, gdef::GdefTable, glyf::GlyfTable, gpos::GposTable,
     gsub::GsubTable, gvar::GvarTable, head::HeadTable, hhea::HheaTable, hmtx::HmtxTable,
-    kern::KernTable, loca::LocaTable, maxp::MaxpTable, name::NameTable, os2::Os2Table,
-    post::PostTable, sbix::SbixTable,
+    kern::KernTable, loca::LocaTable, maxp::MaxpTable, mvar::MvarTable, name::NameTable,
+    os2::Os2Table, post::PostTable, sbix::SbixTable,
 };
 
 pub use outline::{BBox, Contour, Point, TtOutline};
@@ -66,6 +66,7 @@ pub use tables::fvar::{NamedInstance, VariationAxis};
 pub use tables::gpos::{CursiveAttachment, PosRecord, PosValue};
 pub use tables::gsub::GsubFeature;
 pub use tables::kern::HeaderVariant as KernHeaderVariant;
+pub use tables::mvar::ItemVariationStore;
 pub use tables::name::{name_id, platform, NameRecord};
 pub use tables::sbix::{SbixGlyph, MAX_DUPE_DEPTH as SBIX_MAX_DUPE_DEPTH};
 
@@ -162,6 +163,11 @@ pub struct Font<'a> {
     /// is present and the outline kind is TrueType; not populated for
     /// CFF2 (which uses `cvar` instead — out of scope here).
     gvar: Option<GvarTable<'a>>,
+    /// Font-wide metrics-variation table (`MVAR`). Present in many
+    /// variable fonts; carries per-instance adjustments for `OS/2`,
+    /// `hhea`, `vhea`, `post`, `gasp` metric fields keyed by the
+    /// §7.3.6.3 value-tag registry.
+    mvar: Option<MvarTable>,
     /// Current user-space coordinate vector, one per axis (defaults
     /// to each axis's `default` value when `fvar` is present, empty
     /// vec otherwise). `set_variation_coords` updates this; the
@@ -266,6 +272,7 @@ impl<'a> Font<'a> {
         let fvar = dir.find(b"fvar", bytes).map(FvarTable::parse).transpose()?;
         let avar = dir.find(b"avar", bytes).map(AvarTable::parse).transpose()?;
         let gvar = dir.find(b"gvar", bytes).map(GvarTable::parse).transpose()?;
+        let mvar = dir.find(b"MVAR", bytes).map(MvarTable::parse).transpose()?;
         let var_coords = match fvar.as_ref() {
             Some(f) => f.axes().iter().map(|a| a.default).collect(),
             None => Vec::new(),
@@ -295,6 +302,7 @@ impl<'a> Font<'a> {
             fvar,
             avar,
             gvar,
+            mvar,
             var_coords,
         })
     }
@@ -1270,6 +1278,36 @@ impl<'a> Font<'a> {
             out.push(n);
         }
         out
+    }
+
+    /// Borrow the parsed `MVAR` table, when present. Static fonts and
+    /// variable fonts that omit MVAR return `None`.
+    pub fn mvar_table(&self) -> Option<&MvarTable> {
+        self.mvar.as_ref()
+    }
+
+    /// Interpolated `MVAR` adjustment for a four-byte metric tag (e.g.
+    /// `*b"xhgt"`, `*b"cpht"`, `*b"hasc"`) at the current variation
+    /// coordinates.
+    ///
+    /// Per ISO/IEC 14496-22:2019 §7.3.6.2, the adjustment is computed
+    /// against the current **normalised** coordinate vector (i.e.
+    /// after the `avar` remap, see [`Self::normalised_coords`]). The
+    /// returned value is a delta to be **added** to the corresponding
+    /// field in `OS/2` / `hhea` / `vhea` / `post` / `gasp`.
+    ///
+    /// Returns `None` when:
+    /// * the font lacks an `MVAR` table, or
+    /// * the requested `tag` is not present in MVAR's value-record
+    ///   array (the spec's "if the tag does not occur, the item is
+    ///   constant across the variation space" rule).
+    ///
+    /// Returns `Some(0.0)` when the variation evaluates to zero at the
+    /// current instance (e.g. at the axis defaults).
+    pub fn metric_variation_delta(&self, tag: &[u8; 4]) -> Option<f32> {
+        let m = self.mvar.as_ref()?;
+        let coords = self.normalised_coords();
+        m.delta_for_tag(tag, &coords)
     }
 
     /// `true` if any current coordinate diverges from its axis default.

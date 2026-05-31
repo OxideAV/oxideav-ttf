@@ -70,6 +70,18 @@ ligatures and kerning.
   sequence. The AGL Specification's algorithmic fallback (suffix
   stripping, `uniXXXX` synthetic names) is intentionally out of scope —
   only the staged `glyphlist.txt` data drives it.
+- `MVAR` (font-wide Metrics Variations, ISO/IEC 14496-22:2019 §7.3.6)
+  with the shared `ItemVariationStore` substructure (§7.2.3) decoded
+  inline: `Font::metric_variation_delta(tag)` returns the interpolated
+  signed adjustment for any §7.3.6.3 metric tag ('xhgt', 'cpht', 'stro',
+  'unds', 'hasc', 'hdsc', 'gsp0'…'gsp9', …) at the current variation
+  coordinates. Region scalars are computed per §7.1 (peak-0 axes
+  ignored, opposite-sign coords zero, linear interpolation on rising /
+  falling edges), `avar` is honoured so wght=700 with a non-identity
+  axis-value map produces the bent normalised value the spec mandates,
+  and the `valueRecordSize` field is treated as the record stride so
+  minor-version bumps that grow ValueRecord (per the §7.3.6.1 note)
+  decode correctly with the unknown trailing bytes ignored.
 
 The companion [`oxideav-scribe`](https://github.com/OxideAV/oxideav-scribe)
 crate consumes the outlines + shaping output to rasterise text to RGBA
@@ -377,6 +389,11 @@ if vfont.is_variable() {
   / per-table metric variations).
 - gvar delta propagation into composite-glyph component offsets and
   the four phantom points.
+- `HVAR` / `VVAR` (per-glyph advance-width / advance-height variation
+  with a delta-set index map sitting between glyph IDs and the IVS) —
+  the IVS substructure shared with MVAR landed in the round that
+  added MVAR; HVAR/VVAR still need the index-map decoder + per-glyph
+  resolution path. STAT (style attributes) also pending.
 
 ## Test fixtures
 
