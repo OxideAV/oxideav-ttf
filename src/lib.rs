@@ -54,8 +54,8 @@ use crate::tables::{
     avar::AvarTable, cbdt::CbdtTable, cblc::CblcTable, cmap::CmapTable, colr::ColrTable,
     cpal::CpalTable, fvar::FvarTable, gdef::GdefTable, glyf::GlyfTable, gpos::GposTable,
     gsub::GsubTable, gvar::GvarTable, head::HeadTable, hhea::HheaTable, hmtx::HmtxTable,
-    kern::KernTable, loca::LocaTable, maxp::MaxpTable, mvar::MvarTable, name::NameTable,
-    os2::Os2Table, post::PostTable, sbix::SbixTable,
+    hvar::HvarTable, kern::KernTable, loca::LocaTable, maxp::MaxpTable, mvar::MvarTable,
+    name::NameTable, os2::Os2Table, post::PostTable, sbix::SbixTable,
 };
 
 pub use outline::{BBox, Contour, Point, TtOutline};
@@ -65,6 +65,7 @@ pub use tables::colr::ColorLayer;
 pub use tables::fvar::{NamedInstance, VariationAxis};
 pub use tables::gpos::{CursiveAttachment, PosRecord, PosValue};
 pub use tables::gsub::GsubFeature;
+pub use tables::hvar::DeltaSetIndexMap;
 pub use tables::kern::HeaderVariant as KernHeaderVariant;
 pub use tables::mvar::ItemVariationStore;
 pub use tables::name::{name_id, platform, NameRecord};
@@ -168,6 +169,12 @@ pub struct Font<'a> {
     /// `hhea`, `vhea`, `post`, `gasp` metric fields keyed by the
     /// §7.3.6.3 value-tag registry.
     mvar: Option<MvarTable>,
+    /// Per-glyph horizontal-metrics variation table (`HVAR`,
+    /// ISO/IEC 14496-22:2019 §7.3.5). Variable fonts with TrueType
+    /// outlines are encouraged to ship one; CFF2 variable fonts are
+    /// required to. Provides interpolated adjustments for `hmtx`
+    /// advance widths plus optional left- and right-side bearings.
+    hvar: Option<HvarTable>,
     /// Current user-space coordinate vector, one per axis (defaults
     /// to each axis's `default` value when `fvar` is present, empty
     /// vec otherwise). `set_variation_coords` updates this; the
@@ -273,6 +280,7 @@ impl<'a> Font<'a> {
         let avar = dir.find(b"avar", bytes).map(AvarTable::parse).transpose()?;
         let gvar = dir.find(b"gvar", bytes).map(GvarTable::parse).transpose()?;
         let mvar = dir.find(b"MVAR", bytes).map(MvarTable::parse).transpose()?;
+        let hvar = dir.find(b"HVAR", bytes).map(HvarTable::parse).transpose()?;
         let var_coords = match fvar.as_ref() {
             Some(f) => f.axes().iter().map(|a| a.default).collect(),
             None => Vec::new(),
@@ -303,6 +311,7 @@ impl<'a> Font<'a> {
             avar,
             gvar,
             mvar,
+            hvar,
             var_coords,
         })
     }
@@ -1308,6 +1317,50 @@ impl<'a> Font<'a> {
         let m = self.mvar.as_ref()?;
         let coords = self.normalised_coords();
         m.delta_for_tag(tag, &coords)
+    }
+
+    /// Borrow the parsed `HVAR` table, when present.
+    pub fn hvar_table(&self) -> Option<&HvarTable> {
+        self.hvar.as_ref()
+    }
+
+    /// Interpolated `HVAR` adjustment to the advance width of
+    /// `glyph_id` at the current variation coordinates.
+    ///
+    /// Per ISO/IEC 14496-22:2019 §7.3.5.3, the application reads the
+    /// default advance width from `hmtx` and adds this delta to derive
+    /// the per-instance advance. When an `advanceWidthMapping` table
+    /// is published, that map provides the `(outer, inner)` index
+    /// pair; otherwise the glyph ID itself acts as the inner index
+    /// and the outer index is zero (the implicit form).
+    ///
+    /// Returns `None` when the font lacks `HVAR` or when the resolved
+    /// index pair is out of range for the embedded item variation
+    /// store. Returns `Some(0.0)` when the variation evaluates to
+    /// zero at the current instance (e.g. at the axis defaults).
+    pub fn advance_width_variation_delta(&self, glyph_id: u16) -> Option<f32> {
+        let h = self.hvar.as_ref()?;
+        let coords = self.normalised_coords();
+        h.advance_width_delta(glyph_id, &coords)
+    }
+
+    /// Interpolated `HVAR` adjustment to the left side bearing of
+    /// `glyph_id`. Requires that the font ship a left-side-bearing
+    /// mapping table (§7.3.5.2 says LSB / RSB lookups always need
+    /// one); returns `None` otherwise.
+    pub fn lsb_variation_delta(&self, glyph_id: u16) -> Option<f32> {
+        let h = self.hvar.as_ref()?;
+        let coords = self.normalised_coords();
+        h.lsb_delta(glyph_id, &coords)
+    }
+
+    /// Interpolated `HVAR` adjustment to the right side bearing of
+    /// `glyph_id`. Requires a right-side-bearing mapping table per
+    /// §7.3.5.2; returns `None` otherwise.
+    pub fn rsb_variation_delta(&self, glyph_id: u16) -> Option<f32> {
+        let h = self.hvar.as_ref()?;
+        let coords = self.normalised_coords();
+        h.rsb_delta(glyph_id, &coords)
     }
 
     /// `true` if any current coordinate diverges from its axis default.

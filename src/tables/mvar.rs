@@ -241,7 +241,10 @@ impl MvarTable {
 }
 
 impl ItemVariationStore {
-    fn parse(bytes: &[u8]) -> Result<Self, Error> {
+    /// Parse an `ItemVariationStore` (§7.2.3) starting at the given
+    /// byte slice. Exposed at crate scope so sibling tables that
+    /// embed an IVS (notably `HVAR` / `VVAR`) can share the decoder.
+    pub(crate) fn parse(bytes: &[u8]) -> Result<Self, Error> {
         if bytes.len() < 8 {
             return Err(Error::UnexpectedEof);
         }

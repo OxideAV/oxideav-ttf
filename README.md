@@ -82,6 +82,18 @@ ligatures and kerning.
   and the `valueRecordSize` field is treated as the record stride so
   minor-version bumps that grow ValueRecord (per the §7.3.6.1 note)
   decode correctly with the unknown trailing bytes ignored.
+- `HVAR` (per-glyph horizontal-metrics variations, ISO/IEC 14496-22:2019
+  §7.3.5) with the same `ItemVariationStore` substructure shared with
+  MVAR: `Font::advance_width_variation_delta(gid)` returns the
+  interpolated advance-width adjustment for `glyph_id` at the current
+  variation coordinates, and `Font::lsb_variation_delta(gid)` /
+  `Font::rsb_variation_delta(gid)` cover the optional side-bearing
+  mappings. The optional `DeltaSetIndexMap` sub-table (§7.3.5.2) is
+  decoded for all four supported entry sizes (1 / 2 / 3 / 4 bytes per
+  entry, 1..16 inner-index bits) with the §7.3.5.2 "glyph IDs beyond
+  mapCount-1 use the last entry" clamp; when `advanceWidthMappingOffset`
+  is zero, the §7.3.5.3 implicit form (outer = 0, inner = glyph ID) is
+  used instead.
 
 The companion [`oxideav-scribe`](https://github.com/OxideAV/oxideav-scribe)
 crate consumes the outlines + shaping output to rasterise text to RGBA
@@ -385,15 +397,12 @@ if vfont.is_variable() {
 - COLR **v1** paint graph (gradients, transforms, composites) — only
   the v0 flat layer stack is supported.
 - avar **v2** delta-set index map (variable-axis remap).
-- HVAR / VVAR / MVAR (per-glyph horizontal-metrics / vertical-metrics
-  / per-table metric variations).
 - gvar delta propagation into composite-glyph component offsets and
   the four phantom points.
-- `HVAR` / `VVAR` (per-glyph advance-width / advance-height variation
-  with a delta-set index map sitting between glyph IDs and the IVS) —
-  the IVS substructure shared with MVAR landed in the round that
-  added MVAR; HVAR/VVAR still need the index-map decoder + per-glyph
-  resolution path. STAT (style attributes) also pending.
+- `VVAR` (per-glyph advance-height / TSB / BSB variations) — the
+  same `ItemVariationStore` + `DeltaSetIndexMap` substructures that
+  HVAR landed against are reusable, so this is bounded follow-up
+  work. STAT (style attributes) also pending.
 
 ## Test fixtures
 

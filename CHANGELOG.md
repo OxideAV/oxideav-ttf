@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — `HVAR` per-glyph horizontal-metrics variations (2026-06-01)
+
+OpenType Font Variations `HVAR` table (ISO/IEC 14496-22:2019 §7.3.5),
+reusing the `ItemVariationStore` (§7.2.3) decoder shared with MVAR.
+HVAR carries per-glyph adjustments to the advance widths in `hmtx`,
+plus optional adjustments to the left and right side bearings (the
+latter two need explicit `DeltaSetIndexMap` mappings per §7.3.5.2).
+
+- `HvarTable::parse` decodes the v1 header (majorVersion, four 32-bit
+  offsets to the IVS, advance-width map, LSB map, RSB map). A zero
+  offset in the three optional map slots is normal and means "no
+  mapping for that quantity" (with the §7.3.5.3 implicit
+  outer=0/inner=gid fallback applying only to advance widths).
+- `DeltaSetIndexMap::parse` decodes the §7.3.5.2 packed-entry array
+  for all four supported `entryFormat` widths (1 / 2 / 3 / 4 bytes
+  per entry, 1..16 inner-index bits) and rejects any reserved-bit
+  setting in `entryFormat` as a `BadStructure`.
+- `Font::advance_width_variation_delta(gid)` /
+  `Font::lsb_variation_delta(gid)` /
+  `Font::rsb_variation_delta(gid)` return the interpolated adjustment
+  at the current variation coordinates, with the §7.3.5.2 "glyph IDs
+  beyond mapCount-1 use the last entry" clamp applied.
+- Integration coverage against `InterVariable.ttf`: the bit-exact
+  parsed advance-width map (2926 entries, entryFormat 0x0018) routes
+  glyph 100 to IVD[1] row 274 with reference deltas +24 at wght=900
+  and -35 at wght=100, and glyphs 2 / 3 / 4 to IVD[3] row 45 with
+  reference deltas +215 / -103. LSB / RSB queries return `None` for
+  Inter since it ships no side-bearing maps.
+
 ### Added — `MVAR` metrics-variations table (2026-05-31)
 
 OpenType Font Variations `MVAR` table (ISO/IEC 14496-22:2019 §7.3.6),
