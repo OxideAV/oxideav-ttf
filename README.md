@@ -94,6 +94,18 @@ ligatures and kerning.
   mapCount-1 use the last entry" clamp; when `advanceWidthMappingOffset`
   is zero, the §7.3.5.3 implicit form (outer = 0, inner = glyph ID) is
   used instead.
+- `VVAR` (per-glyph vertical-metrics variations, ISO/IEC 14496-22:2019
+  §7.3.8) reusing the same `ItemVariationStore` + `DeltaSetIndexMap`
+  substructures as HVAR. `Font::advance_height_variation_delta(gid)`
+  returns the interpolated advance-height adjustment for `glyph_id`;
+  `Font::tsb_variation_delta(gid)` and `Font::bsb_variation_delta(gid)`
+  cover the optional top- and bottom-side-bearing mappings; and
+  `Font::vorg_variation_delta(gid)` covers the CFF2-only vertical-
+  origin Y mapping (§7.3.8.2 final paragraph: "Mappings and variation
+  data for vertical origins are not used in fonts with TrueType
+  outlines"). The implicit "outer=0, inner=gid" form applies to
+  advance heights when `advanceHeightMappingOffset` is zero, matching
+  the §7.3.8.2 cross-reference back to §7.3.5.3.
 
 The companion [`oxideav-scribe`](https://github.com/OxideAV/oxideav-scribe)
 crate consumes the outlines + shaping output to rasterise text to RGBA
@@ -399,10 +411,9 @@ if vfont.is_variable() {
 - avar **v2** delta-set index map (variable-axis remap).
 - gvar delta propagation into composite-glyph component offsets and
   the four phantom points.
-- `VVAR` (per-glyph advance-height / TSB / BSB variations) — the
-  same `ItemVariationStore` + `DeltaSetIndexMap` substructures that
-  HVAR landed against are reusable, so this is bounded follow-up
-  work. STAT (style attributes) also pending.
+- STAT (style attributes) is still pending — the IVS plumbing landed
+  with MVAR, but STAT's design-axis records and axis-value tables
+  remain to decode.
 
 ## Test fixtures
 

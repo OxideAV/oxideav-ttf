@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — `VVAR` per-glyph vertical-metrics variations (2026-06-02)
+
+OpenType Font Variations `VVAR` table (ISO/IEC 14496-22:2019 §7.3.8),
+reusing the `ItemVariationStore` (§7.2.3) decoder shared with MVAR and
+the `DeltaSetIndexMap` (§7.3.5.2) decoder shared with HVAR. VVAR
+carries per-glyph adjustments to the advance heights in `vmtx`, plus
+optional adjustments to the top and bottom side bearings, plus — for
+CFF2 variable fonts that publish a `VORG` table — vertical-origin Y
+deltas (§7.3.8.2 final paragraph: "Mappings and variation data for
+vertical origins are not used in fonts with TrueType outlines").
+
+- `VvarTable::parse` decodes the v1 header (majorVersion, five 32-bit
+  offsets to the IVS, advance-height map, TSB map, BSB map, and vOrg
+  map). A zero offset in the four optional map slots is normal and
+  means "no mapping for that quantity" (with the §7.3.8.2 → §7.3.5.3
+  implicit outer=0/inner=gid fallback applying only to advance
+  heights).
+- The HVAR `DeltaSetIndexMap` decoder is reused verbatim per the
+  §7.3.8.2 "See the horizontal metrics variations ('HVAR') table
+  description for remaining details" cross-reference, so all four
+  supported `entryFormat` widths (1 / 2 / 3 / 4 bytes per entry,
+  1..16 inner-index bits) and the §7.3.5.2 "glyph IDs beyond
+  mapCount-1 use the last entry" clamp apply to VVAR too.
+- `Font::advance_height_variation_delta(gid)` /
+  `Font::tsb_variation_delta(gid)` / `Font::bsb_variation_delta(gid)` /
+  `Font::vorg_variation_delta(gid)` return the interpolated adjustment
+  at the current variation coordinates, with the §7.3.5.2 clamp
+  applied. The CFF2-only `vorg_variation_delta` is gated on the font
+  actually publishing a vOrg mapping table.
+- `Font::vvar_table()` exposes the parsed `VvarTable` for callers that
+  want direct access (e.g. for inspecting the embedded IVS shape).
+- Twelve unit tests on `tables::vvar` cover header parsing without
+  mappings, implicit advance-height routing, advance-map clamping for
+  out-of-range glyph IDs, the optional vOrg mapping (parse + query
+  path), and rejection of `majorVersion != 1`, null IVS offset,
+  truncated header, out-of-range IVS offset, and out-of-range mapping
+  offsets. Two integration tests against `InterVariable.ttf` (which
+  ships no VVAR — Inter is horizontal-only) confirm the absent-table
+  fallback path: every `*_variation_delta` accessor on `Font` returns
+  `None` and `Font::vvar_table()` returns `None`.
+
 ### Added — `HVAR` per-glyph horizontal-metrics variations (2026-06-01)
 
 OpenType Font Variations `HVAR` table (ISO/IEC 14496-22:2019 §7.3.5),

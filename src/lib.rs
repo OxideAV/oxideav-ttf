@@ -55,7 +55,7 @@ use crate::tables::{
     cpal::CpalTable, fvar::FvarTable, gdef::GdefTable, glyf::GlyfTable, gpos::GposTable,
     gsub::GsubTable, gvar::GvarTable, head::HeadTable, hhea::HheaTable, hmtx::HmtxTable,
     hvar::HvarTable, kern::KernTable, loca::LocaTable, maxp::MaxpTable, mvar::MvarTable,
-    name::NameTable, os2::Os2Table, post::PostTable, sbix::SbixTable,
+    name::NameTable, os2::Os2Table, post::PostTable, sbix::SbixTable, vvar::VvarTable,
 };
 
 pub use outline::{BBox, Contour, Point, TtOutline};
@@ -175,6 +175,15 @@ pub struct Font<'a> {
     /// required to. Provides interpolated adjustments for `hmtx`
     /// advance widths plus optional left- and right-side bearings.
     hvar: Option<HvarTable>,
+    /// Per-glyph vertical-metrics variation table (`VVAR`,
+    /// ISO/IEC 14496-22:2019 §7.3.8). Optional in TrueType variable
+    /// fonts (where `gvar` phantom points carry the same data); for
+    /// CFF2 variable fonts that support vertical layout it is required
+    /// (§7.3.8.1). Provides interpolated adjustments for `vmtx`
+    /// advance heights plus optional top-/bottom-side bearings and —
+    /// for CFF2 fonts that publish a `VORG` table — vertical-origin
+    /// Y coordinates.
+    vvar: Option<VvarTable>,
     /// Current user-space coordinate vector, one per axis (defaults
     /// to each axis's `default` value when `fvar` is present, empty
     /// vec otherwise). `set_variation_coords` updates this; the
@@ -281,6 +290,7 @@ impl<'a> Font<'a> {
         let gvar = dir.find(b"gvar", bytes).map(GvarTable::parse).transpose()?;
         let mvar = dir.find(b"MVAR", bytes).map(MvarTable::parse).transpose()?;
         let hvar = dir.find(b"HVAR", bytes).map(HvarTable::parse).transpose()?;
+        let vvar = dir.find(b"VVAR", bytes).map(VvarTable::parse).transpose()?;
         let var_coords = match fvar.as_ref() {
             Some(f) => f.axes().iter().map(|a| a.default).collect(),
             None => Vec::new(),
@@ -312,6 +322,7 @@ impl<'a> Font<'a> {
             gvar,
             mvar,
             hvar,
+            vvar,
             var_coords,
         })
     }
@@ -1361,6 +1372,63 @@ impl<'a> Font<'a> {
         let h = self.hvar.as_ref()?;
         let coords = self.normalised_coords();
         h.rsb_delta(glyph_id, &coords)
+    }
+
+    /// Borrow the parsed `VVAR` table, when present.
+    pub fn vvar_table(&self) -> Option<&VvarTable> {
+        self.vvar.as_ref()
+    }
+
+    /// Interpolated `VVAR` adjustment to the advance height of
+    /// `glyph_id` at the current variation coordinates.
+    ///
+    /// Per ISO/IEC 14496-22:2019 §7.3.8.2 (cross-referenced back to
+    /// §7.3.5.3), the application reads the default advance height
+    /// from `vmtx` and adds this delta to derive the per-instance
+    /// advance. When an `advanceHeightMapping` table is published,
+    /// that map provides the `(outer, inner)` index pair; otherwise
+    /// the glyph ID itself acts as the inner index and the outer index
+    /// is zero (the implicit form).
+    ///
+    /// Returns `None` when the font lacks `VVAR` or when the resolved
+    /// index pair is out of range for the embedded item variation
+    /// store. Returns `Some(0.0)` when the variation evaluates to zero
+    /// at the current instance (e.g. at the axis defaults).
+    pub fn advance_height_variation_delta(&self, glyph_id: u16) -> Option<f32> {
+        let v = self.vvar.as_ref()?;
+        let coords = self.normalised_coords();
+        v.advance_height_delta(glyph_id, &coords)
+    }
+
+    /// Interpolated `VVAR` adjustment to the top side bearing of
+    /// `glyph_id`. Requires that the font ship a top-side-bearing
+    /// mapping table (§7.3.8.2 inherits the §7.3.5.2 rule that side-
+    /// bearing lookups always need a map); returns `None` otherwise.
+    pub fn tsb_variation_delta(&self, glyph_id: u16) -> Option<f32> {
+        let v = self.vvar.as_ref()?;
+        let coords = self.normalised_coords();
+        v.tsb_delta(glyph_id, &coords)
+    }
+
+    /// Interpolated `VVAR` adjustment to the bottom side bearing of
+    /// `glyph_id`. Requires a bottom-side-bearing mapping table per
+    /// §7.3.8.2; returns `None` otherwise.
+    pub fn bsb_variation_delta(&self, glyph_id: u16) -> Option<f32> {
+        let v = self.vvar.as_ref()?;
+        let coords = self.normalised_coords();
+        v.bsb_delta(glyph_id, &coords)
+    }
+
+    /// Interpolated `VVAR` adjustment to the vertical-origin Y of
+    /// `glyph_id`. §7.3.8.2 final paragraph: a mapping table is
+    /// required for vertical-origin variation data, and the data is
+    /// "not used in fonts with TrueType outlines" — populated only by
+    /// CFF2 variable fonts that publish a `VORG` table. Returns
+    /// `None` otherwise.
+    pub fn vorg_variation_delta(&self, glyph_id: u16) -> Option<f32> {
+        let v = self.vvar.as_ref()?;
+        let coords = self.normalised_coords();
+        v.vorg_delta(glyph_id, &coords)
     }
 
     /// `true` if any current coordinate diverges from its axis default.
