@@ -7,6 +7,73 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — `STAT` style attributes table (2026-06-03)
+
+Decoded the `STAT` table per ISO/IEC 14496-22:2019 §7.3.7. Three
+top-level pieces:
+
+- **Header** — v1.0 / v1.1 / v1.2 all parsed. v1.0 is the deprecated
+  18-byte form (no `elidedFallbackNameID`); we default the missing
+  field to name ID 2 ("Regular") so callers don't need a version
+  check. v1.1 (20-byte header) and v1.2 (same layout, format-4
+  axis-value tables permitted) carry the field verbatim. The
+  `designAxisSize` field is honoured as the per-record stride so a
+  future minor-version bump that grows `AxisRecord` (preserving the
+  first 8 bytes per §7.3.7.1) decodes correctly with the trailing
+  bytes ignored.
+- **AxisRecord array** — every `axisTag` / `axisNameID` /
+  `axisOrdering` triple from the §7.3.7.2 design-axes array, exposed
+  in document order. Variable fonts must list every `fvar` axis
+  here using the matching name ID; the order is not required to
+  match `fvar`'s, so callers walk by tag rather than index.
+- **Axis value tables** — all four §7.3.7.3 formats decoded into a
+  tagged `AxisValue` enum:
+    - Format 1: `(axisIndex, flags, valueNameID, value)`.
+    - Format 2: format 1 plus `(nominalValue, rangeMinValue,
+      rangeMaxValue)`. The `0x80000000` / `0x7FFFFFFF` ±∞ sentinels
+      are preserved verbatim alongside the f32-decoded values and
+      surfaced as `STAT_RANGE_MIN_NEG_INFINITY` /
+      `STAT_RANGE_MAX_POS_INFINITY` constants.
+    - Format 3: format 1 plus `linkedValue` for style-linked Bold /
+      Italic UI affordances. Inter's wght=400 ⇒ 700 ("Regular" →
+      "Bold") and ital=0 ⇒ 1 ("Roman" → "Italic") are the canonical
+      examples.
+    - Format 4: an arbitrary-cardinality multi-axis combination for
+      non-analytic instance names. The §7.3.7.3 "different axisIndex
+      per record" rule is enforced (duplicate ⇒ `BadStructure`); the
+      records are kept in file order since the spec allows any.
+- **Flag accessors** — `is_older_sibling_font_attribute()` decodes
+  the `OLDER_SIBLING_FONT_ATTRIBUTE` (0x0001) bit and
+  `is_elidable()` the `ELIDABLE_AXIS_VALUE_NAME` (0x0002) bit on
+  every variant, including format 4.
+
+Surfaced through `Font` as:
+
+- `Font::stat_table()` → `Option<&StatTable>` (`None` for static
+  fonts that omit it; variable fonts are required to ship one).
+- `Font::stat_axes()` / `Font::stat_axis_values()` —
+  pass-through accessors that return an empty slice when STAT is
+  absent so consumers don't need to unwrap an `Option`.
+- `Font::stat_elided_fallback_name_id()` → `Option<u16>` — the
+  `name` table nameID to use when every component of a composed
+  subfamily string would be elided.
+- `Font::stat_axis_values_for_tag(axis_tag)` — filters the array to
+  one axis tag, including format-4 records that touch it.
+
+The unit-test suite covers a synthetic v1.1 header, every format-2 /
+3 / 4 path, the `axisIndex`-out-of-range rejection, and the
+format-4 duplicate-axis-index rejection. The integration suite
+against InterVariable.ttf asserts the 3-axis / 12-record shape, the
+9 distinct wght values (100…900 in 100-step increments), the
+format-3 wght=400 → 700 + ital=0 → 1 style links, and the
+elided-fallback-name-ID. A DejaVu Sans Mono regression confirms
+that all accessors degrade cleanly to empty / `None` when STAT is
+not in the table directory.
+
+The format-2 "two tables with overlapping ranges on one axis"
+tie-break (§7.3.7.3) is documented as caller policy; the parser
+preserves all records.
+
 ### Added — `GDEF` AttachList / LigCaretList / MarkAttachClassDef / MarkGlyphSetsDef / ItemVariationStore (2026-06-03)
 
 Extended the `GDEF` table parser past the round-1 `glyphClassDef`-only

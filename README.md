@@ -116,6 +116,25 @@ ligatures and kerning.
   outlines"). The implicit "outer=0, inner=gid" form applies to
   advance heights when `advanceHeightMappingOffset` is zero, matching
   the §7.3.8.2 cross-reference back to §7.3.5.3.
+- `STAT` (style attributes table, ISO/IEC 14496-22:2019 §7.3.7) — v1.0
+  / v1.1 / v1.2 headers (the v1.0 deprecated form is parsed and its
+  missing `elidedFallbackNameID` defaulted to the conventional name ID
+  2 = "Regular"). `Font::stat_axes()` exposes the §7.3.7.2 design-axis
+  records (`axisTag` / `axisNameID` / `axisOrdering`) with the
+  `designAxisSize` stride honoured so future minor-version growth
+  decodes transparently. `Font::stat_axis_values()` exposes every
+  §7.3.7.3 axis value record — format 1 (single value), format 2
+  (nominal + `[rangeMin, rangeMax]` with the `0x80000000` / `0x7FFFFFFF`
+  ±∞ sentinels surfaced as `STAT_RANGE_MIN_NEG_INFINITY` /
+  `STAT_RANGE_MAX_POS_INFINITY`), format 3 (single + `linkedValue` for
+  style-linked Bold/Italic UI), and format 4 (multi-axis combinations
+  for non-analytic instance names with the spec's "different axisIndex
+  per record" rule enforced). The
+  `OLDER_SIBLING_FONT_ATTRIBUTE` / `ELIDABLE_AXIS_VALUE_NAME` flag bits
+  are decoded into `is_older_sibling_font_attribute()` /
+  `is_elidable()` convenience accessors, and `Font::stat_axis_values_for_tag`
+  filters the array down to a single axis (resolving format-4
+  contributors that touch it).
 
 The companion [`oxideav-scribe`](https://github.com/OxideAV/oxideav-scribe)
 crate consumes the outlines + shaping output to rasterise text to RGBA
@@ -421,9 +440,9 @@ if vfont.is_variable() {
 - avar **v2** delta-set index map (variable-axis remap).
 - gvar delta propagation into composite-glyph component offsets and
   the four phantom points.
-- STAT (style attributes) is still pending — the IVS plumbing landed
-  with MVAR, but STAT's design-axis records and axis-value tables
-  remain to decode.
+- STAT (style attributes) landed in r217 — see above. The format-2
+  overlapping-range tie-break (§7.3.7.3) is documented as caller
+  policy; we expose the full document-order record array unchanged.
 
 ## Test fixtures
 

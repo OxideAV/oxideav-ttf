@@ -55,7 +55,8 @@ use crate::tables::{
     cpal::CpalTable, fvar::FvarTable, gdef::GdefTable, glyf::GlyfTable, gpos::GposTable,
     gsub::GsubTable, gvar::GvarTable, head::HeadTable, hhea::HheaTable, hmtx::HmtxTable,
     hvar::HvarTable, kern::KernTable, loca::LocaTable, maxp::MaxpTable, mvar::MvarTable,
-    name::NameTable, os2::Os2Table, post::PostTable, sbix::SbixTable, vvar::VvarTable,
+    name::NameTable, os2::Os2Table, post::PostTable, sbix::SbixTable, stat::StatTable,
+    vvar::VvarTable,
 };
 
 pub use outline::{BBox, Contour, Point, TtOutline};
@@ -70,6 +71,13 @@ pub use tables::kern::HeaderVariant as KernHeaderVariant;
 pub use tables::mvar::ItemVariationStore;
 pub use tables::name::{name_id, platform, NameRecord};
 pub use tables::sbix::{SbixGlyph, MAX_DUPE_DEPTH as SBIX_MAX_DUPE_DEPTH};
+pub use tables::stat::{
+    AxisRecord as StatAxisRecord, AxisValue as StatAxisValue,
+    FLAG_ELIDABLE_AXIS_VALUE_NAME as STAT_FLAG_ELIDABLE_AXIS_VALUE_NAME,
+    FLAG_OLDER_SIBLING_FONT_ATTRIBUTE as STAT_FLAG_OLDER_SIBLING_FONT_ATTRIBUTE,
+    RANGE_MAX_POS_INFINITY as STAT_RANGE_MAX_POS_INFINITY,
+    RANGE_MIN_NEG_INFINITY as STAT_RANGE_MIN_NEG_INFINITY,
+};
 
 /// Errors emitted during font parsing or glyph lookup.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -184,6 +192,12 @@ pub struct Font<'a> {
     /// for CFF2 fonts that publish a `VORG` table — vertical-origin
     /// Y coordinates.
     vvar: Option<VvarTable>,
+    /// Style attributes table (`STAT`, ISO/IEC 14496-22:2019 §7.3.7).
+    /// Required in all variable fonts; optional otherwise. Carries
+    /// design-axis records and per-axis-value name mappings used by
+    /// font pickers to compose family / subfamily strings under the
+    /// R/B/I/BI, WWS, and unrestricted naming models.
+    stat: Option<StatTable>,
     /// Current user-space coordinate vector, one per axis (defaults
     /// to each axis's `default` value when `fvar` is present, empty
     /// vec otherwise). `set_variation_coords` updates this; the
@@ -291,6 +305,7 @@ impl<'a> Font<'a> {
         let mvar = dir.find(b"MVAR", bytes).map(MvarTable::parse).transpose()?;
         let hvar = dir.find(b"HVAR", bytes).map(HvarTable::parse).transpose()?;
         let vvar = dir.find(b"VVAR", bytes).map(VvarTable::parse).transpose()?;
+        let stat = dir.find(b"STAT", bytes).map(StatTable::parse).transpose()?;
         let var_coords = match fvar.as_ref() {
             Some(f) => f.axes().iter().map(|a| a.default).collect(),
             None => Vec::new(),
@@ -323,6 +338,7 @@ impl<'a> Font<'a> {
             mvar,
             hvar,
             vvar,
+            stat,
             var_coords,
         })
     }
@@ -1429,6 +1445,60 @@ impl<'a> Font<'a> {
         let v = self.vvar.as_ref()?;
         let coords = self.normalised_coords();
         v.vorg_delta(glyph_id, &coords)
+    }
+
+    /// Borrow the parsed `STAT` table, when present. Static fonts may
+    /// omit it; variable fonts are required by ISO/IEC 14496-22:2019
+    /// §7.3.7 to ship one.
+    pub fn stat_table(&self) -> Option<&StatTable> {
+        self.stat.as_ref()
+    }
+
+    /// `STAT.designAxes` — one record per design axis. For a variable
+    /// font, every `fvar` axis must appear here; the order is arbitrary
+    /// (sort by `axis_ordering` if a stable UI order is needed).
+    /// Returns an empty slice when no STAT table is present.
+    pub fn stat_axes(&self) -> &[StatAxisRecord] {
+        match self.stat.as_ref() {
+            Some(s) => s.axes(),
+            None => &[],
+        }
+    }
+
+    /// `STAT.axisValueTables` — every axis value record in document
+    /// order. Filter by axis tag with [`Self::stat_axis_values_for_tag`]
+    /// or walk by format to compose subfamily strings under the
+    /// R/B/I/BI, WWS, or unrestricted naming models (§7.3.7.3).
+    /// Returns an empty slice when no STAT table is present.
+    pub fn stat_axis_values(&self) -> &[StatAxisValue] {
+        match self.stat.as_ref() {
+            Some(s) => s.axis_values(),
+            None => &[],
+        }
+    }
+
+    /// `STAT.elidedFallbackNameID` — the `name` table nameID applied
+    /// when every component of a composed subfamily string would be
+    /// elided (§7.3.7.1). Returns `None` when the font ships no STAT
+    /// table; returns name ID 2 ("Regular") for the deprecated v1.0
+    /// header that lacked the field.
+    pub fn stat_elided_fallback_name_id(&self) -> Option<u16> {
+        Some(self.stat.as_ref()?.elided_fallback_name_id())
+    }
+
+    /// Every STAT axis-value record whose axis is `axis_tag` (e.g.
+    /// `*b"wght"`, `*b"wdth"`). Format-4 records are matched when one
+    /// of their contributing axes references this tag. Returns an
+    /// empty iterator when the font has no STAT table or the tag is
+    /// not in the design-axes array.
+    pub fn stat_axis_values_for_tag(
+        &self,
+        axis_tag: [u8; 4],
+    ) -> Box<dyn Iterator<Item = &StatAxisValue> + '_> {
+        match self.stat.as_ref() {
+            Some(s) => Box::new(s.axis_values_for_tag(axis_tag)),
+            None => Box::new(core::iter::empty()),
+        }
     }
 
     /// `true` if any current coordinate diverges from its axis default.
