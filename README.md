@@ -55,7 +55,17 @@ ligatures and kerning.
   `Font::gsub_lookup_list()` enumerate every lookup as
   `(index, effective_type, subtable_count)` for shapers that need to
   find e.g. every chained-context lookup without probing each index.
-- `GDEF` (glyph class definitions, used to skip mark glyphs).
+- `GDEF` glyph-definition table — v1.0 / v1.2 / v1.3 headers, with
+  `glyphClassDef` (skip-mark filter for GPOS / GSUB), `AttachList`
+  (per-glyph contour-point indices), `LigCaretList` (per-ligature
+  caret coordinates as `CaretValue::DesignUnits` / `ContourPoint` /
+  `DesignUnitsWithDevice`), `MarkAttachClassDef` (the class compared
+  against `lookupFlag.markAttachmentType`), `MarkGlyphSetsDef` (the
+  Offset32 Coverage arrays consulted by `lookupFlag.useMarkFilteringSet`),
+  and an `item_var_store_bytes()` raw slice for the v1.3
+  ItemVariationStore feeding CaretValueFormat3 VariationIndex
+  references through the same IVS decoder shared with MVAR / HVAR /
+  VVAR.
 - sbix `'dupe'` indirection chasing (`sbix_glyph_resolved`): walks
   the per-strike indirection chain up to `SBIX_MAX_DUPE_DEPTH` (= 8)
   hops with explicit cycle detection (two-glyph, self-loop, and

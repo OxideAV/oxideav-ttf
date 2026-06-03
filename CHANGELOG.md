@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — `GDEF` AttachList / LigCaretList / MarkAttachClassDef / MarkGlyphSetsDef / ItemVariationStore (2026-06-03)
+
+Extended the `GDEF` table parser past the round-1 `glyphClassDef`-only
+slice to cover all six header offsets defined by the OpenType spec.
+The table header now distinguishes v1.0 (12-byte header, four
+Offset16), v1.2 (adds `markGlyphSetsDefOffset`, 14-byte header), and
+v1.3 (adds `itemVarStoreOffset`, 18-byte header) so callers can choose
+which sub-tables to consume per the published `minor` revision.
+
+- `GdefTable::attach_points(glyph_id)` decodes the AttachList →
+  Coverage → AttachPoint chain and returns the contour-point indices
+  that mark glyph cache slots. Indices come back in the increasing
+  numerical order mandated by the spec.
+- `GdefTable::ligature_carets(glyph_id)` decodes LigCaretList →
+  Coverage → LigGlyph → CaretValue, returning every caret on a
+  ligature glyph as a tagged `CaretValue` enum that distinguishes
+  Format 1 (design units), Format 2 (contour-point index), and
+  Format 3 (design units + Device/VariationIndex offset). The
+  Format-3 device offset is surfaced verbatim so a
+  VariationIndex-aware shaper can interpolate it through the GDEF
+  ItemVariationStore.
+- `GdefTable::mark_attach_class(glyph_id)` consults the
+  `markAttachClassDef` ClassDef, returning the class value compared
+  against `lookupFlag.markAttachmentType` (the high byte of
+  `lookupFlag`) when GSUB / GPOS filters mark glyphs.
+- `GdefTable::mark_glyph_set_count()` /
+  `GdefTable::mark_glyph_set_contains(set_index, glyph_id)` decode
+  the v1.2 MarkGlyphSetsDef sub-table, exposing the Coverage arrays
+  referenced by `lookupFlag.useMarkFilteringSet`. The MarkGlyphSets
+  sub-table uses Offset32 rather than Offset16 (the only place in
+  GDEF that does), which the parser handles inline.
+- `GdefTable::item_var_store_bytes()` exposes the v1.3 GDEF
+  ItemVariationStore as a raw byte slice. The same IVS decoder
+  already shipping with MVAR / HVAR / VVAR can consume the slice
+  when a CaretValueFormat3 `device_offset` points at a
+  VariationIndex table.
+- Header validation now rejects truncated v1.2 / v1.3 GDEF tables
+  before reading the trailing offset fields, instead of returning
+  garbage. Null offsets continue to decode to "absent" per spec.
+
+Round 212. Spec coverage: `docs/text/opentype/spec/ISO_IEC_14496-22-OFF-2019.pdf`
+§5.10 (GDEF), §5.10.2 (Attachment List), §5.10.3 (Ligature Caret List
++ CaretValueFormat 1/2/3), §5.10.4 (Mark Attachment Class Definition),
+§5.10.5 (Mark Glyph Sets Definition), §5.10.6 (Item Variation Store
+for GDEF, v1.3).
+
 ### Added — `VVAR` per-glyph vertical-metrics variations (2026-06-02)
 
 OpenType Font Variations `VVAR` table (ISO/IEC 14496-22:2019 §7.3.8),
