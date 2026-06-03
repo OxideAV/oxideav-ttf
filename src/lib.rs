@@ -56,7 +56,7 @@ use crate::tables::{
     gsub::GsubTable, gvar::GvarTable, head::HeadTable, hhea::HheaTable, hmtx::HmtxTable,
     hvar::HvarTable, kern::KernTable, loca::LocaTable, maxp::MaxpTable, mvar::MvarTable,
     name::NameTable, os2::Os2Table, post::PostTable, sbix::SbixTable, stat::StatTable,
-    vvar::VvarTable,
+    vhea::VheaTable, vmtx::VmtxTable, vvar::VvarTable,
 };
 
 pub use outline::{BBox, Contour, Point, TtOutline};
@@ -78,6 +78,7 @@ pub use tables::stat::{
     RANGE_MAX_POS_INFINITY as STAT_RANGE_MAX_POS_INFINITY,
     RANGE_MIN_NEG_INFINITY as STAT_RANGE_MIN_NEG_INFINITY,
 };
+pub use tables::vhea::{VHEA_VERSION_1_0, VHEA_VERSION_1_1};
 
 /// Errors emitted during font parsing or glyph lookup.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -146,6 +147,17 @@ pub struct Font<'a> {
     name: NameTable<'a>,
     os2: Option<Os2Table>,
     hmtx: HmtxTable<'a>,
+    /// Vertical header table (`vhea`, ISO/IEC 14496-22:2019 §5.7.9).
+    /// Optional — only fonts intended for vertical layout ship one;
+    /// in particular, CJK fonts and the rare Mongolian / Manchu font.
+    /// When present, the companion `vmtx` table is also required per
+    /// §5.7.10 ("OFFvertical fonts require both a vertical header
+    /// table ('vhea') and the vertical metrics table").
+    vhea: Option<VheaTable>,
+    /// Vertical metrics table (`vmtx`, ISO/IEC 14496-22:2019 §5.7.10).
+    /// Always paired with `vhea`; only present when the font supplies
+    /// vertical layout data.
+    vmtx: Option<VmtxTable<'a>>,
     /// Glyph-location offsets into `glyf`. Optional because CBDT/CBLC-only
     /// colour-emoji fonts (e.g. NotoColorEmoji.ttf) ship without `loca`
     /// and `glyf` — every glyph is a colour bitmap and there are no
@@ -260,6 +272,31 @@ impl<'a> Font<'a> {
             hhea.num_long_hor_metrics,
             maxp.num_glyphs,
         )?;
+        // `vhea` + `vmtx` are jointly optional: a font that lacks
+        // either is treated as horizontal-only. §5.7.10 mandates that
+        // a font shipping one ship both ("OFFvertical fonts require
+        // both"), so a half-pair is rejected as a malformed file
+        // rather than silently degraded.
+        let vhea = dir.find(b"vhea", bytes).map(VheaTable::parse).transpose()?;
+        let vmtx_slice = dir.find(b"vmtx", bytes);
+        let vmtx = match (vhea.as_ref(), vmtx_slice) {
+            (Some(vh), Some(slice)) => Some(VmtxTable::parse(
+                slice,
+                vh.num_long_ver_metrics,
+                maxp.num_glyphs,
+            )?),
+            (None, None) => None,
+            (Some(_), None) => {
+                return Err(Error::BadStructure(
+                    "vhea present but vmtx missing (§5.7.10 requires both)",
+                ));
+            }
+            (None, Some(_)) => {
+                return Err(Error::BadStructure(
+                    "vmtx present but vhea missing (§5.7.10 requires both)",
+                ));
+            }
+        };
         // `loca` + `glyf` are jointly optional: CBDT/CBLC-only colour-
         // emoji fonts (e.g. NotoColorEmoji.ttf) ship without either.
         // When loca is present we still require glyf (and vice versa)
@@ -320,6 +357,8 @@ impl<'a> Font<'a> {
             name,
             os2,
             hmtx,
+            vhea,
+            vmtx,
             loca,
             glyf,
             post,
@@ -617,6 +656,85 @@ impl<'a> Font<'a> {
     /// Per-glyph left-side bearing in font units.
     pub fn glyph_lsb(&self, glyph_id: u16) -> i16 {
         self.hmtx.lsb(glyph_id)
+    }
+
+    /// `true` when the font ships both a `vhea` and `vmtx` table —
+    /// i.e. it supplies vertical-layout metrics for CJK / Mongolian
+    /// or other top-to-bottom-written scripts.
+    pub fn has_vertical_metrics(&self) -> bool {
+        self.vhea.is_some() && self.vmtx.is_some()
+    }
+
+    /// Borrow the parsed `vhea` table, when present.
+    /// (ISO/IEC 14496-22:2019 §5.7.9.)
+    pub fn vhea_table(&self) -> Option<&VheaTable> {
+        self.vhea.as_ref()
+    }
+
+    /// Vertical typographic ascender from `vhea`. For v1.1 this is
+    /// `vertTypoAscender` (distance in font design units from the
+    /// ideographic em-box centre baseline to the right side of the
+    /// em-box, per §5.7.9 v1.1 row 2); for v1.0 the same bytes are
+    /// the centre-line-relative `ascent` field. Returns `None` if the
+    /// font lacks a `vhea` table.
+    pub fn vertical_ascent(&self) -> Option<i16> {
+        self.vhea.map(|v| v.vert_typo_ascender)
+    }
+
+    /// Vertical typographic descender from `vhea` (v1.1
+    /// `vertTypoDescender`; v1.0 `descent`).
+    pub fn vertical_descent(&self) -> Option<i16> {
+        self.vhea.map(|v| v.vert_typo_descender)
+    }
+
+    /// Vertical typographic line gap from `vhea` (v1.1
+    /// `vertTypoLineGap`; v1.0 row "Reserved; set to 0", so static
+    /// v1.0 fonts will return `Some(0)` here).
+    pub fn vertical_line_gap(&self) -> Option<i16> {
+        self.vhea.map(|v| v.vert_typo_line_gap)
+    }
+
+    /// `vhea.advanceHeightMax` — the maximum advance height in the
+    /// font, in design units. Per §5.7.9 the field is `int16`.
+    pub fn advance_height_max(&self) -> Option<i16> {
+        self.vhea.map(|v| v.advance_height_max)
+    }
+
+    /// Borrow the parsed `vmtx` table, when present.
+    /// (ISO/IEC 14496-22:2019 §5.7.10.)
+    pub fn vmtx_table(&self) -> Option<&VmtxTable<'a>> {
+        self.vmtx.as_ref()
+    }
+
+    /// Per-glyph advance height in font design units. Returns `None`
+    /// when the font lacks `vhea`/`vmtx`; otherwise returns the
+    /// `vMetrics` advance for `glyph_id`, with the §5.7.10 "monospaced
+    /// tail" rule (glyphs beyond `numOfLongVerMetrics` inherit the
+    /// last pair's advance height) applied transparently.
+    pub fn glyph_advance_height(&self, glyph_id: u16) -> Option<u16> {
+        Some(self.vmtx.as_ref()?.advance_height(glyph_id))
+    }
+
+    /// Per-glyph top side bearing in font design units. Returns
+    /// `None` when the font lacks `vmtx`.
+    pub fn glyph_top_side_bearing(&self, glyph_id: u16) -> Option<i16> {
+        Some(self.vmtx.as_ref()?.top_side_bearing(glyph_id))
+    }
+
+    /// Per-glyph vertical origin Y coordinate in font design units.
+    /// Per §5.7.10 ("Vertical Origin and Advance Height"), this is
+    /// `topSideBearing + glyph_bounding_box.y_max`. Returns `None`
+    /// when the font lacks `vmtx` or when the glyph has no outline
+    /// bounding box (empty glyph, blank glyph, or a CBDT-only colour-
+    /// emoji font with no `glyf`/`loca`). For CFF fonts the spec
+    /// recommends the optional `VORG` table instead; that path is not
+    /// implemented here (TrueType outlines only).
+    pub fn glyph_vertical_origin_y(&self, glyph_id: u16) -> Option<i16> {
+        let tsb = self.vmtx.as_ref()?.top_side_bearing(glyph_id);
+        let bbox = self.glyph_bounding_box(glyph_id)?;
+        // Saturating add keeps a pathological bbox from panicking;
+        // real-world fonts are nowhere near i16::MAX in this dim.
+        Some(tsb.saturating_add(bbox.y_max))
     }
 
     /// Glyph bounding box from the `glyf` header (xMin/yMin/xMax/yMax).

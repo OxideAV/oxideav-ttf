@@ -13,7 +13,13 @@ ligatures and kerning.
   the legacy mixed-8-/16-bit "high-byte mapping through table" layout
   for pre-Unicode CJK fonts, format 13 is the "many-to-one range
   mappings" layout used by last-resort fonts),
-  `name`, `OS/2`, `hmtx`, `loca`, `glyf` (simple + composite), `post`.
+  `name`, `OS/2`, `hmtx`, `loca`, `glyf` (simple + composite), `post`,
+  `vhea` + `vmtx` (vertical-layout metrics for CJK / Mongolian fonts,
+  ISO/IEC 14496-22:2019 §5.7.9 / §5.7.10 — both `vhea` versions
+  parse: v1.0 with the centre-line-relative `ascent` / `descent`
+  fields and v1.1 with the ideographic-em-box typographic
+  `vertTypoAscender` / `vertTypoDescender` rename; `vmtx` covers the
+  long-pair array plus the §5.7.10 monospaced top-side-bearing tail).
 - `name` table: full accessor API beyond family / full name — the
   registered nameID registry (`name_id` constants), typed accessors
   (subfamily, PostScript, version, copyright, trademark, manufacturer,
@@ -184,6 +190,20 @@ let _ = font.glyph_advance(gid_a);  // i16 advance width in font units
 let _ = font.glyph_lsb(gid_a);
 let _ = font.glyph_bounding_box(gid_a);
 let _ = font.glyph_outline(gid_a)?; // contours of i16 points
+
+// Vertical-layout metrics (vhea + vmtx). Present only on fonts that
+// support top-to-bottom writing — typically CJK faces. The accessors
+// return None on horizontal-only fonts.
+if font.has_vertical_metrics() {
+    let _ = font.vertical_ascent();      // i16, vertTypoAscender in v1.1
+    let _ = font.vertical_descent();
+    let _ = font.vertical_line_gap();
+    let _ = font.advance_height_max();   // i16 per §5.7.9
+    let _ = font.glyph_advance_height(gid_a);
+    let _ = font.glyph_top_side_bearing(gid_a);
+    // Y of the vertical origin = topSideBearing + glyf.yMax (§5.7.10).
+    let _ = font.glyph_vertical_origin_y(gid_a);
+}
 
 // Shaping helpers.
 let gid_f = font.glyph_index('f').unwrap();

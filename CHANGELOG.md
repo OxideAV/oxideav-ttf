@@ -7,6 +7,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — `vhea` + `vmtx` vertical metrics (2026-06-04)
+
+Decoded the vertical header (`vhea`, ISO/IEC 14496-22:2019 §5.7.9) and
+vertical metrics (`vmtx`, §5.7.10) tables. Both versions of the
+`vhea` header — v1.0 (`0x00010000`, with `ascent` / `descent` /
+`lineGap` and "Reserved; set to 0" for `lineGap`) and v1.1
+(`0x00011000`, with the renamed `vertTypoAscender` /
+`vertTypoDescender` / `vertTypoLineGap` ideographic-em-box typographic
+fields) — share the same 36-byte layout per §5.7.9 and parse
+transparently; `VheaTable::version_raw()` / `is_v1_1()` expose the
+distinction for callers that need to surface it. The 4 × `int16`
+reserved fields and `metricDataFormat` are tolerated as non-zero per
+the surrounding tables' permissiveness.
+
+The `vmtx` table mirrors the `hmtx` two-array shape: a leading
+`(advanceHeight: uint16, topSideBearing: int16)` pair array of
+`vhea.numOfLongVerMetrics` entries followed by an optional bare
+`int16[]` tail of top-side-bearings for monospaced trailing glyphs
+(§5.7.10: "all the glyphs in this array shall have the same advance
+height as the last entry in the vMetrics array"). The clamp matches
+the `hmtx` idiom.
+
+New public surface on [`Font`]:
+
+- `has_vertical_metrics()` — both tables present.
+- `vhea_table()` / `vmtx_table()` — raw parsed tables.
+- `vertical_ascent()` / `vertical_descent()` / `vertical_line_gap()` —
+  the §5.7.9 first three int16 fields (v1.1 naming).
+- `advance_height_max()` — `vhea.advanceHeightMax` (int16 per the
+  §5.7.9 v1.0 / v1.1 rows).
+- `glyph_advance_height(gid)` / `glyph_top_side_bearing(gid)` —
+  per-glyph metrics with the §5.7.10 monospaced-tail clamp.
+- `glyph_vertical_origin_y(gid)` — derived Y coordinate of the glyph's
+  vertical origin per §5.7.10 "Vertical Origin and Advance Height"
+  (`topSideBearing + glyph_bounding_box.y_max`); returns `None` for
+  empty / blank glyphs or fonts lacking `glyf`/`loca`.
+
+A vhea-without-vmtx (or vmtx-without-vhea) font is now rejected with
+`BadStructure` per §5.7.10 ("OFFvertical fonts require both").
+
+This pairs with the previously-landed `VVAR` (§7.3.8) so the full
+vertical-variation flow becomes consumable: callers add the
+`advance_height_variation_delta(gid)` adjustment to the new
+`glyph_advance_height(gid)` to obtain the per-instance advance.
+
+Integration coverage:
+- DejaVu Sans Mono / DejaVu Sans (no `vhea` / `vmtx`) — every
+  vertical accessor returns `None` and `has_vertical_metrics()` is
+  `false`.
+- NotoSansCJK-Medium TTC subfont 0 (when the consumer-crate
+  fixture-helper has populated the cached blob; the test
+  silently skips otherwise) — full vertical-metric surface
+  populated; sanity bounds on ascender / descender /
+  advanceHeightMax; at least one non-zero advance height across
+  a sampled glyph run.
+
 ### Added — `STAT` style attributes table (2026-06-03)
 
 Decoded the `STAT` table per ISO/IEC 14496-22:2019 §7.3.7. Three
