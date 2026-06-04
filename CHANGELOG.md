@@ -7,6 +7,106 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — `BASE` baseline table (2026-06-04)
+
+Decoded the optional Baseline table per ISO/IEC 14496-22:2019 §6.3.1.
+The header (v1.0 — 8 bytes: `majorVersion = 1`, `minorVersion = 0`,
+`horizAxisOffset`, `vertAxisOffset`; v1.1 — adds an `Offset32
+itemVarStoreOffset` for variable-font BaseCoord deltas) is followed by
+two layout-direction Axis trees. The HorizAxis carries Y coordinates
+(horizontal text); the VertAxis carries X coordinates (vertical text).
+Either offset may be `0`. Per §6.3.1.1, v1.1 fonts may publish an
+`ItemVariationStore` consumed by `BaseCoordFormat3` VariationIndex
+references; we bounds-check the offset and surface the IVS bytes
+through the table so the shared
+[`crate::tables::mvar::ItemVariationStore`] decoder consumes them on
+demand.
+
+Each Axis references:
+ - a `BaseTagList` enumerating the §6.4.4 baseline identification
+   tags (`romn`, `ideo`, `hang`, `icfb`, …) in the alphabetical order
+   §6.3.1.3 mandates, and
+ - a `BaseScriptList` enumerating the scripts rendered in the layout
+   direction in `baseScriptTag` alphabetical order. Each script maps
+   to a `BaseScript` table holding an optional `BaseValues` (default
+   baseline index + one `BaseCoord` per `BaseTagList` entry, in the
+   same order) plus an optional default `MinMax` (script-wide
+   min/max extents and `FeatMinMaxRecord` overrides) and an array
+   of `BaseLangSysRecord` entries that override extents for specific
+   language systems.
+
+`BaseCoord` decodes all three §6.3.1.3 formats:
+ - **Format 1** — design-unit `coordinate` only (4 bytes).
+ - **Format 2** — `coordinate` + `referenceGlyph` + `baseCoordPoint`
+   for hinted size-dependent adjustment (8 bytes).
+ - **Format 3** — `coordinate` + a Device-table (non-variable font)
+   or VariationIndex (variable font) offset (6 bytes); the offset is
+   surfaced for the caller's §6.2.8 Device decoder.
+
+§6.3.1.3 invariants enforced at parse time:
+ - `majorVersion == 1`; `minorVersion ∈ {0, 1}`.
+ - Every Axis must publish a `baseScriptListOffset` (the only
+   `Offset16` in the Axis table without an explicit "may be NULL"
+   note).
+ - Every `BaseLangSysRecord.minMaxOffset` must be non-zero (the
+   spec lists "Offset to MinMax table" without a NULL fallback).
+ - Every `BaseValues.baseCoords[i]` offset must be non-zero (one
+   BaseCoord per BaseTagList entry; the parallel-array contract has
+   no holes).
+ - All sub-table offsets land inside the BASE slice. Truncated or
+   overflowing arrays return `UnexpectedEof` / `BadStructure`.
+ - v1.1 `itemVarStoreOffset` is bounds-checked against the slice.
+
+New public surface on [`Font`]:
+
+- `has_base()` — the table is present in the directory.
+- `base_table()` — borrow the parsed table; access the HorizAxis /
+  VertAxis trees, the v1.1 ItemVariationStore bytes, and the
+  re-exported `BaseAxisTable::base_script_for_tag` /
+  `baseline_index_for_tag` accessors.
+- `base_horiz_y_for_script_baseline(script_tag, baseline_tag)` —
+  walks the HorizAxis to surface the design-unit Y coordinate for a
+  (script, baseline) pair. Returns `None` when the font has no BASE,
+  the HorizAxis is absent, the script is not in the BaseScriptList
+  (§6.3.1.3 "the text-processing client will render the script using
+  the layout information specified for the entire font"), or the
+  baseline tag is not in the Axis's BaseTagList.
+- `base_vert_x_for_script_baseline(script_tag, baseline_tag)` —
+  mirror for the VertAxis (X coordinates, vertical layout).
+
+The integration suite covers five end-to-end paths:
+
+- DejaVu Sans Mono / DejaVu Sans / Inter (no BASE) — every accessor
+  returns `None`.
+- Synthesised HorizAxis-only sfnt with the §6.3.1.4 dominant-run
+  example shape (two scripts, two baselines): `latn` defaults to
+  `romn`/0 with `ideo` = -120; `hani` defaults to `ideo`/0 with
+  `romn` = +120. Per-script accessors return the correct coordinate
+  for either baseline; unknown tags decline cleanly.
+- Synthesised sfnt that publishes both HorizAxis (`latn`/`romn`) and
+  VertAxis (`hani`/`ideo`): the two axes carry independent
+  BaseScriptList arrays and the horizontal / vertical accessors walk
+  them in isolation.
+
+The §6.3.1.3 Device-table payload referenced from `BaseCoordFormat3`
+in non-variable fonts and the v1.1 `ItemVariationStore` decoding for
+`VariationIndex` references in variable fonts are surfaced through
+offsets only — the shared `oxideav_ttf::tables::mvar::ItemVariationStore`
+decoder (already used by HVAR / VVAR / MVAR) consumes the IVS bytes
+when the variable-font layer needs per-instance baseline deltas.
+
+Known open: #1277 Apple TrueType Reference Manual Chap6post (the
+258 standard Macintosh glyph names for the `post` v2.0 / v2.5
+mapping table) is still pending; bumped from r230 → r233.
+
+Round 233. Spec coverage:
+`docs/text/opentype/spec/ISO_IEC_14496-22-OFF-2019.pdf` §6.3.1 (BASE
+table organization + structure + the v1.1 `itemVarStoreOffset`
+trailer + three BaseCoord formats + MinMax / BaseLangSysRecord /
+FeatMinMaxRecord layouts); `docs/text/opentype/registries/baseline-tags.html`
+for the HorizAxis / VertAxis tag semantics (`romn`, `ideo`, `hang`,
+`icfb`, `icft`, …) consulted only as registry context.
+
 ### Added — `VORG` vertical origin table (2026-06-04)
 
 Decoded the optional vertical origin table per ISO/IEC 14496-22:2019

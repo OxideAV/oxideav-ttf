@@ -51,15 +51,20 @@ pub use collection::{is_collection, CollectionHeader, TTC_MAGIC};
 
 use crate::parser::TableDirectory;
 use crate::tables::{
-    avar::AvarTable, cbdt::CbdtTable, cblc::CblcTable, cmap::CmapTable, colr::ColrTable,
-    cpal::CpalTable, fvar::FvarTable, gdef::GdefTable, glyf::GlyfTable, gpos::GposTable,
-    gsub::GsubTable, gvar::GvarTable, head::HeadTable, hhea::HheaTable, hmtx::HmtxTable,
-    hvar::HvarTable, kern::KernTable, loca::LocaTable, maxp::MaxpTable, mvar::MvarTable,
-    name::NameTable, os2::Os2Table, post::PostTable, sbix::SbixTable, stat::StatTable,
-    vhea::VheaTable, vmtx::VmtxTable, vorg::VorgTable, vvar::VvarTable,
+    avar::AvarTable, base::BaseTable, cbdt::CbdtTable, cblc::CblcTable, cmap::CmapTable,
+    colr::ColrTable, cpal::CpalTable, fvar::FvarTable, gdef::GdefTable, glyf::GlyfTable,
+    gpos::GposTable, gsub::GsubTable, gvar::GvarTable, head::HeadTable, hhea::HheaTable,
+    hmtx::HmtxTable, hvar::HvarTable, kern::KernTable, loca::LocaTable, maxp::MaxpTable,
+    mvar::MvarTable, name::NameTable, os2::Os2Table, post::PostTable, sbix::SbixTable,
+    stat::StatTable, vhea::VheaTable, vmtx::VmtxTable, vorg::VorgTable, vvar::VvarTable,
 };
 
 pub use outline::{BBox, Contour, Point, TtOutline};
+pub use tables::base::{
+    AxisTable as BaseAxisTable, BaseCoord, BaseLangSysRecord, BaseScriptRecord, BaseScriptTable,
+    BaseValuesTable, FeatMinMaxRecord, MinMaxTable as BaseMinMaxTable, BASE_MAJOR_VERSION,
+    BASE_MINOR_VERSION_0, BASE_MINOR_VERSION_1,
+};
 pub use tables::cbdt::ColorBitmap;
 pub use tables::cblc::{BigGlyphMetrics, SmallGlyphMetrics};
 pub use tables::colr::ColorLayer;
@@ -222,6 +227,13 @@ pub struct Font<'a> {
     /// font pickers to compose family / subfamily strings under the
     /// R/B/I/BI, WWS, and unrestricted naming models.
     stat: Option<StatTable>,
+    /// Baseline table (`BASE`, ISO/IEC 14496-22:2019 §6.3.1). Optional
+    /// table that supplies per-script baseline coordinates and
+    /// per-script / per-language-system / per-feature minimum and
+    /// maximum glyph extents. Carries one Axis sub-table per text
+    /// direction (HorizAxis for Y baselines / horizontal text;
+    /// VertAxis for X baselines / vertical text).
+    base: Option<BaseTable>,
     /// Current user-space coordinate vector, one per axis (defaults
     /// to each axis's `default` value when `fvar` is present, empty
     /// vec otherwise). `set_variation_coords` updates this; the
@@ -355,6 +367,7 @@ impl<'a> Font<'a> {
         let hvar = dir.find(b"HVAR", bytes).map(HvarTable::parse).transpose()?;
         let vvar = dir.find(b"VVAR", bytes).map(VvarTable::parse).transpose()?;
         let stat = dir.find(b"STAT", bytes).map(StatTable::parse).transpose()?;
+        let base = dir.find(b"BASE", bytes).map(BaseTable::parse).transpose()?;
         let vorg = dir.find(b"VORG", bytes).map(VorgTable::parse).transpose()?;
         let var_coords = match fvar.as_ref() {
             Some(f) => f.axes().iter().map(|a| a.default).collect(),
@@ -392,6 +405,7 @@ impl<'a> Font<'a> {
             hvar,
             vvar,
             stat,
+            base,
             var_coords,
         })
     }
@@ -802,6 +816,65 @@ impl<'a> Font<'a> {
             return None;
         }
         Some(vorg.vert_origin_y(glyph_id))
+    }
+
+    /// `true` when the font ships a `BASE` table (ISO/IEC 14496-22:2019
+    /// §6.3.1). The table is optional for both TrueType and CFF sfnts
+    /// and is consulted by text-layout clients when aligning glyphs
+    /// from different scripts on a common baseline.
+    pub fn has_base(&self) -> bool {
+        self.base.is_some()
+    }
+
+    /// Borrow the parsed `BASE` table when present. Exposes the
+    /// HorizAxis / VertAxis trees plus (in v1.1 tables) the
+    /// ItemVariationStore offset for variable-font baseline deltas.
+    pub fn base_table(&self) -> Option<&BaseTable> {
+        self.base.as_ref()
+    }
+
+    /// Per-script default Y baseline (HorizAxis, §6.3.1.3) for the
+    /// given script tag and baseline tag. Returns the design-unit
+    /// coordinate from the BaseValues entry whose index matches
+    /// `baseline_tag` inside the Axis's BaseTagList.
+    ///
+    /// Returns `None` when:
+    ///  - the font has no `BASE` table;
+    ///  - the HorizAxis is missing (typical for CJK vertical-only
+    ///    fonts);
+    ///  - the script tag is not listed in the Axis's BaseScriptList
+    ///    (§6.3.1.3 "If a script is not listed here, then the
+    ///    text-processing client will render the script using the
+    ///    layout information specified for the entire font");
+    ///  - the BaseTagList is NULL or `baseline_tag` is not in it;
+    ///  - the BaseValues array is shorter than the BaseTagList index.
+    pub fn base_horiz_y_for_script_baseline(
+        &self,
+        script_tag: [u8; 4],
+        baseline_tag: [u8; 4],
+    ) -> Option<i16> {
+        let base = self.base.as_ref()?;
+        let h = base.horiz_axis.as_ref()?;
+        let idx = h.baseline_index_for_tag(baseline_tag)?;
+        let bs = h.base_script_for_tag(script_tag)?;
+        let bv = bs.base_values.as_ref()?;
+        bv.base_coords.get(idx).map(|c| c.coordinate())
+    }
+
+    /// Per-script default X baseline (VertAxis, §6.3.1.3) for the given
+    /// script tag and baseline tag. Mirror of
+    /// [`Self::base_horiz_y_for_script_baseline`] for vertical layout.
+    pub fn base_vert_x_for_script_baseline(
+        &self,
+        script_tag: [u8; 4],
+        baseline_tag: [u8; 4],
+    ) -> Option<i16> {
+        let base = self.base.as_ref()?;
+        let v = base.vert_axis.as_ref()?;
+        let idx = v.baseline_index_for_tag(baseline_tag)?;
+        let bs = v.base_script_for_tag(script_tag)?;
+        let bv = bs.base_values.as_ref()?;
+        bv.base_coords.get(idx).map(|c| c.coordinate())
     }
 
     /// Glyph bounding box from the `glyf` header (xMin/yMin/xMax/yMax).

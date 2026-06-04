@@ -30,7 +30,22 @@ ligatures and kerning.
   parse: v1.0 with the centre-line-relative `ascent` / `descent`
   fields and v1.1 with the ideographic-em-box typographic
   `vertTypoAscender` / `vertTypoDescender` rename; `vmtx` covers the
-  long-pair array plus the §5.7.10 monospaced top-side-bearing tail).
+  long-pair array plus the §5.7.10 monospaced top-side-bearing tail),
+  `BASE` (baseline table, ISO/IEC 14496-22:2019 §6.3.1 — both v1.0 and
+  v1.1 headers, with the v1.1 trailing `itemVarStoreOffset` bounds-
+  checked and the IVS bytes surfaced for the shared `ItemVariationStore`
+  decoder; HorizAxis and VertAxis trees each decode the BaseTagList +
+  BaseScriptList; per script, BaseScript carries an optional BaseValues
+  table giving one BaseCoord per baseline tag plus an optional default
+  MinMax table with per-feature `FeatMinMaxRecord` overrides and an
+  array of `BaseLangSysRecord` language-specific MinMax overrides;
+  BaseCoord covers all three §6.3.1.3 formats — design-unit-only,
+  design-unit + reference-glyph/contour-point pair, and design-unit +
+  Device-table / VariationIndex offset for size- and instance-dependent
+  adjustment. `Font::base_horiz_y_for_script_baseline(script_tag,
+  baseline_tag)` walks the HorizAxis Y coordinate for a (script,
+  baseline) pair; the mirror `base_vert_x_for_script_baseline` walks the
+  VertAxis X coordinate).
 - `name` table: full accessor API beyond family / full name — the
   registered nameID registry (`name_id` constants), typed accessors
   (subfamily, PostScript, version, copyright, trademark, manufacturer,

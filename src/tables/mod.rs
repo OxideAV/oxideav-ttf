@@ -6,6 +6,7 @@
 //! are documented per-module.
 
 pub mod avar;
+pub mod base;
 pub mod cbdt;
 pub mod cblc;
 pub mod cmap;
