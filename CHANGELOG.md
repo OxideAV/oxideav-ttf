@@ -7,6 +7,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — `VORG` vertical origin table (2026-06-04)
+
+Decoded the optional vertical origin table per ISO/IEC 14496-22:2019
+§5.4.4. The header (8 bytes: `majorVersion = 1`, `minorVersion = 0`,
+`defaultVertOriginY: int16`, `numVertOriginYMetrics: uint16`) is
+followed by a sorted array of `(glyphIndex: uint16, vertOriginY: int16)`
+overrides. Per §5.4.4 the parser enforces:
+
+- `majorVersion == 1` and `minorVersion == 0` (rejected otherwise as
+  `BadStructure`).
+- The metrics array is strictly increasing by `glyphIndex` ("must be
+  sorted by increasing glyphIndex, and must not have more than one
+  element with the same glyphIndex"). Duplicate or out-of-order
+  entries fail at parse time so per-glyph queries can binary-search
+  without revalidating.
+- A truncated array (length field claims more entries than the slice
+  provides) returns `UnexpectedEof`.
+
+Per-glyph lookup follows the §5.4.4 fallback: an entry hit returns its
+`vertOriginY`; a miss returns `defaultVertOriginY` ("glyphs whose
+vertical origin's y coordinate equals defaultVertOriginY will not have
+an entry in this array"). The empty-metrics size-optimised form
+(every glyph at the default) parses as expected — a complete VORG of
+8 bytes.
+
+New public surface on [`Font`]:
+
+- `has_vorg()` — the table is present in the directory.
+- `vorg_table()` — borrow the parsed table (header + sorted overrides
+  array via `metrics()` / `metrics_len()`).
+- `vorg_default_vert_origin_y()` — convenience accessor for the §5.4.4
+  fallback Y.
+- `vert_origin_y_from_vorg(gid)` — the §5.4.4 lookup with the
+  ignore-on-TrueType policy applied at the `Font` boundary: returns
+  `None` whenever a `glyf` table is present, per §5.4.4 "If present in
+  TrueType OFF fonts it must be ignored by font clients, just as any
+  other unrecognized table would be." TrueType callers should keep
+  using `glyph_vertical_origin_y` (§5.7.10 derivation from
+  `topSideBearing + glyf.yMax`).
+
+The integration suite covers four end-to-end paths:
+
+- DejaVu Sans Mono / DejaVu Sans (no `VORG`) — every accessor returns
+  `None`.
+- TrueType-flavoured synthesised sfnt that carries a `VORG` table
+  alongside `glyf`: the table is parsed (so tooling can introspect it)
+  but `vert_origin_y_from_vorg` declines to consult it for every
+  glyph, honouring the §5.4.4 ignore rule.
+- CFF-flavoured synthesised sfnt (no `glyf`) carrying the spec's
+  §5.4.4 worked-example table: `vert_origin_y_from_vorg` surfaces
+  `defaultVertOriginY = 880` for unknown glyphs and the per-glyph
+  overrides for the three populated entries.
+
+The new accessor pairs with the previously-landed `VVAR` (§7.3.8)
+`vorg_variation_delta` path: a CFF2 variable font caller adds the
+variation delta to the new `vert_origin_y_from_vorg(gid)` baseline to
+obtain the per-instance origin Y. TrueType variable fonts continue to
+derive the origin from `vmtx.topSideBearing` + the gvar-deltad glyph
+bbox per §5.7.10.
+
+Round 230. Spec coverage: `docs/text/opentype/spec/ISO_IEC_14496-22-OFF-2019.pdf`
+§5.4.4 (VORG header + vertOriginYMetrics format + the
+TrueType-ignore policy).
+
 ### Added — `vhea` + `vmtx` vertical metrics (2026-06-04)
 
 Decoded the vertical header (`vhea`, ISO/IEC 14496-22:2019 §5.7.9) and

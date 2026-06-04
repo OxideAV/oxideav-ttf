@@ -14,6 +14,17 @@ ligatures and kerning.
   for pre-Unicode CJK fonts, format 13 is the "many-to-one range
   mappings" layout used by last-resort fonts),
   `name`, `OS/2`, `hmtx`, `loca`, `glyf` (simple + composite), `post`,
+  `VORG` (vertical origin table, ISO/IEC 14496-22:2019 §5.4.4 — header
+  fields `defaultVertOriginY` + the optional sorted
+  `vertOriginYMetrics` array of per-glyph overrides, with the §5.4.4
+  "must be sorted by increasing glyphIndex" + "must not have more than
+  one element with the same glyphIndex" invariants enforced at parse
+  time; per-glyph lookup is a binary search. The §5.4.4 "If present in
+  TrueType OFF fonts it must be ignored by font clients" rule is
+  honoured at the `Font` layer — `vert_origin_y_from_vorg` returns
+  `None` whenever `glyf` is present, even when the table itself parses
+  cleanly through `vorg_table()` for tooling that wants to introspect
+  it),
   `vhea` + `vmtx` (vertical-layout metrics for CJK / Mongolian fonts,
   ISO/IEC 14496-22:2019 §5.7.9 / §5.7.10 — both `vhea` versions
   parse: v1.0 with the centre-line-relative `ascent` / `descent`
@@ -203,6 +214,22 @@ if font.has_vertical_metrics() {
     let _ = font.glyph_top_side_bearing(gid_a);
     // Y of the vertical origin = topSideBearing + glyf.yMax (§5.7.10).
     let _ = font.glyph_vertical_origin_y(gid_a);
+}
+
+// VORG — vertical origin (§5.4.4). CFF-flavoured CJK sfnts ship this
+// to give the canonical Y of each glyph's vertical origin without the
+// caller having to compute a bbox; the spec restricts the table to
+// CFF sfnts so `vert_origin_y_from_vorg` returns None for any font
+// with a `glyf` table (which is the §5.4.4 ignore policy).
+if font.has_vorg() {
+    let _ = font.vorg_default_vert_origin_y();   // i16 design units
+    let _ = font.vert_origin_y_from_vorg(gid_a); // None on TrueType
+    if let Some(table) = font.vorg_table() {
+        for entry in table.metrics() {
+            // entry.glyph_index, entry.vert_origin_y
+            let _ = entry;
+        }
+    }
 }
 
 // Shaping helpers.

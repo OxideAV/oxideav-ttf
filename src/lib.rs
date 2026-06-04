@@ -56,7 +56,7 @@ use crate::tables::{
     gsub::GsubTable, gvar::GvarTable, head::HeadTable, hhea::HheaTable, hmtx::HmtxTable,
     hvar::HvarTable, kern::KernTable, loca::LocaTable, maxp::MaxpTable, mvar::MvarTable,
     name::NameTable, os2::Os2Table, post::PostTable, sbix::SbixTable, stat::StatTable,
-    vhea::VheaTable, vmtx::VmtxTable, vvar::VvarTable,
+    vhea::VheaTable, vmtx::VmtxTable, vorg::VorgTable, vvar::VvarTable,
 };
 
 pub use outline::{BBox, Contour, Point, TtOutline};
@@ -79,6 +79,7 @@ pub use tables::stat::{
     RANGE_MIN_NEG_INFINITY as STAT_RANGE_MIN_NEG_INFINITY,
 };
 pub use tables::vhea::{VHEA_VERSION_1_0, VHEA_VERSION_1_1};
+pub use tables::vorg::{VertOriginEntry, VORG_MAJOR_VERSION, VORG_MINOR_VERSION};
 
 /// Errors emitted during font parsing or glyph lookup.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -158,6 +159,17 @@ pub struct Font<'a> {
     /// Always paired with `vhea`; only present when the font supplies
     /// vertical layout data.
     vmtx: Option<VmtxTable<'a>>,
+    /// Vertical origin table (`VORG`, ISO/IEC 14496-22:2019 §5.4.4).
+    /// Optional table that records, per glyph, the Y coordinate of the
+    /// glyph's vertical origin in font design units. Per §5.4.4 the
+    /// table is restricted to CFF-flavoured sfnts ("If present in
+    /// TrueType OFF fonts it must be ignored by font clients"); when a
+    /// TrueType-flavoured sfnt nonetheless ships one we still parse it
+    /// here so the bytes are available, but the
+    /// [`Font::vert_origin_y_from_vorg`] accessor respects the
+    /// ignore-on-TrueType policy and returns `None` once `glyf` is
+    /// present.
+    vorg: Option<VorgTable>,
     /// Glyph-location offsets into `glyf`. Optional because CBDT/CBLC-only
     /// colour-emoji fonts (e.g. NotoColorEmoji.ttf) ship without `loca`
     /// and `glyf` — every glyph is a colour bitmap and there are no
@@ -343,6 +355,7 @@ impl<'a> Font<'a> {
         let hvar = dir.find(b"HVAR", bytes).map(HvarTable::parse).transpose()?;
         let vvar = dir.find(b"VVAR", bytes).map(VvarTable::parse).transpose()?;
         let stat = dir.find(b"STAT", bytes).map(StatTable::parse).transpose()?;
+        let vorg = dir.find(b"VORG", bytes).map(VorgTable::parse).transpose()?;
         let var_coords = match fvar.as_ref() {
             Some(f) => f.axes().iter().map(|a| a.default).collect(),
             None => Vec::new(),
@@ -359,6 +372,7 @@ impl<'a> Font<'a> {
             hmtx,
             vhea,
             vmtx,
+            vorg,
             loca,
             glyf,
             post,
@@ -735,6 +749,59 @@ impl<'a> Font<'a> {
         // Saturating add keeps a pathological bbox from panicking;
         // real-world fonts are nowhere near i16::MAX in this dim.
         Some(tsb.saturating_add(bbox.y_max))
+    }
+
+    /// `true` when the font ships a `VORG` table per §5.4.4. The table
+    /// is optional and, per spec, restricted to CFF-flavoured sfnts;
+    /// it appears occasionally in TrueType sfnts as well, in which case
+    /// the parser surfaces the bytes but [`Self::vert_origin_y_from_vorg`]
+    /// declines to consult it (the spec mandates "If present in
+    /// TrueType OFF fonts it must be ignored by font clients").
+    pub fn has_vorg(&self) -> bool {
+        self.vorg.is_some()
+    }
+
+    /// Borrow the parsed `VORG` table, when present. Surfaced verbatim
+    /// so callers that want to introspect the metrics array directly
+    /// (e.g. font tooling) can do so without re-parsing the bytes.
+    pub fn vorg_table(&self) -> Option<&VorgTable> {
+        self.vorg.as_ref()
+    }
+
+    /// Default vertical-origin Y per §5.4.4, in font design units.
+    /// Returns `None` when no `VORG` table is present.
+    pub fn vorg_default_vert_origin_y(&self) -> Option<i16> {
+        self.vorg.as_ref().map(|v| v.default_vert_origin_y)
+    }
+
+    /// Y coordinate of the vertical origin for `glyph_id` per `VORG`
+    /// §5.4.4, in font design units.
+    ///
+    /// Returns:
+    ///  - `None` when the font has no `VORG`.
+    ///  - `None` when the font is TrueType-flavoured (a `glyf` table is
+    ///    present). §5.4.4 mandates "If present in TrueType OFF fonts
+    ///    it must be ignored by font clients, just as any other
+    ///    unrecognized table would be"; we honour that rule here.
+    ///    Callers that want the TrueType-derived origin should use
+    ///    [`Self::glyph_vertical_origin_y`] (which derives the value
+    ///    from `vmtx.topSideBearing` + `glyf` bbox per §5.7.10).
+    ///  - `Some(default_vert_origin_y)` when the glyph has no per-glyph
+    ///    override entry — §5.4.4 size-optimised form ("glyphs whose
+    ///    vertical origin's y coordinate equals defaultVertOriginY will
+    ///    not have an entry").
+    ///  - `Some(vert_origin_y)` from the metrics-array override when
+    ///    one is present.
+    pub fn vert_origin_y_from_vorg(&self, glyph_id: u16) -> Option<i16> {
+        let vorg = self.vorg.as_ref()?;
+        // §5.4.4: TrueType clients must ignore the table. The presence
+        // of `glyf` is the canonical sfnt signal that the outlines are
+        // TrueType (a CFF font carries `CFF ` or `CFF2` instead and has
+        // no `glyf`/`loca`).
+        if self.glyf.is_some() {
+            return None;
+        }
+        Some(vorg.vert_origin_y(glyph_id))
     }
 
     /// Glyph bounding box from the `glyf` header (xMin/yMin/xMax/yMax).
