@@ -13,6 +13,7 @@ pub mod cmap;
 pub mod colr;
 pub mod cpal;
 pub mod fvar;
+pub mod gasp;
 pub mod gdef;
 pub mod glyf;
 pub mod gpos;

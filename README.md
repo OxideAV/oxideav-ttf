@@ -45,7 +45,22 @@ ligatures and kerning.
   adjustment. `Font::base_horiz_y_for_script_baseline(script_tag,
   baseline_tag)` walks the HorizAxis Y coordinate for a (script,
   baseline) pair; the mirror `base_vert_x_for_script_baseline` walks the
-  VertAxis X coordinate).
+  VertAxis X coordinate),
+  `gasp` (grid-fitting and scan-conversion procedure table, ISO/IEC
+  14496-22:2019 §5.3.7 — both version 0 (pre-ClearType) and version 1
+  (adds the two `GASP_SYMMETRIC_*` ClearType bits) parse identically;
+  per-record `(rangeMaxPPEM, rangeGaspBehavior)` decoded with the four
+  defined flags (`GASP_GRIDFIT`, `GASP_DOGRAY`, `GASP_SYMMETRIC_GRIDFIT`,
+  `GASP_SYMMETRIC_SMOOTHING`); strictly-increasing-`rangeMaxPPEM`
+  invariant enforced at parse time so a malformed array does not
+  shadow later records; reserved bits `0xFFF0` tolerated and surfaced
+  through `GaspRange::reserved_bits()`; `Font::gasp_behavior_for_ppem(ppem)`
+  picks the first record whose `rangeMaxPPEM` is at least the requested
+  ppem, returning `None` for fonts without `gasp` or when every limit
+  sits below the request — caller falls back to rasteriser default per
+  §5.3.7; `GaspTable::covers_all_sizes()` flags the single-`0xFFFF`-
+  sentinel shortcut. MVAR coupling to the `gsp0`..`gsp9` value tags is
+  documented for variable-font interpolation of `rangeMaxPPEM`).
 - `name` table: full accessor API beyond family / full name — the
   registered nameID registry (`name_id` constants), typed accessors
   (subfamily, PostScript, version, copyright, trademark, manufacturer,

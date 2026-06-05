@@ -24,6 +24,9 @@
 //! - Adobe Glyph List (AGL) glyph-name → Unicode resolution:
 //!   [`glyph_name_to_codepoints`] / [`glyph_name_to_char`] (direct
 //!   table lookup against the staged AGL data).
+//! - `gasp` (grid-fitting and scan-conversion procedure table, ISO/IEC
+//!   14496-22:2019 §5.3.7) — both version 0 and 1, per-record flag
+//!   accessors, behaviour-for-ppem lookup.
 //!
 //! The crate is read-only (parsing-only) and dependency-light: only
 //! `oxideav-core` for shared types. CFF/Type 2 charstrings live in the
@@ -52,11 +55,12 @@ pub use collection::{is_collection, CollectionHeader, TTC_MAGIC};
 use crate::parser::TableDirectory;
 use crate::tables::{
     avar::AvarTable, base::BaseTable, cbdt::CbdtTable, cblc::CblcTable, cmap::CmapTable,
-    colr::ColrTable, cpal::CpalTable, fvar::FvarTable, gdef::GdefTable, glyf::GlyfTable,
-    gpos::GposTable, gsub::GsubTable, gvar::GvarTable, head::HeadTable, hhea::HheaTable,
-    hmtx::HmtxTable, hvar::HvarTable, kern::KernTable, loca::LocaTable, maxp::MaxpTable,
-    mvar::MvarTable, name::NameTable, os2::Os2Table, post::PostTable, sbix::SbixTable,
-    stat::StatTable, vhea::VheaTable, vmtx::VmtxTable, vorg::VorgTable, vvar::VvarTable,
+    colr::ColrTable, cpal::CpalTable, fvar::FvarTable, gasp::GaspTable, gdef::GdefTable,
+    glyf::GlyfTable, gpos::GposTable, gsub::GsubTable, gvar::GvarTable, head::HeadTable,
+    hhea::HheaTable, hmtx::HmtxTable, hvar::HvarTable, kern::KernTable, loca::LocaTable,
+    maxp::MaxpTable, mvar::MvarTable, name::NameTable, os2::Os2Table, post::PostTable,
+    sbix::SbixTable, stat::StatTable, vhea::VheaTable, vmtx::VmtxTable, vorg::VorgTable,
+    vvar::VvarTable,
 };
 
 pub use outline::{BBox, Contour, Point, TtOutline};
@@ -69,6 +73,11 @@ pub use tables::cbdt::ColorBitmap;
 pub use tables::cblc::{BigGlyphMetrics, SmallGlyphMetrics};
 pub use tables::colr::ColorLayer;
 pub use tables::fvar::{NamedInstance, VariationAxis};
+pub use tables::gasp::{
+    GaspRange, GASP_DOGRAY, GASP_GRIDFIT, GASP_PPEM_SENTINEL, GASP_RESERVED_MASK,
+    GASP_SYMMETRIC_GRIDFIT, GASP_SYMMETRIC_SMOOTHING, GASP_TABLE_TAG, GASP_VERSION_0,
+    GASP_VERSION_1,
+};
 pub use tables::gpos::{CursiveAttachment, PosRecord, PosValue};
 pub use tables::gsub::GsubFeature;
 pub use tables::hvar::DeltaSetIndexMap;
@@ -234,6 +243,13 @@ pub struct Font<'a> {
     /// direction (HorizAxis for Y baselines / horizontal text;
     /// VertAxis for X baselines / vertical text).
     base: Option<BaseTable>,
+    /// Grid-fitting and scan-conversion procedure table (`gasp`,
+    /// ISO/IEC 14496-22:2019 §5.3.7). Optional; carries the
+    /// per-ppem-range rasterisation hints (grid-fit / grayscale /
+    /// ClearType-symmetric flags) sorted by `rangeMaxPPEM`. Used by
+    /// callers that drive a font rasteriser and want to pick the
+    /// font-author-recommended hinting policy at a given pixel size.
+    gasp: Option<GaspTable>,
     /// Current user-space coordinate vector, one per axis (defaults
     /// to each axis's `default` value when `fvar` is present, empty
     /// vec otherwise). `set_variation_coords` updates this; the
@@ -368,6 +384,7 @@ impl<'a> Font<'a> {
         let vvar = dir.find(b"VVAR", bytes).map(VvarTable::parse).transpose()?;
         let stat = dir.find(b"STAT", bytes).map(StatTable::parse).transpose()?;
         let base = dir.find(b"BASE", bytes).map(BaseTable::parse).transpose()?;
+        let gasp = dir.find(b"gasp", bytes).map(GaspTable::parse).transpose()?;
         let vorg = dir.find(b"VORG", bytes).map(VorgTable::parse).transpose()?;
         let var_coords = match fvar.as_ref() {
             Some(f) => f.axes().iter().map(|a| a.default).collect(),
@@ -406,6 +423,7 @@ impl<'a> Font<'a> {
             vvar,
             stat,
             base,
+            gasp,
             var_coords,
         })
     }
@@ -875,6 +893,31 @@ impl<'a> Font<'a> {
         let bs = v.base_script_for_tag(script_tag)?;
         let bv = bs.base_values.as_ref()?;
         bv.base_coords.get(idx).map(|c| c.coordinate())
+    }
+
+    /// `true` when the font carries a `gasp` table
+    /// (ISO/IEC 14496-22:2019 §5.3.7). Absent in many fonts; the
+    /// rasteriser applies its default policy when missing.
+    pub fn has_gasp(&self) -> bool {
+        self.gasp.is_some()
+    }
+
+    /// Borrow the parsed `gasp` table when present. Carries the
+    /// per-ppem rasterisation hints (`GASP_GRIDFIT`, `GASP_DOGRAY`,
+    /// `GASP_SYMMETRIC_GRIDFIT`, `GASP_SYMMETRIC_SMOOTHING`) sorted
+    /// by `rangeMaxPPEM`.
+    pub fn gasp_table(&self) -> Option<&GaspTable> {
+        self.gasp.as_ref()
+    }
+
+    /// Pick the `gasp` record that governs rasterisation at the given
+    /// pixel-per-em size — the first record whose `rangeMaxPPEM` is at
+    /// least `ppem` (§5.3.7). Returns `None` when the font ships no
+    /// `gasp` table or every record's upper limit is below `ppem`; in
+    /// either case the caller should fall back to the rasteriser's
+    /// default policy.
+    pub fn gasp_behavior_for_ppem(&self, ppem: u16) -> Option<&GaspRange> {
+        self.gasp.as_ref()?.behavior_for_ppem(ppem)
     }
 
     /// Glyph bounding box from the `glyf` header (xMin/yMin/xMax/yMax).

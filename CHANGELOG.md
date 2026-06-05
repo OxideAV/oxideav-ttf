@@ -7,6 +7,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — `gasp` grid-fitting / scan-conversion table (2026-06-05)
+
+Decoded the optional `gasp` table per ISO/IEC 14496-22:2019 §5.3.7.
+The 4-byte header (`uint16 version` ∈ `{0, 1}`, `uint16 numRanges`) is
+followed by `numRanges` `GaspRange` records, each
+`(uint16 rangeMaxPPEM, uint16 rangeGaspBehavior)`. Records carry the
+four §5.3.7 `RangeGaspBehavior` flags:
+
+ - `GASP_GRIDFIT` (bit 0) — recommend grid-fitting (hinting).
+ - `GASP_DOGRAY` (bit 1) — recommend grayscale rendering.
+ - `GASP_SYMMETRIC_GRIDFIT` (bit 2) — recommend ClearType symmetric
+   grid-fitting; meaningful only in a version-1 table.
+ - `GASP_SYMMETRIC_SMOOTHING` (bit 3) — recommend multi-axis
+   ClearType smoothing; meaningful only in a version-1 table.
+
+§5.3.7 invariants enforced at parse time:
+ - `version ∈ {0, 1}`; anything else is `Error::BadStructure`.
+ - The `gaspRange[]` array must be sorted by strictly increasing
+   `rangeMaxPPEM` (duplicates rejected — a duplicate would shadow the
+   later record's behaviour). The §5.3.7 "sorted by ppem" rule rules
+   out both descending and equal-key orderings.
+ - The slice carries `4 + 4 * numRanges` bytes; truncation returns
+   `Error::UnexpectedEof`.
+
+Reserved bits (`0xFFF0` per §5.3.7 "Reserved flags – set to 0") are
+preserved on `GaspRange.flags` and surfaced through
+[`tables::gasp::GaspRange::reserved_bits`]; consumers can introspect
+them while typed accessors (`gridfit()`, `dogray()`,
+`symmetric_gridfit()`, `symmetric_smoothing()`) cover the defined set.
+
+The `0xFFFF` sentinel `rangeMaxPPEM` from §5.3.7 (final-record
+"all sizes ≥ previous limit + 1" marker) is exposed as
+[`tables::gasp::GASP_PPEM_SENTINEL`]; the
+[`tables::gasp::GaspTable::covers_all_sizes`] predicate detects the
+single-sentinel-record shortcut the spec describes ("If the only entry
+in 'gasp' is the 0xFFFF sentinel value, the behavior described will
+be used for all sizes.").
+
+New public surface on [`Font`]:
+ - [`Font::has_gasp`] — presence test.
+ - [`Font::gasp_table`] — borrow the parsed table.
+ - [`Font::gasp_behavior_for_ppem`] — pick the first record whose
+   `rangeMaxPPEM` is at least the requested ppem, returning `None`
+   when the font ships no `gasp` table or every record's upper limit
+   sits below the requested ppem (the caller should then apply the
+   rasteriser default per §5.3.7).
+
+The §5.3.7 MVAR coupling (value tags `gsp0`..`gsp9` adjusting the
+`rangeMaxPPEM` of up to ten ranges in a variable font) is documented
+on the module; the static (default-instance) values returned here are
+the foundation a caller folds the
+`Font::metric_variation_delta(tag)` deltas into before lookup. The
+last record's `rangeMaxPPEM` (commonly `0xFFFF`) is never adjusted
+per the spec.
+
+10 new unit tests in `src/tables/gasp.rs` cover the §5.3.7 sample
+table (version 1, four ranges), the single-sentinel-covers-all-sizes
+shortcut, sorted-array rejection (descending + duplicate keys),
+unrecognised version rejection, short-header / truncated-record EOF,
+reserved-bits tolerance, behaviour-fall-off-end semantics, and the
+4-byte tag-constant sanity check.
+
 ### Added — `BASE` baseline table (2026-06-04)
 
 Decoded the optional Baseline table per ISO/IEC 14496-22:2019 §6.3.1.
