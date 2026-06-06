@@ -7,6 +7,92 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — `post` table v1.0 / v2.0 / v2.5 / v3.0 structural decode + per-glyph PostScript name accessors (2026-06-06)
+
+Extended the previously header-only `post` decoder to cover every
+OpenType-published format per ISO/IEC 14496-22:2019 §5.2.10 / MS Learn
+`otspec-post`. The fixed 32-byte common header now exposes
+`min_mem_type{42,1}` / `max_mem_type{42,1}` alongside the existing
+italic-angle / underline / `isFixedPitch` fields, and the trailing
+data is decoded into a typed [`tables::post::PostFormat`] enum:
+
+- `Version10` — no trailing data. The font asserts the standard
+  Macintosh 258-glyph order; per-glyph name lookup yields
+  [`GlyphNameRef::StandardMac { index: gid }`] for `gid < 258`.
+- `Version20(PostV20)` — `uint16 numGlyphs` + `uint16
+  glyphNameIndex[numGlyphs]` + Pascal-format `stringData[…]`. The
+  index array is preserved verbatim; the Pascal string pool is split
+  into a `Vec<String>` indexed by `(nameIndex - 258)` per §5.2.10.2.
+  Names are kept as UTF-8 (the §5.2.10.2 "ASCII only" rule is a
+  conformance check, not a hard parse rule). Two diagnostic flags —
+  `has_oversize_glyph_name` (any name longer than the §5.2.10.2
+  recommended 63-byte cap) and `has_non_conformant_glyph_name` (any
+  byte outside the §5.2.10.2 allow-set `A..Z` / `a..z` / `0..9` / `.`
+  / `_`) — surface conformance problems without rejecting the table.
+- `Version25(PostV25)` — `uint16 numGlyphs` + `int8 offset[numGlyphs]`.
+  Per §5.2.10.3 the standard-Macintosh index is `gid + offset[gid]`;
+  the accessor returns `StandardMac { index }` for results in
+  `[0, 258)` and `None` for malformed offsets that overflow that range.
+- `Version30` — no trailing data, no glyph names. Accepted as the
+  required form for CFF v1 outline fonts (§5.2.10.4).
+
+Spec v4.0 (Apple-only, "not supported in OpenType" per §5.2.10) is
+rejected as `Error::BadStructure`.
+
+New typed accessor [`GlyphNameRef`] separates the two
+naming-source branches the v2.0 layout produces:
+
+- `StandardMac { index }` — the glyph's name is the `index`th entry
+  of the 258-name standard Macintosh glyph set.
+- `Custom(&str)` — the glyph's name is a font-supplied Pascal string,
+  already trimmed of its length byte.
+
+New public surface on [`Font`]:
+
+- [`Font::has_post`] — presence test.
+- [`Font::post_table`] — borrow the parsed table.
+- [`Font::glyph_name_ref`] — per-glyph `GlyphNameRef` lookup; the
+  low-level accessor that surfaces both `StandardMac` and `Custom`
+  branches so tooling that ships its own 258-name array can resolve
+  names today.
+- [`Font::glyph_name`] — convenience `Option<&str>` accessor. Returns
+  the Pascal string for the `Custom` branch and `None` for the
+  `StandardMac { index }` branch (see the gap statement below).
+
+Known open: #1277 — the 258 standard Macintosh glyph names list,
+which ISO §5.2.10.1 and MS Learn `otspec-post` both delegate to
+Apple's TrueType Reference Manual Chapter 6 `post` Format 1
+(`RM06/Chap6post.html`), is the sole canonical source and is not yet
+staged in `docs/text/opentype/`. Until the list lands the decoder
+publishes the index without the name; the convenience
+[`Font::glyph_name`] therefore returns `None` for glyphs whose name
+would have come from the standard Macintosh set, and `Some(name)`
+for the Pascal-string branch. The structure-decoder layout below is
+the foundation a follow-up commit plugs the staged 258-name array
+into — a single one-line route through `STANDARD_MAC_GLYPH_NAMES[i]`
+inside the `StandardMac { index }` branch closes the gap once the
+list is staged.
+
+19 new unit tests in `src/tables/post.rs` cover the four version
+codepoints, the §5.2.10.2 worked example
+(`glyphNameIndex[302] = 217` → standard 217; `glyphNameIndex[408] =
+262` → fifth Pascal string), the §5.2.10.3 worked example (font
+glyphs 0 / 1 / 2 → standard 36 / 37 / 38 via three `+36` offsets),
+zero-based Pascal-pool indexing, truncated-pascal-string rejection,
+oversize + non-conformant flag propagation, in-range / negative /
+out-of-range v2.5 offsets, the v3.0 short header, and Apple v4.0
+rejection. 5 new integration tests in `tests/post.rs` validate the
+end-to-end accessor against the DejaVu Sans / DejaVu Sans Mono
+fixtures: `numGlyphs` agreement with `maxp`, at-least-one custom
+glyph name, italic + monospace metadata, and out-of-range gid
+returning `None`.
+
+Spec coverage:
+`docs/text/opentype/spec/ISO_IEC_14496-22-OFF-2019.pdf` §5.2.10
+(`post` header + version layouts);
+`docs/text/opentype/otspec-post.html` (the §5.2.10.2 v2.0 worked
+example + the §5.2.10.2 ASCII-conformance allow-set).
+
 ### Added — `gasp` grid-fitting / scan-conversion table (2026-06-05)
 
 Decoded the optional `gasp` table per ISO/IEC 14496-22:2019 §5.3.7.

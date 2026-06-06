@@ -13,7 +13,24 @@ ligatures and kerning.
   the legacy mixed-8-/16-bit "high-byte mapping through table" layout
   for pre-Unicode CJK fonts, format 13 is the "many-to-one range
   mappings" layout used by last-resort fonts),
-  `name`, `OS/2`, `hmtx`, `loca`, `glyf` (simple + composite), `post`,
+  `name`, `OS/2`, `hmtx`, `loca`, `glyf` (simple + composite),
+  `post` (ISO/IEC 14496-22:2019 §5.2.10 — full structural decode of
+  v1.0 / v2.0 / v2.5 / v3.0: 32-byte common header with `italicAngle`
+  / underline geometry / `isFixedPitch` / four PostScript memory
+  hints; v2.0 `numGlyphs` + `glyphNameIndex[]` + Pascal-format
+  `stringData[]` with the §5.2.10.2 ASCII allow-set + 63-byte
+  recommendation surfaced through `has_oversize_glyph_name` /
+  `has_non_conformant_glyph_name` diagnostic flags; v2.5
+  `int8 offset[numGlyphs]` resolved per §5.2.10.3 to a standard
+  Macintosh index; v3.0 accepted as the names-absent form (required
+  for CFF v1 outlines per §5.2.10.4); Apple v4.0 rejected as
+  out-of-scope. `Font::glyph_name_ref(gid)` exposes both the
+  `Custom(&str)` (Pascal-string) and `StandardMac { index }` branches;
+  `Font::glyph_name(gid)` is the convenience accessor returning
+  `Some(&str)` for the Pascal-string branch. The 258-name standard
+  Macintosh glyph table itself is pending docs gap #1277 — the
+  decoder publishes the index today and the convenience accessor
+  returns `None` for the `StandardMac` branch until the list lands),
   `VORG` (vertical origin table, ISO/IEC 14496-22:2019 §5.4.4 — header
   fields `defaultVertOriginY` + the optional sorted
   `vertOriginYMetrics` array of per-glyph overrides, with the §5.4.4

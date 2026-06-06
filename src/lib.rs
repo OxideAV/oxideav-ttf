@@ -84,6 +84,11 @@ pub use tables::hvar::DeltaSetIndexMap;
 pub use tables::kern::HeaderVariant as KernHeaderVariant;
 pub use tables::mvar::ItemVariationStore;
 pub use tables::name::{name_id, platform, NameRecord};
+pub use tables::post::{
+    GlyphNameRef, PostFormat, PostV20, PostV25, POST_HEADER_LEN, POST_TABLE_TAG, POST_VERSION_10,
+    POST_VERSION_20, POST_VERSION_25, POST_VERSION_30, RECOMMENDED_GLYPH_NAME_MAX_LEN,
+    STANDARD_MAC_GLYPH_COUNT,
+};
 pub use tables::sbix::{SbixGlyph, MAX_DUPE_DEPTH as SBIX_MAX_DUPE_DEPTH};
 pub use tables::stat::{
     AxisRecord as StatAxisRecord, AxisValue as StatAxisValue,
@@ -605,6 +610,61 @@ impl<'a> Font<'a> {
     /// `post.italicAngle` in degrees (negative for forward-slanted).
     pub fn italic_angle(&self) -> f32 {
         self.post.as_ref().map(|p| p.italic_angle).unwrap_or(0.0)
+    }
+
+    /// `true` when the font ships a `post` table (any version).
+    pub fn has_post(&self) -> bool {
+        self.post.is_some()
+    }
+
+    /// Borrow the parsed `post` table. `None` when the font does not
+    /// publish one.
+    pub fn post_table(&self) -> Option<&PostTable> {
+        self.post.as_ref()
+    }
+
+    /// Resolve glyph `gid`'s `post`-table name reference, when the
+    /// table publishes one.
+    ///
+    /// Returns:
+    ///
+    /// - `Some(GlyphNameRef::Custom(name))` — the font supplied the
+    ///   glyph's name as a v2.0 Pascal string. The string is already
+    ///   trimmed of its length byte.
+    /// - `Some(GlyphNameRef::StandardMac { index })` — the glyph
+    ///   resolves to entry `index` of the 258-name standard Macintosh
+    ///   glyph table (referenced through v1.0, v2.0, or v2.5). The
+    ///   258-name array itself is the subject of a documented gap
+    ///   (#1277 — the standard Macintosh glyph names list, defined
+    ///   exclusively by Apple's TrueType Reference Manual Chapter 6
+    ///   `post` Format 1, is not yet staged in `docs/text/opentype/`).
+    ///   Until the list is staged, [`Font::glyph_name`] returns
+    ///   `None` for these glyphs; this lower-level accessor still
+    ///   surfaces the index so tooling that owns its own copy of the
+    ///   258-name array can resolve names today.
+    /// - `None` — the font has no `post` table, the table is v3.0
+    ///   (no glyph names at all), `gid` falls outside the v2.0 /
+    ///   v2.5 index array, or the index references a Pascal string
+    ///   the pool cannot satisfy.
+    pub fn glyph_name_ref(&self, gid: u16) -> Option<GlyphNameRef<'_>> {
+        self.post.as_ref()?.glyph_name_ref(gid)
+    }
+
+    /// Convenience accessor: return the glyph's PostScript name when
+    /// the font supplies a custom one (v2.0 Pascal string).
+    ///
+    /// Returns `None` for every other case — including the
+    /// `StandardMac { index }` branch, which would need the 258-name
+    /// list from #1277 to render. Once the docs gap closes a
+    /// follow-up commit can route the `StandardMac` index through a
+    /// `STANDARD_MAC_GLYPH_NAMES[i]` lookup; the current behaviour is
+    /// the §5.2.10.2 spec's documented "no name available" semantics
+    /// for callers that need a single `Option<&str>` shape.
+    pub fn glyph_name(&self, gid: u16) -> Option<&str> {
+        match self.glyph_name_ref(gid)? {
+            GlyphNameRef::Custom(s) => Some(s),
+            GlyphNameRef::StandardMac { .. } => None,
+        }
     }
 
     // ---- glyph lookup ------------------------------------------------------
