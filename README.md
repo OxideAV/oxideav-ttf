@@ -77,7 +77,26 @@ ligatures and kerning.
   sits below the request — caller falls back to rasteriser default per
   §5.3.7; `GaspTable::covers_all_sizes()` flags the single-`0xFFFF`-
   sentinel shortcut. MVAR coupling to the `gsp0`..`gsp9` value tags is
-  documented for variable-font interpolation of `rangeMaxPPEM`).
+  documented for variable-font interpolation of `rangeMaxPPEM`),
+  `LTSH` (linear-threshold table, ISO/IEC 14496-22:2019 §5.7.4 — the
+  4-byte header (`uint16 version`, `uint16 numGlyphs`) plus the
+  `uint8 yPels[numGlyphs]` array publishing the lowest ppem at which
+  each glyph's grid-fitted advance has converged on the rounded linear
+  advance per §5.7.4 criterion (a) `ppem ≥ 50 ∧ |Δ| ≤ 2 %` or (b)
+  exact equality; the §5.7.4 sentinel `yPels = 1` marks glyphs
+  without sidebearing instructions as "always scales linearly".
+  `numGlyphs` is cross-checked against `maxp` at parse time so a
+  mismatch is rejected as `BadStructure` instead of silently
+  truncating per-glyph lookups; trailing 4-byte sfnt padding is
+  tolerated. `Font::ltsh_threshold(gid)` returns the recorded ppem,
+  `Font::ltsh_linearly_scales_at_ppem(gid, ppem)` honours the
+  `ppem ≥ yPels[gid]` inequality and falls through to `false` for
+  fonts without `LTSH` — §5.7.4's prescription is to grid-fit in
+  that case, which is what the predicate signals; `LtshTable::
+  all_always_linear()` short-circuits the "every glyph carries the
+  sentinel" common case for rasterisers that want to skip per-glyph
+  probing. §5.7.4 names `hdmx` and `vdmx` as the complementary
+  precomputed-advance methods; those tables remain out-of-scope).
 - `name` table: full accessor API beyond family / full name — the
   registered nameID registry (`name_id` constants), typed accessors
   (subfamily, PostScript, version, copyright, trademark, manufacturer,

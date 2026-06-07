@@ -7,6 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — `LTSH` table parser + per-glyph linear-threshold accessors (2026-06-07)
+
+New [`tables::ltsh::LtshTable`] decoder for the optional `LTSH` (linear
+threshold) table per ISO/IEC 14496-22:2019 §5.7.4. The on-wire shape is
+a 4-byte header (`uint16 version`, `uint16 numGlyphs`) followed by a
+`uint8 yPels[numGlyphs]` array recording the lowest pixel-per-em size at
+which each glyph's grid-fitted advance width has converged on the
+rounded linear advance — i.e. the threshold at which a rasteriser may
+round the design-unit advance arithmetically without scan-converting.
+The §5.7.4 sentinel `1` (`LTSH_ALWAYS_LINEAR`) flags glyphs without
+instructions on their sidebearings (always linear at every ppem).
+
+The parser cross-checks `LTSH.numGlyphs` against `maxp.numGlyphs` per
+the §5.7.4 invariant so a truncating or over-reading mismatch is
+rejected as `Error::BadStructure` rather than silently corrupting
+per-glyph lookups. Unknown header versions are likewise rejected;
+trailing pad bytes (sfnt records align to 4-byte boundaries) are
+tolerated.
+
+New public surface on [`Font`]:
+
+- [`Font::has_ltsh`] — presence test.
+- [`Font::ltsh_table`] — borrow the parsed table.
+- [`Font::ltsh_threshold`] — per-glyph `Option<u8>` accessor returning
+  the recorded threshold ppem.
+- [`Font::ltsh_linearly_scales_at_ppem`] — `bool` predicate honouring
+  the §5.7.4 `ppem >= yPels[gid]` inequality; returns `false` when
+  the glyph is below threshold, when `glyph_id` is out of range, or
+  when the font ships no `LTSH` table (in which case §5.7.4 prescribes
+  grid-fitting).
+
+Table-level helpers exposed on [`LtshTable`]:
+
+- [`LtshTable::is_always_linear`] — typed check for the §5.7.4 `yPels =
+  1` sentinel.
+- [`LtshTable::all_always_linear`] — short-circuit predicate for the
+  common "every glyph linear at every ppem" case.
+- [`LtshTable::linear_threshold`] / [`LtshTable::y_pels`] /
+  [`LtshTable::num_glyphs`] / [`LtshTable::version_raw`].
+
+`LTSH` is the third of three complementary methods §5.7.4 cites for
+side-stepping the small-ppem grid-fit speed problem; the table is a
+hint for shapers that want to short-circuit advance-width scan-convert
+at large ppem and grid-fit at small ppem. `hdmx` (precomputed
+horizontal advances at selected ppem sizes) and `vdmx` (vertical
+analogue) remain out-of-scope.
+
 ### Added — `post` table v1.0 / v2.0 / v2.5 / v3.0 structural decode + per-glyph PostScript name accessors (2026-06-06)
 
 Extended the previously header-only `post` decoder to cover every

@@ -58,9 +58,9 @@ use crate::tables::{
     colr::ColrTable, cpal::CpalTable, fvar::FvarTable, gasp::GaspTable, gdef::GdefTable,
     glyf::GlyfTable, gpos::GposTable, gsub::GsubTable, gvar::GvarTable, head::HeadTable,
     hhea::HheaTable, hmtx::HmtxTable, hvar::HvarTable, kern::KernTable, loca::LocaTable,
-    maxp::MaxpTable, mvar::MvarTable, name::NameTable, os2::Os2Table, post::PostTable,
-    sbix::SbixTable, stat::StatTable, vhea::VheaTable, vmtx::VmtxTable, vorg::VorgTable,
-    vvar::VvarTable,
+    ltsh::LtshTable, maxp::MaxpTable, mvar::MvarTable, name::NameTable, os2::Os2Table,
+    post::PostTable, sbix::SbixTable, stat::StatTable, vhea::VheaTable, vmtx::VmtxTable,
+    vorg::VorgTable, vvar::VvarTable,
 };
 
 pub use outline::{BBox, Contour, Point, TtOutline};
@@ -82,6 +82,7 @@ pub use tables::gpos::{CursiveAttachment, PosRecord, PosValue};
 pub use tables::gsub::GsubFeature;
 pub use tables::hvar::DeltaSetIndexMap;
 pub use tables::kern::HeaderVariant as KernHeaderVariant;
+pub use tables::ltsh::{LTSH_ALWAYS_LINEAR, LTSH_TABLE_TAG, LTSH_VERSION_0};
 pub use tables::mvar::ItemVariationStore;
 pub use tables::name::{name_id, platform, NameRecord};
 pub use tables::post::{
@@ -255,6 +256,15 @@ pub struct Font<'a> {
     /// callers that drive a font rasteriser and want to pick the
     /// font-author-recommended hinting policy at a given pixel size.
     gasp: Option<GaspTable>,
+    /// Linear threshold table (`LTSH`, ISO/IEC 14496-22:2019 §5.7.4).
+    /// Optional; carries one byte per glyph recording the lowest ppem
+    /// at which the grid-fitted advance width has converged on the
+    /// rounded linear advance, so a rasteriser at or above that ppem
+    /// can round the linear advance arithmetically without scan-
+    /// converting the glyph. The §5.7.4 sentinel `1` means "always
+    /// scales linearly" (the glyph carries no instructions on its
+    /// sidebearings).
+    ltsh: Option<LtshTable>,
     /// Current user-space coordinate vector, one per axis (defaults
     /// to each axis's `default` value when `fvar` is present, empty
     /// vec otherwise). `set_variation_coords` updates this; the
@@ -391,6 +401,14 @@ impl<'a> Font<'a> {
         let base = dir.find(b"BASE", bytes).map(BaseTable::parse).transpose()?;
         let gasp = dir.find(b"gasp", bytes).map(GaspTable::parse).transpose()?;
         let vorg = dir.find(b"VORG", bytes).map(VorgTable::parse).transpose()?;
+        // §5.7.4 says `LTSH.numGlyphs` "should be the same as the
+        // numGlyphs field in the 'maxp' table". A mismatch would either
+        // truncate or over-read the per-glyph lookups, so cross-check
+        // at parse time and reject as `BadStructure`.
+        let ltsh = dir
+            .find(b"LTSH", bytes)
+            .map(|s| LtshTable::parse_with_glyph_count(s, maxp.num_glyphs))
+            .transpose()?;
         let var_coords = match fvar.as_ref() {
             Some(f) => f.axes().iter().map(|a| a.default).collect(),
             None => Vec::new(),
@@ -429,6 +447,7 @@ impl<'a> Font<'a> {
             stat,
             base,
             gasp,
+            ltsh,
             var_coords,
         })
     }
@@ -978,6 +997,43 @@ impl<'a> Font<'a> {
     /// default policy.
     pub fn gasp_behavior_for_ppem(&self, ppem: u16) -> Option<&GaspRange> {
         self.gasp.as_ref()?.behavior_for_ppem(ppem)
+    }
+
+    /// `true` when the font ships an `LTSH` table (ISO/IEC 14496-22:2019
+    /// §5.7.4). Absent in most fonts; rasterisers without one always
+    /// grid-fit (or consult `hdmx` / `vdmx` if those are present
+    /// instead) to find each glyph's true advance width.
+    pub fn has_ltsh(&self) -> bool {
+        self.ltsh.is_some()
+    }
+
+    /// Borrow the parsed `LTSH` table when present. Carries the
+    /// per-glyph `yPels` array recording each glyph's linear-threshold
+    /// ppem per §5.7.4.
+    pub fn ltsh_table(&self) -> Option<&LtshTable> {
+        self.ltsh.as_ref()
+    }
+
+    /// Lowest ppem at which the grid-fitted advance for `glyph_id` has
+    /// converged on the rounded linear advance per §5.7.4 — i.e. the
+    /// rasteriser may round the design-unit advance to integer pixels
+    /// at every ppem at least the returned value. Returns `None` when
+    /// the font ships no `LTSH` table or `glyph_id` is out of range.
+    pub fn ltsh_threshold(&self, glyph_id: u16) -> Option<u8> {
+        self.ltsh.as_ref()?.linear_threshold(glyph_id)
+    }
+
+    /// `true` when `glyph_id` is safe to advance-scale linearly at
+    /// `ppem` per §5.7.4 — i.e. `ppem >= LTSH.yPels[glyph_id]`. When
+    /// the font ships no `LTSH` table, returns `false` so the caller
+    /// falls back to grid-fitting (which is what §5.7.4 also prescribes
+    /// for fonts without an `LTSH`). Returns `false` for out-of-range
+    /// `glyph_id`.
+    pub fn ltsh_linearly_scales_at_ppem(&self, glyph_id: u16, ppem: u16) -> bool {
+        match self.ltsh.as_ref() {
+            Some(t) => t.linearly_scales_at_ppem(glyph_id, ppem),
+            None => false,
+        }
     }
 
     /// Glyph bounding box from the `glyf` header (xMin/yMin/xMax/yMax).

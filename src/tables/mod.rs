@@ -25,6 +25,7 @@ pub mod hmtx;
 pub mod hvar;
 pub mod kern;
 pub mod loca;
+pub mod ltsh;
 pub mod maxp;
 pub mod mvar;
 pub mod name;
