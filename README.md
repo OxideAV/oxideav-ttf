@@ -96,7 +96,29 @@ ligatures and kerning.
   all_always_linear()` short-circuits the "every glyph carries the
   sentinel" common case for rasterisers that want to skip per-glyph
   probing. §5.7.4 names `hdmx` and `vdmx` as the complementary
-  precomputed-advance methods; those tables remain out-of-scope).
+  precomputed-advance methods; `hdmx` landed alongside this round
+  (see below), `vdmx` remains out-of-scope),
+  `hdmx` (horizontal device metrics, ISO/IEC 14496-22:2019 §5.7.2 —
+  the 8-byte header (`uint16 version`, `int16 numRecords`,
+  `int32 sizeDeviceRecord`) plus `numRecords` device records, each
+  carrying `uint8 pixelSize` + `uint8 maxWidth` + `uint8 widths[numGlyphs]`
+  and padded to the long-word-aligned per-record stride. Each record
+  publishes the grid-fitted integer-pixel advance widths of every
+  glyph at a single recorded ppem so a rasteriser can short-circuit
+  scan-converting at one of those sizes. Per-record `widths[]` length
+  is cross-checked against `maxp.numGlyphs` at parse time (under-
+  sized `sizeDeviceRecord` rejected as `BadStructure`); the §5.7.2
+  "sorted by pixel size" invariant is enforced as strict-monotonic
+  increase so a corrupted record cannot shadow later ones;
+  `sizeDeviceRecord` is honoured as the stride so writers that
+  long-align past the minimum body still decode with the trailing
+  bytes ignored. `Font::hdmx_advance_pixels(gid, ppem)` is the
+  per-`(glyph, ppem)` accessor; §5.7.2 has no "nearest neighbour"
+  rule so an unrecorded ppem returns `None` and the caller falls
+  back to scan-converting. `Font::hdmx_recorded_ppem_sizes()` lists
+  the recorded sizes in ascending order. §7.3.5 forbids `hdmx` in
+  variable fonts — we parse it whenever present and leave the
+  cross-check to the caller),
 - `name` table: full accessor API beyond family / full name — the
   registered nameID registry (`name_id` constants), typed accessors
   (subfamily, PostScript, version, copyright, trademark, manufacturer,

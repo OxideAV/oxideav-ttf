@@ -7,6 +7,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — `hdmx` table parser + per-(glyph, ppem) device-metrics accessors (2026-06-08)
+
+New [`tables::hdmx::HdmxTable`] decoder for the optional `hdmx`
+(horizontal device metrics) table per ISO/IEC 14496-22:2019 §5.7.2.
+The on-wire shape is an 8-byte header (`uint16 version`,
+`int16 numRecords`, `int32 sizeDeviceRecord`) followed by
+`numRecords` device records, each carrying `uint8 pixelSize` +
+`uint8 maxWidth` + `uint8 widths[numGlyphs]` and padded with zeros
+to the long-word-aligned per-record stride declared in
+`sizeDeviceRecord`. Each record publishes the grid-fitted
+integer-pixel advance widths of every glyph at one selected ppem
+size, so a rasteriser at one of the recorded sizes can short-
+circuit scan-converting to learn an advance width.
+
+`hdmx` is the precomputed-advance counterpart to `LTSH`: where
+`LTSH` records the threshold ppem at which the grid-fit advance
+converges with the rounded linear advance (`yPels[]`), `hdmx`
+records the actual integer-pixel advance at a handful of fixed ppem
+sizes. §5.7.4 names the two tables as complementary speed-up
+mechanisms for the same problem; both now decode in this crate.
+
+The parser:
+
+- cross-checks each record's `widths[]` length against
+  `maxp.numGlyphs` per §5.7.2's "numGlyphs is from the 'maxp' table" —
+  an undersized `sizeDeviceRecord` is rejected as
+  `Error::BadStructure` rather than silently walking off the end of
+  the per-glyph array;
+- honours `sizeDeviceRecord` as the per-record stride so a font that
+  long-aligns aggressively past the minimum-spec body still decodes,
+  with the unknown trailing bytes ignored;
+- enforces §5.7.2's "This table is sorted by pixel size" with a
+  strict-monotonic `pixelSize` check, so corrupted records cannot
+  shadow each other under per-ppem lookup;
+- rejects negative `numRecords` and unknown header versions.
+
+New public surface on [`Font`]:
+
+- [`Font::has_hdmx`] — presence test.
+- [`Font::hdmx_table`] — borrow the parsed table.
+- [`Font::hdmx_advance_pixels`] — per-`(glyph_id, ppem)` accessor
+  returning the recorded integer-pixel advance. §5.7.2 has no
+  "nearest-neighbour" rule — an unrecorded ppem returns `None` and
+  the caller falls back to scan-converting.
+- [`Font::hdmx_recorded_ppem_sizes`] — `Vec<u8>` of recorded ppem
+  values in ascending order.
+
+[`HdmxTable`] further exposes [`HdmxTable::record_for_ppem`]
+(binary-search lookup) and the [`HdmxRecord`] accessor trio
+[`HdmxRecord::widths`] / [`HdmxRecord::max_width`] /
+[`HdmxRecord::pixel_size`] so callers walking the device-record
+array can introspect each entry.
+
+`hdmx` is forbidden by §7.3.5 in variable fonts; we parse it
+whenever it is present and leave the cross-check to the caller
+(`Font::is_variable`).
+
+Tests cover the empty-record table, single-record tables, multi-
+record tables with the recommended long-aligned stride, the §5.7.2
+sort-violation rejection, the under-sized-stride rejection, the
+mismatched-`numGlyphs` rejection at the `Font` parse path, and the
+exact-ppem-only lookup semantics against an absent-`hdmx` fixture
+trio (DejaVu Sans Mono / DejaVu Sans / Inter).
+
 ### Added — `LTSH` table parser + per-glyph linear-threshold accessors (2026-06-07)
 
 New [`tables::ltsh::LtshTable`] decoder for the optional `LTSH` (linear

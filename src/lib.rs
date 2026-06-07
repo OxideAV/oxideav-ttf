@@ -56,11 +56,11 @@ use crate::parser::TableDirectory;
 use crate::tables::{
     avar::AvarTable, base::BaseTable, cbdt::CbdtTable, cblc::CblcTable, cmap::CmapTable,
     colr::ColrTable, cpal::CpalTable, fvar::FvarTable, gasp::GaspTable, gdef::GdefTable,
-    glyf::GlyfTable, gpos::GposTable, gsub::GsubTable, gvar::GvarTable, head::HeadTable,
-    hhea::HheaTable, hmtx::HmtxTable, hvar::HvarTable, kern::KernTable, loca::LocaTable,
-    ltsh::LtshTable, maxp::MaxpTable, mvar::MvarTable, name::NameTable, os2::Os2Table,
-    post::PostTable, sbix::SbixTable, stat::StatTable, vhea::VheaTable, vmtx::VmtxTable,
-    vorg::VorgTable, vvar::VvarTable,
+    glyf::GlyfTable, gpos::GposTable, gsub::GsubTable, gvar::GvarTable, hdmx::HdmxTable,
+    head::HeadTable, hhea::HheaTable, hmtx::HmtxTable, hvar::HvarTable, kern::KernTable,
+    loca::LocaTable, ltsh::LtshTable, maxp::MaxpTable, mvar::MvarTable, name::NameTable,
+    os2::Os2Table, post::PostTable, sbix::SbixTable, stat::StatTable, vhea::VheaTable,
+    vmtx::VmtxTable, vorg::VorgTable, vvar::VvarTable,
 };
 
 pub use outline::{BBox, Contour, Point, TtOutline};
@@ -80,6 +80,9 @@ pub use tables::gasp::{
 };
 pub use tables::gpos::{CursiveAttachment, PosRecord, PosValue};
 pub use tables::gsub::GsubFeature;
+pub use tables::hdmx::{
+    HdmxRecord, HDMX_HEADER_LEN, HDMX_RECORD_HEADER_LEN, HDMX_TABLE_TAG, HDMX_VERSION_0,
+};
 pub use tables::hvar::DeltaSetIndexMap;
 pub use tables::kern::HeaderVariant as KernHeaderVariant;
 pub use tables::ltsh::{LTSH_ALWAYS_LINEAR, LTSH_TABLE_TAG, LTSH_VERSION_0};
@@ -265,6 +268,16 @@ pub struct Font<'a> {
     /// scales linearly" (the glyph carries no instructions on its
     /// sidebearings).
     ltsh: Option<LtshTable>,
+    /// Horizontal device metrics table (`hdmx`, ISO/IEC 14496-22:2019
+    /// §5.7.2). Optional; carries one device record per selected ppem,
+    /// each holding the per-glyph grid-fitted advance width in integer
+    /// pixels. The precomputed-advance counterpart to `LTSH`: instead
+    /// of recording when the grid-fit advance converges to the linear
+    /// advance, `hdmx` records the exact grid-fit advance for a fixed
+    /// set of ppem sizes. §7.3.5 forbids `hdmx` in variable fonts;
+    /// callers that want to honour that rule can cross-check
+    /// `is_variable()` before consulting these accessors.
+    hdmx: Option<HdmxTable>,
     /// Current user-space coordinate vector, one per axis (defaults
     /// to each axis's `default` value when `fvar` is present, empty
     /// vec otherwise). `set_variation_coords` updates this; the
@@ -409,6 +422,14 @@ impl<'a> Font<'a> {
             .find(b"LTSH", bytes)
             .map(|s| LtshTable::parse_with_glyph_count(s, maxp.num_glyphs))
             .transpose()?;
+        // §5.7.2 fixes the per-record `widths[]` length at
+        // `maxp.numGlyphs`. Cross-checking against `maxp.num_glyphs`
+        // at parse time rejects under-sized records (`UnexpectedEof`)
+        // and protects per-ppem lookups from over-reading the slice.
+        let hdmx = dir
+            .find(b"hdmx", bytes)
+            .map(|s| HdmxTable::parse(s, maxp.num_glyphs))
+            .transpose()?;
         let var_coords = match fvar.as_ref() {
             Some(f) => f.axes().iter().map(|a| a.default).collect(),
             None => Vec::new(),
@@ -448,6 +469,7 @@ impl<'a> Font<'a> {
             base,
             gasp,
             ltsh,
+            hdmx,
             var_coords,
         })
     }
@@ -1033,6 +1055,43 @@ impl<'a> Font<'a> {
         match self.ltsh.as_ref() {
             Some(t) => t.linearly_scales_at_ppem(glyph_id, ppem),
             None => false,
+        }
+    }
+
+    /// `true` when the font ships an `hdmx` table (ISO/IEC 14496-22:2019
+    /// §5.7.2). Optional table; absent in most fonts. §7.3.5 forbids
+    /// `hdmx` in variable fonts — a caller that wants to validate the
+    /// font shape may pair this with [`Self::is_variable`].
+    pub fn has_hdmx(&self) -> bool {
+        self.hdmx.is_some()
+    }
+
+    /// Borrow the parsed `hdmx` table when present. Carries the
+    /// per-ppem device records mapping each glyph to its grid-fitted
+    /// integer-pixel advance width at that ppem.
+    pub fn hdmx_table(&self) -> Option<&HdmxTable> {
+        self.hdmx.as_ref()
+    }
+
+    /// Grid-fitted advance width of `glyph_id` at the requested
+    /// `ppem`, in integer pixels, per §5.7.2. Returns `None` when the
+    /// font ships no `hdmx`, when the requested `ppem` is not in the
+    /// table's record array (§5.7.2 has no "round down" rule — the
+    /// caller falls back to scan-converting), or when `glyph_id`
+    /// exceeds the recorded per-glyph array. `ppem` is `u8` because
+    /// the on-wire field that drives the lookup is `uint8`; values
+    /// above 255 ppem are not representable in the table.
+    pub fn hdmx_advance_pixels(&self, glyph_id: u16, ppem: u8) -> Option<u8> {
+        self.hdmx.as_ref()?.advance_pixels(glyph_id, ppem)
+    }
+
+    /// The set of ppem sizes the font's `hdmx` table covers, in
+    /// ascending order. Returns an empty `Vec` when no `hdmx` is
+    /// present.
+    pub fn hdmx_recorded_ppem_sizes(&self) -> Vec<u8> {
+        match self.hdmx.as_ref() {
+            Some(t) => t.recorded_ppem_sizes(),
+            None => Vec::new(),
         }
     }
 
