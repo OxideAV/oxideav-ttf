@@ -58,9 +58,9 @@ use crate::tables::{
     colr::ColrTable, cpal::CpalTable, fvar::FvarTable, gasp::GaspTable, gdef::GdefTable,
     glyf::GlyfTable, gpos::GposTable, gsub::GsubTable, gvar::GvarTable, hdmx::HdmxTable,
     head::HeadTable, hhea::HheaTable, hmtx::HmtxTable, hvar::HvarTable, kern::KernTable,
-    loca::LocaTable, ltsh::LtshTable, maxp::MaxpTable, mvar::MvarTable, name::NameTable,
-    os2::Os2Table, post::PostTable, sbix::SbixTable, stat::StatTable, vdmx::VdmxTable,
-    vhea::VheaTable, vmtx::VmtxTable, vorg::VorgTable, vvar::VvarTable,
+    loca::LocaTable, ltsh::LtshTable, maxp::MaxpTable, meta::MetaTable, mvar::MvarTable,
+    name::NameTable, os2::Os2Table, post::PostTable, sbix::SbixTable, stat::StatTable,
+    vdmx::VdmxTable, vhea::VheaTable, vmtx::VmtxTable, vorg::VorgTable, vvar::VvarTable,
 };
 
 pub use outline::{BBox, Contour, Point, TtOutline};
@@ -86,6 +86,11 @@ pub use tables::hdmx::{
 pub use tables::hvar::DeltaSetIndexMap;
 pub use tables::kern::HeaderVariant as KernHeaderVariant;
 pub use tables::ltsh::{LTSH_ALWAYS_LINEAR, LTSH_TABLE_TAG, LTSH_VERSION_0};
+pub use tables::meta::{
+    is_valid_meta_tag, script_lang_tags, MetaRecord, ScriptLangTag, META_DATA_MAP_LEN,
+    META_HEADER_LEN, META_TABLE_TAG, META_TAG_APPL, META_TAG_BILD, META_TAG_DLNG, META_TAG_SLNG,
+    META_VERSION_1,
+};
 pub use tables::mvar::ItemVariationStore;
 pub use tables::name::{name_id, platform, NameRecord};
 pub use tables::post::{
@@ -295,6 +300,12 @@ pub struct Font<'a> {
     /// in variable fonts; callers can cross-check `is_variable()`
     /// before consulting these accessors.
     vdmx: Option<VdmxTable>,
+    /// Metadata table (`meta`, ISO/IEC 14496-22:2019 §5.7.6). Optional;
+    /// carries a tagged DataMap array whose payloads describe font-wide
+    /// metadata in either UTF-8 text (`'dlng'`, `'slng'`) or vendor-
+    /// defined binary form. Records borrow from the on-wire `meta`
+    /// byte slice — the table itself does not copy the payload data.
+    meta: Option<MetaTable<'a>>,
     /// Current user-space coordinate vector, one per axis (defaults
     /// to each axis's `default` value when `fvar` is present, empty
     /// vec otherwise). `set_variation_coords` updates this; the
@@ -454,6 +465,12 @@ impl<'a> Font<'a> {
         // extents indexed by ppem only, not per-glyph data. `parse`
         // enforces the §5.7.8 sort + sentinel invariants.
         let vdmx = dir.find(b"VDMX", bytes).map(VdmxTable::parse).transpose()?;
+        // §5.7.6 metadata table — header + DataMap array indexed by
+        // four-character ASCII tags. The data payloads sit later in
+        // the same byte slice and `MetaRecord::payload` borrows from
+        // there; the `'a` lifetime of `Font<'a>` therefore covers
+        // every payload exposed through `meta_*` accessors.
+        let meta = dir.find(b"meta", bytes).map(MetaTable::parse).transpose()?;
         let var_coords = match fvar.as_ref() {
             Some(f) => f.axes().iter().map(|a| a.default).collect(),
             None => Vec::new(),
@@ -495,6 +512,7 @@ impl<'a> Font<'a> {
             ltsh,
             hdmx,
             vdmx,
+            meta,
             var_coords,
         })
     }
@@ -1165,6 +1183,50 @@ impl<'a> Font<'a> {
     /// when present), or `None` otherwise.
     pub fn vdmx_y_extent_square(&self, ppem: u16) -> Option<(i16, i16)> {
         self.vdmx_y_extent_for_device(ppem, 1, 1)
+    }
+
+    /// `true` when the font ships a `meta` (Metadata) table per
+    /// ISO/IEC 14496-22:2019 §5.7.6.
+    pub fn has_meta(&self) -> bool {
+        self.meta.is_some()
+    }
+
+    /// Borrow the parsed `meta` table when present.
+    ///
+    /// The returned [`MetaTable`] carries the §5.7.6 DataMap array;
+    /// per-record payloads borrow from the on-wire `meta` byte slice
+    /// for the lifetime of the [`Font`].
+    pub fn meta_table(&self) -> Option<&MetaTable<'a>> {
+        self.meta.as_ref()
+    }
+
+    /// First `meta` DataMap record whose tag equals `tag`, or
+    /// `None`. §5.7.6.1's closing paragraph permits multiple records
+    /// for the same tag but specifies that "any instances after the
+    /// first may be ignored" for single-record tags; this accessor
+    /// honours that rule by returning the first match. Callers that
+    /// want every record for a duplicated tag should iterate
+    /// [`MetaTable::records`] directly.
+    pub fn meta_record(&self, tag: &[u8; 4]) -> Option<MetaRecord<'_>> {
+        self.meta.as_ref()?.record(tag)
+    }
+
+    /// Design-language declaration from the `meta` table's `'dlng'`
+    /// record (ISO/IEC 14496-22:2019 §5.7.6.2), if present and
+    /// well-formed UTF-8. The value is a comma-separated list of
+    /// ScriptLangTags identifying the languages or scripts the font
+    /// was primarily designed for.
+    pub fn meta_design_languages(&self) -> Option<&'a str> {
+        self.meta.as_ref()?.design_languages()
+    }
+
+    /// Supported-language declaration from the `meta` table's
+    /// `'slng'` record (ISO/IEC 14496-22:2019 §5.7.6.2), if present
+    /// and well-formed UTF-8. Used to declare languages or scripts
+    /// the font is capable of supporting (a superset of
+    /// [`Self::meta_design_languages`] in typical use).
+    pub fn meta_supported_languages(&self) -> Option<&'a str> {
+        self.meta.as_ref()?.supported_languages()
     }
 
     /// Glyph bounding box from the `glyf` header (xMin/yMin/xMax/yMax).

@@ -7,6 +7,102 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — `meta` metadata-table parser + `'dlng'` / `'slng'` accessors + ScriptLangTag splitter (2026-06-08)
+
+New [`tables::meta::MetaTable`] decoder for the optional `meta`
+(metadata) table per ISO/IEC 14496-22:2019 §5.7.6. The on-wire
+shape is a 16-byte header (`uint32 version`, `uint32 flags`,
+`uint32 reserved`, `uint32 dataMapsCount`) followed by a
+`DataMap[dataMapsCount]` array of `(Tag tag, Offset32 dataOffset,
+uint32 dataLength)` records and the payload bytes themselves
+(referenced from the DataMap offsets). The table is the
+OpenType-level grab-bag for font-wide key/value metadata pairs
+keyed by four-character ASCII tags.
+
+The §5.7.6.2 tag-character class is enforced at parse time
+through [`is_valid_meta_tag`]: tags begin with a letter
+(`0x41..=0x5A` / `0x61..=0x7A`), use only letters / digits
+(`0x30..=0x39`) / trailing spaces (`0x20`), and reject inner
+spaces. Vendor-private tags (uppercase + digits per §5.7.6.2
+paragraph 4) pass the same grammar so the parser does not need
+a second pass for them.
+
+The parser:
+
+- enforces `version == 1` per §5.7.6.1 ("set to 1") and
+  `flags == 0` per the spec's "currently unused" mandate;
+- surfaces the `reserved` field through [`MetaTable::reserved`]
+  rather than gating parsing on it — §5.7.6.1's NOTE acknowledges
+  that legacy Apple TrueType fonts may carry a non-zero data
+  offset there;
+- validates that every `DataMap.dataOffset + dataLength` slice
+  fits inside the on-wire `meta` byte range, rejecting any
+  out-of-range entry as `BadStructure`;
+- caps `dataMapsCount` at 1024 to match the directory-level cap
+  on sfnt tables (a malformed table cannot allocate an
+  arbitrarily large record vector);
+- preserves document order in [`MetaTable::records`] — §5.7.6
+  does not impose a sort order, and surfacing the on-wire order
+  lets tooling round-trip the table without churn.
+
+Two registered tags are first-class on the [`crate::Font`]
+boundary:
+
+- `'dlng'` (Design languages, §5.7.6.2) — exposed through
+  [`Font::meta_design_languages`] which returns the payload as a
+  UTF-8 string when present and well-formed (the spec restricts
+  the encoding to Basic Latin / ASCII so UTF-8 validation is the
+  appropriate filter).
+- `'slng'` (Supported languages, §5.7.6.2) — exposed through
+  [`Font::meta_supported_languages`] with the same UTF-8 contract.
+
+[`Font::meta_record`] returns the first record whose tag equals
+the supplied tag — honouring §5.7.6.1's closing paragraph ("If
+only one record or value is permitted for a tag, then any
+instances after the first may be ignored.") — and
+[`Font::meta_table`] surfaces the full parsed table for callers
+that want to walk every record themselves.
+
+The §5.7.6.3 ScriptLangTag value format (`[language "-"] script
+["-" region] *("-" variant) *("-" extension) ["-" privateuse]`)
+is supported through a free-function helper [`script_lang_tags`]
+that splits a comma-separated payload into the individual
+[`ScriptLangTag`] values, trims surrounding whitespace, discards
+empty fragments and non-ASCII fragments per the §5.7.6.3
+"any ScriptLangTag value not conforming to these specifications
+is ignored" rule, and rejects leading / trailing / doubled
+hyphens (each of which would produce an empty subtag against the
+spec's BNF). Deeper validation (IANA Language Subtag Registry,
+ISO 15924 script subtags) is deliberately left to the caller —
+those registries change on a cadence independent of the on-wire
+format and pulling them into the parser would couple it to a
+moving target.
+
+Constants surfaced for callers / round-trippers:
+[`META_VERSION_1`], [`META_HEADER_LEN`], [`META_DATA_MAP_LEN`],
+[`META_TABLE_TAG`], [`META_TAG_DLNG`], [`META_TAG_SLNG`],
+[`META_TAG_APPL`] (reserved — used by Apple), [`META_TAG_BILD`]
+(reserved — used by Apple).
+
+Coverage: 26 unit tests covering the §5.7.6.1 header invariants
+(version / flags / reserved-tolerance / dataMapsCount cap /
+truncated-array rejection / out-of-range payload rejection /
+offset + length overflow rejection), the §5.7.6.2 tag character
+class (letter-led / inner-space rejection / non-alphanumeric
+rejection / short-tag-with-trailing-space acceptance),
+shared-payload aliasing between two records, document-order
+preservation, and the §5.7.6.3 ScriptLangTag splitter across
+the worked-example patterns (`Latn`, `Latn, Cyrl, Grek`,
+`sr-Cyrl, en-Dsrt, Hant-HK`), plus its rejection rules. 5
+integration tests covering the absent path across the four
+shipped fixtures (DejaVu Sans Mono / DejaVu Sans / Inter
+Variable / Noto Sans Arabic — none ship a `meta` table per
+§5.7.6 "optional") and a synthesised minimal TrueType font that
+carries `'dlng'` + `'slng'` + a vendor-private record, exercising
+the round-trip through the [`crate::Font`] accessors and
+confirming that a version-2 header is caught at
+`Font::from_bytes` rather than silently surfaced.
+
 ### Added — `VDMX` table parser + per-(ppem, aspect-ratio) y-extent accessors (2026-06-08)
 
 New [`tables::vdmx::VdmxTable`] decoder for the optional `VDMX`

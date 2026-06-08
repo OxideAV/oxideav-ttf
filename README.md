@@ -150,6 +150,41 @@ ligatures and kerning.
   §7.3.5 forbids `VDMX` in variable fonts — we parse it whenever
   present and leave the cross-check to the caller, matching the
   `hdmx` policy),
+  `meta` (metadata table, ISO/IEC 14496-22:2019 §5.7.6 — the
+  16-byte header (`uint32 version`, `uint32 flags`, `uint32
+  reserved`, `uint32 dataMapsCount`) plus a sorted-by-disk-order
+  `DataMap[dataMapsCount]` array of `(Tag, Offset32 dataOffset,
+  uint32 dataLength)` records and the payload bytes themselves.
+  The table is the OpenType-level grab-bag for font-wide key/value
+  metadata pairs keyed by four-character ASCII tags. §5.7.6.2
+  reserves two registered tags — `'dlng'` (design languages) and
+  `'slng'` (supported languages), both UTF-8 ASCII text with
+  §5.7.6.3-grammar comma-separated ScriptLangTag values — and two
+  Apple-reserved tags (`'appl'`, `'bild'`); vendor-private tags
+  follow the §5.7.6.2 paragraph 4 uppercase + digit grammar. The
+  parser enforces `version == 1` per §5.7.6.1, `flags == 0` per
+  the spec's "currently unused" mandate, the §5.7.6.2 tag
+  character class (letter-led, letters / digits / trailing spaces
+  only) at every DataMap.tag, the in-bounds invariant on every
+  `dataOffset + dataLength` slice (out-of-range payload rejected
+  as `BadStructure`), and caps `dataMapsCount` at 1024 to bound
+  worst-case allocation. The `reserved` field is surfaced rather
+  than validated — §5.7.6.1's NOTE acknowledges that legacy Apple
+  TrueType fonts may carry a non-zero data offset there. Document
+  order is preserved in `MetaTable::records()` so tooling can
+  round-trip the table without re-sorting. `Font::has_meta()` and
+  `Font::meta_table()` expose the parsed table; `Font::meta_record(tag)`
+  returns the first record matching a tag (honouring §5.7.6.1's
+  "any instances after the first may be ignored" rule for the
+  registered single-record tags); `Font::meta_design_languages()`
+  and `Font::meta_supported_languages()` are convenience
+  accessors that decode `'dlng'` / `'slng'` payloads as UTF-8
+  text. A free-function `script_lang_tags(payload)` splits a
+  `'dlng'` / `'slng'` value into the §5.7.6.3 ScriptLangTag
+  fragments — comma-separated, trimmed, non-empty, ASCII-only,
+  and rejecting leading / trailing / doubled hyphens per the
+  spec's BNF; deeper validation against the IANA Language Subtag
+  Registry and ISO 15924 stays in the caller),
 - `name` table: full accessor API beyond family / full name — the
   registered nameID registry (`name_id` constants), typed accessors
   (subfamily, PostScript, version, copyright, trademark, manufacturer,
