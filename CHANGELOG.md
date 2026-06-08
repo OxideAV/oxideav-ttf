@@ -7,6 +7,87 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — `VDMX` table parser + per-(ppem, aspect-ratio) y-extent accessors (2026-06-08)
+
+New [`tables::vdmx::VdmxTable`] decoder for the optional `VDMX`
+(vertical device metrics) table per ISO/IEC 14496-22:2019 §5.7.8.
+The on-wire shape is a 6-byte header (`uint16 version`,
+`uint16 numRecs`, `uint16 numRatios`) followed by a
+`RatioRange[numRatios]` aspect-ratio selector array, a parallel
+`Offset16[numRatios]` array binding each ratio to a VDMX group,
+and the VDMX groups themselves: each group is a 4-byte
+`(recs, startsz, endsz)` header followed by a sorted
+`vTable[recs]` array of `(yPelHeight, yMax, yMin)` tuples giving
+the font-wide vertical pel envelope at each recorded ppem.
+
+`VDMX` is the precomputed-vertical-envelope counterpart to `hdmx`'s
+precomputed-advance-width table: where `hdmx` records each glyph's
+grid-fit advance at a fixed set of ppem sizes, `VDMX` records the
+font-wide `(yMax, yMin)` extent at a (possibly per-aspect-ratio) ppem
+set so a rasteriser can pick a glyph-row bitmap height without
+grid-fitting every glyph in the font. §5.7.4 lists both as the
+precomputed-data solution to the speed problem `LTSH` addresses via
+its linear-scaling threshold; with this round, all three landed in
+the crate.
+
+The parser:
+
+- accepts both versions 0 and 1 (the `bCharSet` semantics differ
+  but the numeric layout is identical; the raw byte is surfaced
+  through `RatioRange::char_set` for the caller to interpret per
+  its `VdmxTable::version_raw()`);
+- enforces strict-monotonic-increase on each group's `yPelHeight`
+  per §5.7.8 "sorted by yPelHeight" so a duplicate or out-of-order
+  record cannot silently shadow a later lookup;
+- validates the §5.7.8 sentinel rule: a `(xRatio=0, yStartRatio=0,
+  yEndRatio=0)` RatioRange record may only appear as the last
+  entry ("if present, this must be the last Ratio group in the
+  table"); a sentinel anywhere else is rejected as `BadStructure`;
+- canonicalises shared groups so two ratios pointing at one on-wire
+  group resolve to one parsed `VdmxGroup`, while the per-ratio
+  mapping is preserved through `group_for_ratio_index`;
+- rejects a zero `Offset16` entry as `BadStructure` so a corrupted
+  ratio array cannot alias to the table header.
+
+`Font` exposes the table through:
+
+- `Font::has_vdmx() -> bool`
+- `Font::vdmx_table() -> Option<&VdmxTable>` — full table for
+  callers that want to walk the groups themselves;
+- `Font::vdmx_y_extent_for_device(ppem: u16, device_x_ratio: u8,
+  device_y_ratio: u8) -> Option<(i16, i16)>` — runs the §5.7.8
+  first-match RatioRange walk and returns the matched group's
+  `(yMax, yMin)` at the requested ppem, or `None` for a
+  non-matching device (no `(0,0,0)` sentinel) or an unrecorded
+  ppem (§5.7.8 has no nearest-neighbour fallback);
+- `Font::vdmx_y_extent_square(ppem: u16) -> Option<(i16, i16)>` —
+  convenience shortcut for the common 1:1 lookup.
+
+§7.3.5 forbids `VDMX` in variable fonts; the parser still decodes
+the table whenever present, matching the `hdmx` policy. Callers
+can cross-check `Font::is_variable()` if they want to honour the
+spec.
+
+`yPelHeight` is `uint16`, so §5.7.8's closing note about per-record
+ppem reaching 65535 is honoured even though the RatioRange's
+`uint8` bracketing caps at 255 (the ratio array is only consulted
+for the per-ratio selector — the ppem-keyed lookup is unaffected).
+
+The `tables::vdmx` module ships 14 unit tests covering version
+acceptance, short-header / unknown-version / zero-count rejection,
+truncated offset / vTable bodies, the strict-monotonic sort
+invariant, the sentinel-position rule, shared-group canonicalisation,
+high-`yPelHeight` records, and the conceptual range-check predicate.
+A new `tests/vdmx.rs` integration suite ships 6 tests covering the
+"DejaVu Sans Mono / DejaVu Sans / Inter ship no `VDMX`" baseline
+plus a synthetic-font round-trip through `Font::vdmx_y_extent_*`,
+including the sentinel-catches-non-1:1 path and the
+zero-offset-rejected path.
+
+Spec: ISO/IEC 14496-22:2019 §5.7.8 ("VDMX – Vertical device
+metrics"), with cross-references to §5.7.4 (Linear threshold table)
+and §7.3.5 (HVAR — variable-font metrics replacement).
+
 ### Added — `hdmx` table parser + per-(glyph, ppem) device-metrics accessors (2026-06-08)
 
 New [`tables::hdmx::HdmxTable`] decoder for the optional `hdmx`

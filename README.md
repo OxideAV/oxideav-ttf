@@ -97,7 +97,7 @@ ligatures and kerning.
   sentinel" common case for rasterisers that want to skip per-glyph
   probing. §5.7.4 names `hdmx` and `vdmx` as the complementary
   precomputed-advance methods; `hdmx` landed alongside this round
-  (see below), `vdmx` remains out-of-scope),
+  (see below), `VDMX` also landed alongside this round (see below)),
   `hdmx` (horizontal device metrics, ISO/IEC 14496-22:2019 §5.7.2 —
   the 8-byte header (`uint16 version`, `int16 numRecords`,
   `int32 sizeDeviceRecord`) plus `numRecords` device records, each
@@ -119,6 +119,37 @@ ligatures and kerning.
   the recorded sizes in ascending order. §7.3.5 forbids `hdmx` in
   variable fonts — we parse it whenever present and leave the
   cross-check to the caller),
+  `VDMX` (vertical device metrics, ISO/IEC 14496-22:2019 §5.7.8 —
+  the 6-byte header (`uint16 version`, `uint16 numRecs`,
+  `uint16 numRatios`) plus a `RatioRange[numRatios]` aspect-ratio
+  selector array, a parallel `Offset16[numRatios]` array pointing
+  at one VDMX group per ratio, and the VDMX groups themselves: each
+  group is a 4-byte `(recs, startsz, endsz)` header followed by a
+  sorted `vTable[recs]` array of `(yPelHeight, yMax, yMin)` tuples
+  giving the font-wide vertical pel envelope at each recorded ppem.
+  Both versions 0 and 1 parse identically — `bCharSet` semantics
+  differ between them but the numeric layout doesn't, so the raw
+  byte is surfaced for the caller. The §5.7.8 "sorted by yPelHeight,
+  need not be continuous" rule is enforced as strict-monotonic
+  increase per group so a corrupted vTable cannot shadow later
+  records; the `(xRatio=0, yStartRatio=0, yEndRatio=0)` catch-all
+  sentinel is range-validated as the last RatioRange entry per
+  §5.7.8 ("if present, this must be the last Ratio group in the
+  table"); shared groups (two RatioRange entries pointing at one
+  on-wire group) deduplicate to one parsed `VdmxGroup` while the
+  per-ratio mapping is preserved so both ratios still resolve to
+  the shared records. `Font::vdmx_y_extent_for_device(ppem,
+  deviceXRatio, deviceYRatio)` runs the §5.7.8 "once a match is
+  found, the search stops" first-match RatioRange walk and returns
+  the matched group's `(yMax, yMin)` at the requested ppem, or
+  `None` for a non-matching device (no sentinel) or an unrecorded
+  ppem (no nearest-neighbour fallback); the `vdmx_y_extent_square`
+  shortcut hard-codes the common 1:1 lookup. yPelHeight is `uint16`
+  so the spec's note about per-record ppem reaching 65535 is
+  honoured even when RatioRange's `uint8` bracketing caps at 255.
+  §7.3.5 forbids `VDMX` in variable fonts — we parse it whenever
+  present and leave the cross-check to the caller, matching the
+  `hdmx` policy),
 - `name` table: full accessor API beyond family / full name — the
   registered nameID registry (`name_id` constants), typed accessors
   (subfamily, PostScript, version, copyright, trademark, manufacturer,

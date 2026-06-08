@@ -59,8 +59,8 @@ use crate::tables::{
     glyf::GlyfTable, gpos::GposTable, gsub::GsubTable, gvar::GvarTable, hdmx::HdmxTable,
     head::HeadTable, hhea::HheaTable, hmtx::HmtxTable, hvar::HvarTable, kern::KernTable,
     loca::LocaTable, ltsh::LtshTable, maxp::MaxpTable, mvar::MvarTable, name::NameTable,
-    os2::Os2Table, post::PostTable, sbix::SbixTable, stat::StatTable, vhea::VheaTable,
-    vmtx::VmtxTable, vorg::VorgTable, vvar::VvarTable,
+    os2::Os2Table, post::PostTable, sbix::SbixTable, stat::StatTable, vdmx::VdmxTable,
+    vhea::VheaTable, vmtx::VmtxTable, vorg::VorgTable, vvar::VvarTable,
 };
 
 pub use outline::{BBox, Contour, Point, TtOutline};
@@ -100,6 +100,11 @@ pub use tables::stat::{
     FLAG_OLDER_SIBLING_FONT_ATTRIBUTE as STAT_FLAG_OLDER_SIBLING_FONT_ATTRIBUTE,
     RANGE_MAX_POS_INFINITY as STAT_RANGE_MAX_POS_INFINITY,
     RANGE_MIN_NEG_INFINITY as STAT_RANGE_MIN_NEG_INFINITY,
+};
+pub use tables::vdmx::{
+    RatioRange as VdmxRatioRange, VdmxGroup, VdmxVTableRecord, VDMX_GROUP_HEADER_LEN,
+    VDMX_HEADER_LEN, VDMX_OFFSET_LEN, VDMX_RATIO_RECORD_LEN, VDMX_TABLE_TAG, VDMX_VERSION_0,
+    VDMX_VERSION_1, VDMX_VTABLE_RECORD_LEN,
 };
 pub use tables::vhea::{VHEA_VERSION_1_0, VHEA_VERSION_1_1};
 pub use tables::vorg::{VertOriginEntry, VORG_MAJOR_VERSION, VORG_MINOR_VERSION};
@@ -278,6 +283,18 @@ pub struct Font<'a> {
     /// callers that want to honour that rule can cross-check
     /// `is_variable()` before consulting these accessors.
     hdmx: Option<HdmxTable>,
+    /// Vertical device metrics table (`VDMX`, ISO/IEC 14496-22:2019
+    /// §5.7.8). Optional; carries one or more groups of vTable
+    /// records (`yPelHeight` → `(yMax, yMin)` pel envelope) indexed
+    /// via a per-aspect-ratio RatioRange array. The precomputed-extent
+    /// counterpart to `hdmx`'s per-glyph advance widths: instead of
+    /// publishing each glyph's grid-fitted advance, `VDMX` publishes
+    /// the font-wide vertical extent at a curated ppem set so a
+    /// rasteriser can pick a render bitmap height without
+    /// grid-fitting every glyph in the font. §7.3.5 forbids `VDMX`
+    /// in variable fonts; callers can cross-check `is_variable()`
+    /// before consulting these accessors.
+    vdmx: Option<VdmxTable>,
     /// Current user-space coordinate vector, one per axis (defaults
     /// to each axis's `default` value when `fvar` is present, empty
     /// vec otherwise). `set_variation_coords` updates this; the
@@ -430,6 +447,13 @@ impl<'a> Font<'a> {
             .find(b"hdmx", bytes)
             .map(|s| HdmxTable::parse(s, maxp.num_glyphs))
             .transpose()?;
+        // §5.7.8 describes a fixed-shape table: 6-byte header, then a
+        // RatioRange + Offset16 pair of arrays followed by VDMX groups
+        // referenced from those offsets. No per-glyph cross-check
+        // against `maxp` is needed — the table publishes font-wide
+        // extents indexed by ppem only, not per-glyph data. `parse`
+        // enforces the §5.7.8 sort + sentinel invariants.
+        let vdmx = dir.find(b"VDMX", bytes).map(VdmxTable::parse).transpose()?;
         let var_coords = match fvar.as_ref() {
             Some(f) => f.axes().iter().map(|a| a.default).collect(),
             None => Vec::new(),
@@ -470,6 +494,7 @@ impl<'a> Font<'a> {
             gasp,
             ltsh,
             hdmx,
+            vdmx,
             var_coords,
         })
     }
@@ -1093,6 +1118,53 @@ impl<'a> Font<'a> {
             Some(t) => t.recorded_ppem_sizes(),
             None => Vec::new(),
         }
+    }
+
+    /// `true` when the font ships a `VDMX` table (ISO/IEC 14496-22:2019
+    /// §5.7.8). Optional table; absent in most fonts. §7.3.5 forbids
+    /// `VDMX` in variable fonts — pair with [`Self::is_variable`] when
+    /// validating a font's shape.
+    pub fn has_vdmx(&self) -> bool {
+        self.vdmx.is_some()
+    }
+
+    /// Borrow the parsed `VDMX` table when present. Carries one or
+    /// more VDMX groups indexed via a per-aspect-ratio RatioRange
+    /// array; each group publishes per-ppem `(yMax, yMin)` envelopes
+    /// for the font as a whole.
+    pub fn vdmx_table(&self) -> Option<&VdmxTable> {
+        self.vdmx.as_ref()
+    }
+
+    /// `(yMax, yMin)` pel envelope for `(ppem, deviceXRatio,
+    /// deviceYRatio)`, per §5.7.8's first-match RatioRange search.
+    /// Returns `None` when the font ships no `VDMX`, when no
+    /// RatioRange matches the device pair (and there is no `(0,0,0)`
+    /// sentinel), or when the matched group does not record the
+    /// exact `ppem` requested (§5.7.8 "need not be continuous" — no
+    /// fallback to neighbouring records).
+    ///
+    /// For square-pixel screens the canonical call is
+    /// `vdmx_y_extent_for_device(ppem, 1, 1)`.
+    pub fn vdmx_y_extent_for_device(
+        &self,
+        ppem: u16,
+        device_x_ratio: u8,
+        device_y_ratio: u8,
+    ) -> Option<(i16, i16)> {
+        self.vdmx
+            .as_ref()?
+            .y_extent_for_device(ppem, device_x_ratio, device_y_ratio)
+    }
+
+    /// Convenience for the common square-pixel case: equivalent to
+    /// `vdmx_y_extent_for_device(ppem, 1, 1)`. Returns the `(yMax,
+    /// yMin)` pel envelope at `ppem` under the 1:1 RatioRange
+    /// (matching either the explicit `(xRatio=1, yStartRatio=1,
+    /// yEndRatio=1)` entry, or the `(0,0,0)` catch-all sentinel
+    /// when present), or `None` otherwise.
+    pub fn vdmx_y_extent_square(&self, ppem: u16) -> Option<(i16, i16)> {
+        self.vdmx_y_extent_for_device(ppem, 1, 1)
     }
 
     /// Glyph bounding box from the `glyf` header (xMin/yMin/xMax/yMax).
