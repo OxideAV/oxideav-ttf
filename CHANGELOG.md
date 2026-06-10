@@ -7,6 +7,73 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — `PCLT` PCL 5 table parser (2026-06-10)
+
+New [`tables::pclt::PcltTable`] decoder for the optional `PCLT`
+(PCL 5) table per ISO/IEC 14496-22:2019 §5.7.7. The on-wire shape
+is a fixed 54-byte struct ([`PCLT_TABLE_LEN`]): version pair,
+`uint32 FontNumber`, the `Pitch` / `xHeight` / `CapHeight`
+design-unit metrics, the packed `Style` / `TypeFamily` /
+`SymbolSet` words, the `Typeface[16]` / `CharacterComplement[8]` /
+`FileName[6]` fixed-size byte fields, and the `StrokeWeight` /
+`WidthType` / `SerifStyle` classification bytes plus a trailing
+`Reserved` pad. §5.7.7 deems the table "strongly discouraged for
+OFF fonts with TrueType outlines"; it survives in legacy faces,
+so the parser decodes it whenever present and leaves the
+deprecation policy to the caller.
+
+Typed accessors decode every packed field per the §5.7.7 prose:
+
+- **FontNumber** — `font_number_is_native()` reads the
+  most-significant native-vs-converted bit ("Only font vendors
+  should create fonts with this bit zeroed"),
+  `font_number_vendor_code()` the 7-bit HP-assigned vendor letter
+  (`A` Adobe, `B` Bitstream, `C` Agfa, `H` Bigelow & Holmes,
+  `L` Linotype, `M` Monotype), and
+  `font_number_vendor_assigned()` the low 24 vendor-assigned bits.
+- **Style** — `style_structure()` (bits 5–9, 0 = solid through
+  17 = inverse with border), `style_width()` (bits 2–4),
+  `style_posture()` (bits 0–1, 0 = upright / 1 = oblique-italic /
+  2 = alternate italic), with the reserved top 6 bits surfaced
+  through `style_reserved_bits()`.
+- **TypeFamily** — `type_family_vendor_code()` (bits 12–15, the
+  HP Boise Division vendor assignments) +
+  `type_family_code()` (bits 0–11).
+- **SymbolSet** — `symbol_set_number()` (top 11 bits) and
+  `symbol_set_id()` implementing "the value of the least
+  significant 5 bits, when added to 64, is the ASCII value of the
+  symbol set 'ID' field"; all eight §5.7.7 example values
+  round-trip in tests (629 → 19U, 394 → 12J, …).
+- **Typeface / FileName** — trailing-pad-trimmed `&str` accessors
+  with raw fixed-array fallbacks, plus `file_name_treatment()`
+  for the fourth FileName byte (the `R` / `I` / `B` / `J` …
+  treatment-flag character).
+- **CharacterComplement** — `character_complement()` as a
+  big-endian `u64`, `provides_collection(bit)` honouring the
+  cleared-bit-means-provided polarity established by the spec's
+  worked examples (Windows 3.1 "ANSI" = `0xFFFFFFFF37FFFFFE`
+  clearing bits 31 / 30 / 27) and the "Symbol set bound fonts
+  should have this field set to all F's (except bit 0)" rule,
+  and `is_unicode_indexed()` reading bit 0 per "Bit 0 must always
+  be cleared when the font elements are provided in Unicode
+  order".
+- **StrokeWeight / WidthType** — raw `i8` accessors with
+  `stroke_weight_is_valid()` / `width_type_is_valid()` range
+  checks against the §5.7.7 "Only values in the range -7 to 7
+  are valid" / "-5 to 5" sentences ([`PCLT_STROKE_WEIGHT_RANGE`]
+  / [`PCLT_WIDTH_TYPE_RANGE`]).
+- **SerifStyle** — `serif_style_value()` (bottom 6 bits) +
+  `serif_style_class()` (top 2 bits: 1 = Sans Serif/Monoline,
+  2 = Serif/Contrasting).
+
+`majorVersion != 1` is rejected as `BadStructure` per §5.7.7's
+"The current PCLT table version is 1.0"; `minorVersion` and the
+`Reserved` pad byte ("Should be set to zero") are surfaced raw.
+[`Font::has_pclt`] and [`Font::pclt_table`] expose the parsed
+table on the font boundary; integration tests cover the absent
+path on all three bundled fixture fonts and a synthetic
+TrueType-flavoured sfnt carrying a §5.7.7-example-shaped `PCLT`.
+
 ### Added — `meta` metadata-table parser + `'dlng'` / `'slng'` accessors + ScriptLangTag splitter (2026-06-08)
 
 New [`tables::meta::MetaTable`] decoder for the optional `meta`

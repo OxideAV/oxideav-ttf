@@ -185,6 +185,34 @@ ligatures and kerning.
   and rejecting leading / trailing / doubled hyphens per the
   spec's BNF; deeper validation against the IANA Language Subtag
   Registry and ISO 15924 stays in the caller),
+  `PCLT` (PCL 5 table, ISO/IEC 14496-22:2019 §5.7.7 — the fixed
+  54-byte struct of PCL 5 font-selection attributes, "strongly
+  discouraged for OFF fonts with TrueType outlines" per the spec
+  but still shipped by legacy faces. Every packed word decodes
+  through typed accessors: FontNumber splits into the
+  native-vs-converted MSB, the 7-bit HP-assigned vendor letter,
+  and the 24-bit vendor-assigned id; Style splits into structure
+  (bits 5–9) / appearance width (bits 2–4) / posture (bits 0–1)
+  with the reserved top 6 bits surfaced; TypeFamily splits into
+  the 4-bit HP vendor code + 12-bit family code; SymbolSet
+  follows the §5.7.7 rule "the least significant 5 bits, when
+  added to 64, is the ASCII value of the symbol set ID field"
+  (all eight spec example values round-trip, e.g. 629 → 19U).
+  The 16-byte Typeface and 6-byte FileName ASCII fields trim
+  trailing pad to `&str` (with raw-byte fallbacks), the 8-byte
+  CharacterComplement decodes to a big-endian u64 with
+  `provides_collection(bit)` honouring the cleared-bit-means-
+  provided polarity established by the spec's worked examples
+  and `is_unicode_indexed()` reading bit 0 per "Bit 0 must
+  always be cleared when the font elements are provided in
+  Unicode order"; StrokeWeight / WidthType surface raw with
+  `*_is_valid()` range checks against the §5.7.7 "-7 to 7" /
+  "-5 to 5" validity sentences, and SerifStyle splits into the
+  6-bit serif value + 2-bit serif/contrast class. `majorVersion
+  != 1` is rejected per "The current PCLT table version is 1.0";
+  `minorVersion` and the trailing Reserved pad byte are surfaced
+  raw. `Font::has_pclt()` / `Font::pclt_table()` expose the
+  parsed table),
 - `name` table: full accessor API beyond family / full name — the
   registered nameID registry (`name_id` constants), typed accessors
   (subfamily, PostScript, version, copyright, trademark, manufacturer,

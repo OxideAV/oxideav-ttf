@@ -59,8 +59,9 @@ use crate::tables::{
     glyf::GlyfTable, gpos::GposTable, gsub::GsubTable, gvar::GvarTable, hdmx::HdmxTable,
     head::HeadTable, hhea::HheaTable, hmtx::HmtxTable, hvar::HvarTable, kern::KernTable,
     loca::LocaTable, ltsh::LtshTable, maxp::MaxpTable, meta::MetaTable, mvar::MvarTable,
-    name::NameTable, os2::Os2Table, post::PostTable, sbix::SbixTable, stat::StatTable,
-    vdmx::VdmxTable, vhea::VheaTable, vmtx::VmtxTable, vorg::VorgTable, vvar::VvarTable,
+    name::NameTable, os2::Os2Table, pclt::PcltTable, post::PostTable, sbix::SbixTable,
+    stat::StatTable, vdmx::VdmxTable, vhea::VheaTable, vmtx::VmtxTable, vorg::VorgTable,
+    vvar::VvarTable,
 };
 
 pub use outline::{BBox, Contour, Point, TtOutline};
@@ -93,6 +94,10 @@ pub use tables::meta::{
 };
 pub use tables::mvar::ItemVariationStore;
 pub use tables::name::{name_id, platform, NameRecord};
+pub use tables::pclt::{
+    PCLT_MAJOR_VERSION, PCLT_STROKE_WEIGHT_RANGE, PCLT_TABLE_LEN, PCLT_TABLE_TAG,
+    PCLT_WIDTH_TYPE_RANGE,
+};
 pub use tables::post::{
     GlyphNameRef, PostFormat, PostV20, PostV25, POST_HEADER_LEN, POST_TABLE_TAG, POST_VERSION_10,
     POST_VERSION_20, POST_VERSION_25, POST_VERSION_30, RECOMMENDED_GLYPH_NAME_MAX_LEN,
@@ -306,6 +311,15 @@ pub struct Font<'a> {
     /// defined binary form. Records borrow from the on-wire `meta`
     /// byte slice — the table itself does not copy the payload data.
     meta: Option<MetaTable<'a>>,
+    /// PCL 5 table (`PCLT`, ISO/IEC 14496-22:2019 §5.7.7). Optional
+    /// (and "strongly discouraged for OFF fonts with TrueType
+    /// outlines" per the spec); carries the PCL 5 font-selection
+    /// attributes — HP font number, pitch / x-height / cap-height,
+    /// packed style / type-family / symbol-set words, the 16-byte
+    /// typeface string, the 8-byte character-complement bitfield,
+    /// the 6-byte PCL file name, and the stroke-weight / width-type
+    /// / serif-style classification bytes.
+    pclt: Option<PcltTable>,
     /// Current user-space coordinate vector, one per axis (defaults
     /// to each axis's `default` value when `fvar` is present, empty
     /// vec otherwise). `set_variation_coords` updates this; the
@@ -471,6 +485,10 @@ impl<'a> Font<'a> {
         // there; the `'a` lifetime of `Font<'a>` therefore covers
         // every payload exposed through `meta_*` accessors.
         let meta = dir.find(b"meta", bytes).map(MetaTable::parse).transpose()?;
+        // §5.7.7 PCL 5 table — fixed 54-byte struct of PCL font-
+        // selection attributes. All fields copy out of the slice at
+        // parse time so the parsed table carries no lifetime.
+        let pclt = dir.find(b"PCLT", bytes).map(PcltTable::parse).transpose()?;
         let var_coords = match fvar.as_ref() {
             Some(f) => f.axes().iter().map(|a| a.default).collect(),
             None => Vec::new(),
@@ -513,6 +531,7 @@ impl<'a> Font<'a> {
             hdmx,
             vdmx,
             meta,
+            pclt,
             var_coords,
         })
     }
@@ -1227,6 +1246,26 @@ impl<'a> Font<'a> {
     /// [`Self::meta_design_languages`] in typical use).
     pub fn meta_supported_languages(&self) -> Option<&'a str> {
         self.meta.as_ref()?.supported_languages()
+    }
+
+    /// `true` when the font ships a `PCLT` (PCL 5) table per ISO/IEC
+    /// 14496-22:2019 §5.7.7. The spec deems the table "strongly
+    /// discouraged for OFF fonts with TrueType outlines", so a `true`
+    /// here typically marks a legacy font.
+    pub fn has_pclt(&self) -> bool {
+        self.pclt.is_some()
+    }
+
+    /// Borrow the parsed `PCLT` table when present.
+    ///
+    /// The returned [`PcltTable`] carries the §5.7.7 PCL 5
+    /// font-selection attributes: HP font number, pitch / x-height /
+    /// cap-height design-unit metrics, the packed style / type-family
+    /// / symbol-set words, the typeface "font print" string, the
+    /// character-complement bitfield, the PCL file name, and the
+    /// stroke-weight / width-type / serif-style classification bytes.
+    pub fn pclt_table(&self) -> Option<&PcltTable> {
+        self.pclt.as_ref()
     }
 
     /// Glyph bounding box from the `glyf` header (xMin/yMin/xMax/yMax).
