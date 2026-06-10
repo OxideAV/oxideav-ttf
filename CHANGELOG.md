@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — cmap subtable formats 8 and 10 (2026-06-11)
+
+The character → glyph mapper now decodes ALL eight base cmap
+subtable formats. New per the OpenType cmap chapter ("Format 8:
+mixed 16-bit and 32-bit coverage" / "Format 10: Trimmed array"):
+
+- **Format 8** — the discouraged UTF-16-oriented mixed-length
+  layout: fixed 8208-byte header (u16 format/reserved, u32
+  length/language, 8 KiB packed `is32` bit array, u32 `numGroups`)
+  followed by format-12-style `SequentialMapGroup` records
+  (`startCharCode` / `endCharCode` / `startGlyphID`, sequential
+  glyph semantics, binary-searched). The `is32` array — bit test
+  `is32[cp / 8] & (1 << (7 - cp % 8))` per the spec — is enforced
+  as a validity filter in both directions: a 16-bit query whose own
+  bit is set is the first half of a 32-bit code (not a character →
+  miss), and a 32-bit query whose high word's bit is clear cannot
+  exist under the font's encoding (→ miss).
+- **Format 10** — the 32-bit trimmed-array analog of format 6: u32
+  `startCharCode` + `numChars` bounding one dense u16
+  `glyphIdArray[]` window; zero entries surface as missing glyphs
+  exactly like format 6.
+- **Picker ranking** — format 8 slots between 12 and 4 (it covers
+  supplementary planes, so it outranks a BMP-only format 4 sibling,
+  but the spec's standard 32-bit format 12 still wins); format 10
+  slots between 4 and 6 (a single contiguous window is narrower
+  coverage than a segmented BMP map, but richer than its 16-bit
+  analog).
+
+Seven new in-module tests: sequential round-trips across BMP +
+supplementary groups, both `is32` gates, the 8-over-4 pick, the
+trimmed-array round-trip with zero-entry misses, and single-format
+pickability for both formats.
+
 ### Added — `PCLT` PCL 5 table parser (2026-06-10)
 
 New [`tables::pclt::PcltTable`] decoder for the optional `PCLT`

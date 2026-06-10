@@ -8,11 +8,16 @@ ligatures and kerning.
 ## Round-1 scope (this release)
 
 - sfnt + table directory walker.
-- `head`, `hhea`, `maxp`, `cmap` (base formats 0, 2, 4, 6, 12, 13 +
-  format 14 Unicode Variation Sequences as a sidecar — format 2 is
-  the legacy mixed-8-/16-bit "high-byte mapping through table" layout
-  for pre-Unicode CJK fonts, format 13 is the "many-to-one range
-  mappings" layout used by last-resort fonts),
+- `head`, `hhea`, `maxp`, `cmap` (ALL base formats — 0, 2, 4, 6, 8,
+  10, 12, 13 — plus format 14 Unicode Variation Sequences as a
+  sidecar. Format 2 is the legacy mixed-8-/16-bit "high-byte mapping
+  through table" layout for pre-Unicode CJK fonts, format 13 the
+  "many-to-one range mappings" layout used by last-resort fonts.
+  Format 8 is the discouraged mixed-16-/32-bit UTF-16 layout: its
+  8 KiB `is32` lead-word bit array is enforced as a validity filter
+  in both directions on top of the format-12-style sequential group
+  search. Format 10 is the 32-bit trimmed-array analog of format 6
+  for fonts covering one contiguous supplementary-plane window),
   `name`, `OS/2`, `hmtx`, `loca`, `glyf` (simple + composite),
   `post` (ISO/IEC 14496-22:2019 §5.2.10 — full structural decode of
   v1.0 / v2.0 / v2.5 / v3.0: 32-byte common header with `italicAngle`
@@ -649,11 +654,9 @@ if vfont.is_variable() {
 - CFF / Type 2 charstrings — moves to a sibling `oxideav-otf` crate.
 - Bidi, Arabic shaping, Indic conjuncts, complex contextual GSUB/GPOS.
 - TrueType bytecode hinting (modern AA at ≥ 16 px does not need it).
-- cmap formats 8 and 10 (Unicode supplementary-plane mixed-length
-  encodings — the spec calls these out as rare too). Format 2 —
-  legacy mixed-8-/16-bit high-byte-through-table for pre-Unicode CJK
-  fonts — and format 13 — many-to-one ranges for last-resort fonts —
-  both landed; see above.
+- ~~cmap formats 8 and 10~~ landed in r276 — every base cmap
+  subtable format (0, 2, 4, 6, 8, 10, 12, 13) plus the format-14
+  UVS sidecar is now decoded; see above.
 - All GPOS lookup types except LookupType 7 (the now-fully-handled
   LookupType 9 ExtensionPos wrapper plays its role) are implemented:
   1 (single), 2 (pair), 3 (cursive attachment), 4 (mark-to-base),

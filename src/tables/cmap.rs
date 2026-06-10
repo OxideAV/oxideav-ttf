@@ -3,8 +3,26 @@
 //! We pick a single subtable at parse time (preferred order: 32-bit
 //! formats first, BMP formats second, legacy single-byte last) and run
 //! all `lookup` calls through it. Supported base formats: 0, 2, 4, 6,
-//! 12, 13. Plus format 14 (Unicode Variation Sequences) as a sidecar
-//! that drives `lookup_variation` for codepoint+variation-selector pairs.
+//! 8, 10, 12, 13. Plus format 14 (Unicode Variation Sequences) as a
+//! sidecar that drives `lookup_variation` for
+//! codepoint+variation-selector pairs.
+//!
+//! Format 8 (mixed 16-bit and 32-bit coverage) is the UTF-16-oriented
+//! supplementary-plane encoding: an 8 KiB `is32` packed bit array flags
+//! which 16-bit words are the first half of a 32-bit character code,
+//! followed by format-12-style SequentialMapGroup records. The cmap
+//! chapter notes it "is not widely supported or used" and discourages
+//! new use, but it is part of the closed subtable-format set so we
+//! decode it. Our lookup input is a whole codepoint (we never see a raw
+//! UTF-16 code-unit stream, so the `is32` array's stream-segmentation
+//! role doesn't arise); we still honour `is32` as a validity filter —
+//! see `lookup_format8`.
+//!
+//! Format 10 (trimmed array) is the 32-bit analog of format 6: one
+//! contiguous `[startCharCode, startCharCode + numChars)` window backed
+//! by a dense u16 glyph array. Per the spec it "is not widely used and
+//! is not supported on Windows platforms"; it suits fonts covering one
+//! tight run of supplementary-plane codepoints.
 //!
 //! Format 2 (high-byte mapping through table) is the legacy
 //! mixed-8-/16-bit encoding the cmap chapter describes for older
@@ -52,6 +70,8 @@ enum Subtable<'a> {
     Format2(&'a [u8]),
     Format4(&'a [u8]),
     Format6(&'a [u8]),
+    Format8(&'a [u8]),
+    Format10(&'a [u8]),
     Format12(&'a [u8]),
     Format13(&'a [u8]),
 }
@@ -136,6 +156,8 @@ impl<'a> CmapTable<'a> {
                 2 => Subtable::Format2(sub),
                 4 => Subtable::Format4(sub),
                 6 => Subtable::Format6(sub),
+                8 => Subtable::Format8(sub),
+                10 => Subtable::Format10(sub),
                 12 => Subtable::Format12(sub),
                 13 => Subtable::Format13(sub),
                 _ => unreachable!("filtered by is_supported_format above"),
@@ -165,6 +187,8 @@ impl<'a> CmapTable<'a> {
             Subtable::Format2(b) => lookup_format2(b, codepoint),
             Subtable::Format4(b) => lookup_format4(b, codepoint),
             Subtable::Format6(b) => lookup_format6(b, codepoint),
+            Subtable::Format8(b) => lookup_format8(b, codepoint),
+            Subtable::Format10(b) => lookup_format10(b, codepoint),
             Subtable::Format12(b) => lookup_format12(b, codepoint),
             Subtable::Format13(b) => lookup_format13(b, codepoint),
         }
@@ -330,7 +354,7 @@ fn range_contains(bytes: &[u8], table_off: usize, codepoint: u32) -> bool {
 }
 
 fn is_supported_format(format: u16) -> bool {
-    matches!(format, 0 | 2 | 4 | 6 | 12 | 13)
+    matches!(format, 0 | 2 | 4 | 6 | 8 | 10 | 12 | 13)
 }
 
 fn subtable_length(bytes: &[u8], off: usize, format: u16) -> Result<usize, Error> {
@@ -360,7 +384,20 @@ fn subtable_rank(format: u16, platform: u16, encoding: u16) -> i32 {
     //    the picker still selects it.
     let format_score = match format {
         12 => 400,
+        // Format 8 covers the same mixed BMP + supplementary space as
+        // format 12 (SequentialMapGroup records), so it outranks the
+        // BMP-only format 4 — but stays below 12: the spec describes 12
+        // as "the standard character-to-glyph-index mapping subtable for
+        // fonts supporting … supplementary-plane characters" while
+        // explicitly discouraging 8, so when a font ships both the
+        // standard one wins.
+        8 => 350,
         4 => 300,
+        // Format 10 covers ONE contiguous (typically supplementary)
+        // window — strictly narrower coverage than a segmented format-4
+        // BMP map, so it ranks below 4 but above its 16-bit analog
+        // format 6.
+        10 => 250,
         6 => 200,
         0 => 100,
         // Format 2 is a legacy mixed-8/16-bit CJK encoding ("not
@@ -659,6 +696,133 @@ fn lookup_format6(bytes: &[u8], codepoint: u32) -> Option<u16> {
     }
 }
 
+// --- Format 8 --------------------------------------------------------------
+
+/// Format 8 — mixed 16-bit and 32-bit coverage.
+///
+/// Layout per the cmap chapter, "Format 8: mixed 16-bit and 32-bit
+/// coverage":
+///
+/// ```text
+///     0 / 2    / format (= 8)
+///     2 / 2    / reserved (= 0)
+///     4 / 4    / length
+///     8 / 4    / language
+///    12 / 8192 / is32[8192]  — tightly packed bit array: bit set ⇔ the
+///                              16-bit word at that index is the FIRST
+///                              HALF of a 32-bit character code
+///  8204 / 4    / numGroups
+///  8208 / 12*N / SequentialMapGroup[numGroups]
+///                 u32 startCharCode, u32 endCharCode, u32 startGlyphID
+/// ```
+///
+/// Group semantics are the format-12 sequential kind: glyph IDs for
+/// codepoints after `startCharCode` follow in sequence from
+/// `startGlyphID`. Groups are sorted by increasing `startCharCode` and
+/// must not overlap, so we binary-search them.
+///
+/// The `is32` array exists so a UTF-16 stream consumer can tell how
+/// many code units the next character occupies. Our input is already a
+/// whole codepoint, but the array still defines what IS a character
+/// code under this font's encoding, and we enforce it both ways, using
+/// the spec's bit-test expression `is32[cp / 8] & (1 << (7 - cp % 8))`:
+///
+/// - a query ≤ 0xFFFF whose own `is32` bit is SET is the first half of
+///   a 32-bit code, not a standalone character → `None`;
+/// - a query > 0xFFFF whose high word's `is32` bit is CLEAR cannot be
+///   encoded by this font (the word would parse as a standalone 16-bit
+///   character) → `None`.
+///
+/// The spec note "0 is not a special value for the high word of a
+/// 32-bit code point" means word 0x0000 participates in the same
+/// bit-test rules as every other word; no extra casing needed.
+fn lookup_format8(bytes: &[u8], codepoint: u32) -> Option<u16> {
+    const IS32_OFF: usize = 12;
+    const NUM_GROUPS_OFF: usize = 8204;
+    const GROUPS_OFF: usize = 8208;
+
+    // Spec bit-test: is32[word / 8] & (1 << (7 - word % 8)).
+    let is32 = |word: u32| -> Option<bool> {
+        let byte = bytes.get(IS32_OFF + (word as usize) / 8)?;
+        Some(byte & (1 << (7 - word % 8)) != 0)
+    };
+
+    if codepoint <= 0xFFFF {
+        // A flagged word is a lead half, not a character code.
+        if is32(codepoint)? {
+            return None;
+        }
+    } else if !is32(codepoint >> 16)? {
+        // High word not flagged ⇒ no 32-bit code starts with it.
+        return None;
+    }
+
+    let num_groups = read_u32(bytes, NUM_GROUPS_OFF).ok()? as usize;
+    if GROUPS_OFF + num_groups * 12 > bytes.len() {
+        return None;
+    }
+    // Binary search by start ≤ cp ≤ end, same traversal as format 12.
+    let mut lo = 0usize;
+    let mut hi = num_groups;
+    while lo < hi {
+        let mid = (lo + hi) / 2;
+        let off = GROUPS_OFF + mid * 12;
+        let start = read_u32(bytes, off).ok()?;
+        let end = read_u32(bytes, off + 4).ok()?;
+        if codepoint < start {
+            hi = mid;
+        } else if codepoint > end {
+            lo = mid + 1;
+        } else {
+            let start_glyph = read_u32(bytes, off + 8).ok()?;
+            let g = start_glyph.checked_add(codepoint - start)?;
+            if g > u16::MAX as u32 {
+                return None;
+            }
+            return Some(g as u16);
+        }
+    }
+    None
+}
+
+// --- Format 10 -------------------------------------------------------------
+
+/// Format 10 — trimmed array (32-bit analog of format 6).
+///
+/// Layout per the cmap chapter, "Format 10: Trimmed array":
+///
+/// ```text
+///    0 / 2   / format (= 10)
+///    2 / 2   / reserved (= 0)
+///    4 / 4   / length
+///    8 / 4   / language
+///   12 / 4   / startCharCode
+///   16 / 4   / numChars
+///   20 / 2*N / glyphIdArray[numChars] u16
+/// ```
+///
+/// Codepoints inside `[startCharCode, startCharCode + numChars)` index
+/// the dense glyph array; everything else maps to the missing glyph. A
+/// zero array entry means "missing" and is surfaced as `None`, matching
+/// the format-6 treatment of its identically-shaped 16-bit array.
+fn lookup_format10(bytes: &[u8], codepoint: u32) -> Option<u16> {
+    let start = read_u32(bytes, 12).ok()?;
+    let num_chars = read_u32(bytes, 16).ok()?;
+    if codepoint < start {
+        return None;
+    }
+    let idx = codepoint - start;
+    if idx >= num_chars {
+        return None;
+    }
+    let g = read_u16(bytes, 20 + idx as usize * 2).ok()?;
+    if g == 0 {
+        None
+    } else {
+        Some(g)
+    }
+}
+
 // --- Format 12 -------------------------------------------------------------
 
 fn lookup_format12(bytes: &[u8], codepoint: u32) -> Option<u16> {
@@ -756,6 +920,9 @@ mod tests {
         //   format 13 → (0, 6) "Unicode full repertoire — for use with
         //                       subtable format 13" per spec.
         //   format 12 → (3, 10) Windows Unicode UCS-4
+        //   formats 8 / 10 → (0, 4) Unicode full repertoire — the
+        //                       Unicode-platform encoding the spec pairs
+        //                       with 32-bit-capable subtables.
         //   format 2  → (1, 1)  Macintosh Japanese (Shift-JIS-ish) — a
         //                       legacy script-platform pair that goes
         //                       through the catch-all platform branch
@@ -767,6 +934,7 @@ mod tests {
         let (platform, enc): (u16, u16) = match format {
             13 => (0, 6),
             12 => (3, 10),
+            8 | 10 => (0, 4),
             2 => (1, 1),
             _ => (3, 1),
         };
@@ -1464,6 +1632,168 @@ mod tests {
         assert_eq!(cmap.lookup(0x0041), Some(1));
         assert_eq!(cmap.lookup(0x1F600), Some(1));
         assert_eq!(cmap.lookup(0x10FFFF), Some(1));
+    }
+
+    // --- Format 8 ----------------------------------------------------------
+
+    /// Build a format-8 subtable. `is32_words` lists the 16-bit words
+    /// whose `is32` bit must be SET (i.e. words that are the first half
+    /// of 32-bit character codes). `groups` are
+    /// `(startCharCode, endCharCode, startGlyphID)` SequentialMapGroup
+    /// records, which the caller keeps sorted by `startCharCode`.
+    fn build_format8(is32_words: &[u32], groups: &[(u32, u32, u32)]) -> Vec<u8> {
+        let num_groups = groups.len() as u32;
+        let sub_len = 8208 + groups.len() * 12;
+        let mut sub = vec![0u8; sub_len];
+        sub[0..2].copy_from_slice(&8u16.to_be_bytes()); // format
+                                                        // reserved at 2..4 stays zero
+        sub[4..8].copy_from_slice(&(sub_len as u32).to_be_bytes()); // length
+                                                                    // language at 8..12 stays zero
+        for &w in is32_words {
+            // Spec bit position: is32[w / 8] & (1 << (7 - w % 8)).
+            sub[12 + (w as usize) / 8] |= 1 << (7 - w % 8);
+        }
+        sub[8204..8208].copy_from_slice(&num_groups.to_be_bytes());
+        for (i, &(start, end, glyph)) in groups.iter().enumerate() {
+            let off = 8208 + i * 12;
+            sub[off..off + 4].copy_from_slice(&start.to_be_bytes());
+            sub[off + 4..off + 8].copy_from_slice(&end.to_be_bytes());
+            sub[off + 8..off + 12].copy_from_slice(&glyph.to_be_bytes());
+        }
+        sub
+    }
+
+    /// Mixed BMP + supplementary coverage through one format-8 map.
+    /// BMP group 0x4E00..0x4E02 is sequential (1000, 1001, 1002);
+    /// supplementary group 0x10400..0x10401 needs its high word
+    /// (0x0001) flagged in `is32`.
+    #[test]
+    fn format8_round_trip() {
+        let sub = build_format8(
+            &[0x0001],
+            &[(0x4E00, 0x4E02, 1000), (0x10400, 0x10401, 2000)],
+        );
+        let cmap_bytes = build_cmap_with_subtable(8, &sub);
+        let cmap = CmapTable::parse(&cmap_bytes).unwrap();
+        // BMP group: sequential glyphs.
+        assert_eq!(cmap.lookup(0x4E00), Some(1000));
+        assert_eq!(cmap.lookup(0x4E01), Some(1001));
+        assert_eq!(cmap.lookup(0x4E02), Some(1002));
+        assert_eq!(cmap.lookup(0x4E03), None);
+        assert_eq!(cmap.lookup(0x4DFF), None);
+        // Supplementary group: also sequential.
+        assert_eq!(cmap.lookup(0x10400), Some(2000));
+        assert_eq!(cmap.lookup(0x10401), Some(2001));
+        assert_eq!(cmap.lookup(0x10402), None);
+    }
+
+    /// The `is32` array gates lookups in both directions:
+    /// - a 16-bit query whose own bit is set is a lead half, not a
+    ///   character — even if a (malformed) group covers it;
+    /// - a 32-bit query whose high word's bit is clear cannot exist
+    ///   under the font's encoding — even if a group covers it.
+    #[test]
+    fn format8_is32_array_gates_lookups() {
+        // Groups cover BOTH the flagged BMP word 0x0001 (malformed —
+        // a flagged word is not a standalone character) and the
+        // supplementary range 0x20000.. whose high word 0x0002 is NOT
+        // flagged (equally malformed).
+        let sub = build_format8(&[0x0001], &[(0x0001, 0x0001, 77), (0x20000, 0x20001, 88)]);
+        let cmap_bytes = build_cmap_with_subtable(8, &sub);
+        let cmap = CmapTable::parse(&cmap_bytes).unwrap();
+        // Word 0x0001 is flagged as a lead half → standalone query misses.
+        assert_eq!(cmap.lookup(0x0001), None);
+        // High word 0x0002 is unflagged → 32-bit query misses.
+        assert_eq!(cmap.lookup(0x20000), None);
+        // And a 32-bit code whose high word IS flagged but that no
+        // group covers misses through the group search.
+        assert_eq!(cmap.lookup(0x1FFFF), None);
+    }
+
+    /// Picker ranking: format 8 covers supplementary planes so it must
+    /// outrank a BMP-only format 4 sibling.
+    #[test]
+    fn format8_outranks_format4() {
+        // format-4: 'A' → glyph 1 (delta = 1 - 65 mod 65536).
+        let sub4 = build_format4_direct(&[(65, 65, 1u16.wrapping_sub(65))]);
+        // format-8: 'A' → glyph 100, plus a supplementary mapping.
+        let sub8 = build_format8(&[0x0001], &[(0x41, 0x41, 100), (0x10400, 0x10400, 2000)]);
+
+        let header_len = 4 + 2 * 8;
+        let sub4_off = header_len;
+        let sub8_off = sub4_off + sub4.len();
+        let mut out = vec![0u8; header_len];
+        out[0..2].copy_from_slice(&0u16.to_be_bytes());
+        out[2..4].copy_from_slice(&2u16.to_be_bytes());
+        // record 0: (3, 1) format-4 — rank 300 + 20 = 320.
+        out[4..6].copy_from_slice(&3u16.to_be_bytes());
+        out[6..8].copy_from_slice(&1u16.to_be_bytes());
+        out[8..12].copy_from_slice(&(sub4_off as u32).to_be_bytes());
+        // record 1: (0, 4) format-8 — rank 350 + 30 = 380.
+        out[12..14].copy_from_slice(&0u16.to_be_bytes());
+        out[14..16].copy_from_slice(&4u16.to_be_bytes());
+        out[16..20].copy_from_slice(&(sub8_off as u32).to_be_bytes());
+        out.extend_from_slice(&sub4);
+        out.extend_from_slice(&sub8);
+
+        let cmap = CmapTable::parse(&out).unwrap();
+        // Resolves through format 8 (glyph 100), not format 4 (glyph 1),
+        // and the supplementary plane works.
+        assert_eq!(cmap.lookup(0x41), Some(100));
+        assert_eq!(cmap.lookup(0x10400), Some(2000));
+    }
+
+    // --- Format 10 ---------------------------------------------------------
+
+    /// Build a format-10 subtable: one dense glyph window starting at
+    /// `start`.
+    fn build_format10(start: u32, glyphs: &[u16]) -> Vec<u8> {
+        let sub_len = 20 + glyphs.len() * 2;
+        let mut sub = vec![0u8; sub_len];
+        sub[0..2].copy_from_slice(&10u16.to_be_bytes()); // format
+                                                         // reserved at 2..4 stays zero
+        sub[4..8].copy_from_slice(&(sub_len as u32).to_be_bytes()); // length
+                                                                    // language at 8..12 stays zero
+        sub[12..16].copy_from_slice(&start.to_be_bytes());
+        sub[16..20].copy_from_slice(&(glyphs.len() as u32).to_be_bytes());
+        for (i, &g) in glyphs.iter().enumerate() {
+            let off = 20 + i * 2;
+            sub[off..off + 2].copy_from_slice(&g.to_be_bytes());
+        }
+        sub
+    }
+
+    /// Trimmed-array semantics over a supplementary-plane window
+    /// (Old Italic block start): in-window codepoints index the dense
+    /// array, zero entries are missing, out-of-window misses both ways.
+    #[test]
+    fn format10_round_trip() {
+        let sub = build_format10(0x10300, &[50, 0, 52]);
+        let cmap_bytes = build_cmap_with_subtable(10, &sub);
+        let cmap = CmapTable::parse(&cmap_bytes).unwrap();
+        assert_eq!(cmap.lookup(0x10300), Some(50));
+        // Zero glyph-array entry = missing glyph.
+        assert_eq!(cmap.lookup(0x10301), None);
+        assert_eq!(cmap.lookup(0x10302), Some(52));
+        // Below / above the covered window.
+        assert_eq!(cmap.lookup(0x102FF), None);
+        assert_eq!(cmap.lookup(0x10303), None);
+        // BMP query far below the 32-bit window.
+        assert_eq!(cmap.lookup(0x0041), None);
+    }
+
+    /// A font that ships ONLY a format-10 subtable still parses and
+    /// looks up (the "contiguous supplementary-plane range only" font
+    /// the spec describes).
+    #[test]
+    fn format10_only_is_pickable() {
+        let glyphs: Vec<u16> = (1u16..=8).collect();
+        let sub = build_format10(0x1D400, &glyphs);
+        let cmap_bytes = build_cmap_with_subtable(10, &sub);
+        let cmap = CmapTable::parse(&cmap_bytes).unwrap();
+        for (i, g) in glyphs.iter().enumerate() {
+            assert_eq!(cmap.lookup(0x1D400 + i as u32), Some(*g));
+        }
     }
 
     // --- Format 2 ----------------------------------------------------------
