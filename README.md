@@ -276,6 +276,28 @@ ligatures and kerning.
   forward-chain overflow all bail to `None`). The raw `sbix_glyph`
   accessor still surfaces the `'dupe'` sentinel untouched for
   byte-level consumers.
+- `EBDT` / `EBLC` embedded monochrome + grayscale bitmaps (ISO/IEC
+  14496-22:2019 §5.6.2 / §5.6.3) — the location side (`EBLC`) reuses
+  the same `CblcTable` walker that drives `CBLC` (it already accepts
+  the `majorVersion == 2` header and all five IndexSubTable formats
+  1–5), so this round adds the `EBDT` image-data decoder for the five
+  bit-packed §5.6.2.2 pixel formats: format 1 (small metrics,
+  byte-aligned), 2 (small metrics, bit-aligned), 5 (bit-aligned data
+  only, metrics lifted from the EBLC IndexSubTable 2/5 `BigGlyphMetrics`),
+  6 (big metrics, byte-aligned) and 7 (big metrics, bit-aligned). Each
+  `bitDepth` of 1 / 2 / 4 / 8 (§5.6.3.1) is unpacked MSB-first,
+  left-to-right, top-to-bottom into a `width × height` row-major grid
+  of one alpha-coverage byte per pixel, the `bitDepth`-bit sample
+  scaled to the full 0..=255 range (1-bit "1 = black" → `0xFF`). The
+  byte-aligned formats pad each row up to a byte boundary; the
+  bit-aligned formats pack the whole glyph contiguously. `Font::
+  glyph_gray_bitmap(gid, target_ppem)` returns a `GrayBitmap` from the
+  closest strike (same closest-ppem-with-larger-wins tie-break as the
+  colour path); `Font::has_gray_bitmaps()` / `Font::gray_strike_sizes()`
+  gate and enumerate. Format 4 (compressed) and formats 8 / 9
+  (composite) decode to `None`; `bitDepth == 32` (BGRA) routes to the
+  `CBDT` colour path instead. `EBSC` (scaled-strike substitution,
+  §5.6.4) is not yet decoded.
 - Adobe Glyph List (AGL) glyph-name → Unicode resolution
   (`glyph_name_to_codepoints` / `glyph_name_to_char`). Direct table
   lookup against the embedded AGL 2.0 data: a PostScript glyph name

@@ -12,6 +12,7 @@ pub mod cblc;
 pub mod cmap;
 pub mod colr;
 pub mod cpal;
+pub mod ebdt;
 pub mod fvar;
 pub mod gasp;
 pub mod gdef;

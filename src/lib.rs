@@ -55,13 +55,13 @@ pub use collection::{is_collection, CollectionHeader, TTC_MAGIC};
 use crate::parser::TableDirectory;
 use crate::tables::{
     avar::AvarTable, base::BaseTable, cbdt::CbdtTable, cblc::CblcTable, cmap::CmapTable,
-    colr::ColrTable, cpal::CpalTable, fvar::FvarTable, gasp::GaspTable, gdef::GdefTable,
-    glyf::GlyfTable, gpos::GposTable, gsub::GsubTable, gvar::GvarTable, hdmx::HdmxTable,
-    head::HeadTable, hhea::HheaTable, hmtx::HmtxTable, hvar::HvarTable, kern::KernTable,
-    loca::LocaTable, ltsh::LtshTable, maxp::MaxpTable, meta::MetaTable, mvar::MvarTable,
-    name::NameTable, os2::Os2Table, pclt::PcltTable, post::PostTable, sbix::SbixTable,
-    stat::StatTable, vdmx::VdmxTable, vhea::VheaTable, vmtx::VmtxTable, vorg::VorgTable,
-    vvar::VvarTable,
+    colr::ColrTable, cpal::CpalTable, ebdt::EbdtTable, fvar::FvarTable, gasp::GaspTable,
+    gdef::GdefTable, glyf::GlyfTable, gpos::GposTable, gsub::GsubTable, gvar::GvarTable,
+    hdmx::HdmxTable, head::HeadTable, hhea::HheaTable, hmtx::HmtxTable, hvar::HvarTable,
+    kern::KernTable, loca::LocaTable, ltsh::LtshTable, maxp::MaxpTable, meta::MetaTable,
+    mvar::MvarTable, name::NameTable, os2::Os2Table, pclt::PcltTable, post::PostTable,
+    sbix::SbixTable, stat::StatTable, vdmx::VdmxTable, vhea::VheaTable, vmtx::VmtxTable,
+    vorg::VorgTable, vvar::VvarTable,
 };
 
 pub use outline::{BBox, Contour, Point, TtOutline};
@@ -73,6 +73,7 @@ pub use tables::base::{
 pub use tables::cbdt::ColorBitmap;
 pub use tables::cblc::{BigGlyphMetrics, SmallGlyphMetrics};
 pub use tables::colr::ColorLayer;
+pub use tables::ebdt::GrayBitmap;
 pub use tables::fvar::{NamedInstance, VariationAxis};
 pub use tables::gasp::{
     GaspRange, GASP_DOGRAY, GASP_GRIDFIT, GASP_PPEM_SENTINEL, GASP_RESERVED_MASK,
@@ -221,6 +222,18 @@ pub struct Font<'a> {
     gdef: Option<GdefTable<'a>>,
     cblc: Option<CblcTable<'a>>,
     cbdt: Option<CbdtTable<'a>>,
+    /// Embedded bitmap *location* table (`EBLC`, ISO/IEC 14496-22:2019
+    /// §5.6.3). The monochrome / grayscale analog of `CBLC`; identical
+    /// on-wire layout (the shared [`CblcTable`] walker accepts both),
+    /// paired with [`Font::ebdt`](Self::ebdt) rather than `CBDT`.
+    eblc: Option<CblcTable<'a>>,
+    /// Embedded monochrome / grayscale bitmap data (`EBDT`, ISO/IEC
+    /// 14496-22:2019 §5.6.2). Located through the shared `EBLC`/`CBLC`
+    /// walker (the same `CblcTable` used for colour bitmaps); an `EBLC`
+    /// (major == 2) strike resolves the same way a `CBLC` colour strike
+    /// does. Present on legacy
+    /// pixel / CJK bitmap faces.
+    ebdt: Option<EbdtTable<'a>>,
     colr: Option<ColrTable<'a>>,
     cpal: Option<CpalTable<'a>>,
     sbix: Option<SbixTable<'a>>,
@@ -434,6 +447,8 @@ impl<'a> Font<'a> {
         let gdef = dir.find(b"GDEF", bytes).map(GdefTable::parse).transpose()?;
         let cblc = dir.find(b"CBLC", bytes).map(CblcTable::parse).transpose()?;
         let cbdt = dir.find(b"CBDT", bytes).map(CbdtTable::parse).transpose()?;
+        let eblc = dir.find(b"EBLC", bytes).map(CblcTable::parse).transpose()?;
+        let ebdt = dir.find(b"EBDT", bytes).map(EbdtTable::parse).transpose()?;
         let colr = dir.find(b"COLR", bytes).map(ColrTable::parse).transpose()?;
         let cpal = dir.find(b"CPAL", bytes).map(CpalTable::parse).transpose()?;
         let sbix = dir
@@ -515,6 +530,8 @@ impl<'a> Font<'a> {
             gdef,
             cblc,
             cbdt,
+            eblc,
+            ebdt,
             colr,
             cpal,
             sbix,
@@ -1751,6 +1768,45 @@ impl<'a> Font<'a> {
         let cbdt = self.cbdt.as_ref()?;
         let entry = cblc.lookup_glyph(glyph_id, target_ppem)?;
         cbdt.lookup(&entry).ok().flatten()
+    }
+
+    // ---- monochrome / grayscale bitmap glyphs (EBDT/EBLC) ----------------
+
+    /// `true` if this font ships an EBDT/EBLC pair — i.e. carries
+    /// embedded monochrome or grayscale bitmap glyphs (legacy pixel /
+    /// CJK bitmap faces, hand-hinted small-size strikes). Returns `false`
+    /// for outline-only and colour-bitmap-only fonts.
+    pub fn has_gray_bitmaps(&self) -> bool {
+        self.eblc.is_some() && self.ebdt.is_some()
+    }
+
+    /// All `(ppem_x, ppem_y)` strikes the monochrome / grayscale bitmap
+    /// tables ship, in declaration order. Empty when the font lacks
+    /// EBDT/EBLC. Useful for picking a strike before calling
+    /// [`Font::glyph_gray_bitmap`].
+    pub fn gray_strike_sizes(&self) -> Vec<(u8, u8)> {
+        self.eblc
+            .as_ref()
+            .map(|c| c.ppem_sizes().collect())
+            .unwrap_or_default()
+    }
+
+    /// Resolve `glyph_id`'s monochrome / grayscale bitmap at the strike
+    /// whose `ppem_y` is closest to `target_ppem`. Returns `None` if the
+    /// font has no EBDT/EBLC tables OR no strike contains `glyph_id` OR
+    /// the strike's per-glyph entry is in an EBDT format we don't decode
+    /// (format 4 compressed, or formats 8 / 9 composite).
+    ///
+    /// On success returns a [`GrayBitmap`] whose `pixels` field is an
+    /// unpacked `width * height` row-major grid of alpha coverage
+    /// (`0x00` = transparent, `0xFF` = opaque), ready to blit as a glyph
+    /// mask at `(bearing_x, bearing_y)`. Bit depths 1 / 2 / 4 / 8 are all
+    /// expanded to the full 0..=255 range (§5.6.2.2 / §5.6.3.1).
+    pub fn glyph_gray_bitmap(&self, glyph_id: u16, target_ppem: u8) -> Option<GrayBitmap> {
+        let eblc = self.eblc.as_ref()?;
+        let ebdt = self.ebdt.as_ref()?;
+        let entry = eblc.lookup_glyph(glyph_id, target_ppem)?;
+        ebdt.lookup(&entry).ok().flatten()
     }
 
     // ---- color layer glyphs (COLR / CPAL) --------------------------------

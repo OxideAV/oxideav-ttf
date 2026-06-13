@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — EBDT / EBLC embedded monochrome + grayscale bitmaps (2026-06-13)
+
+The font can now decode embedded *monochrome and grayscale* bitmap
+strikes (ISO/IEC 14496-22:2019 §5.6.2 `EBDT` + §5.6.3 `EBLC`), the
+non-colour counterpart to the already-supported `CBDT`/`CBLC` PNG
+colour bitmaps.
+
+- The location side (`EBLC`) reuses the existing `CblcTable` walker —
+  it already accepted the `majorVersion == 2` `EBLC` header and all
+  five IndexSubTable formats (1–5), so no new location code was
+  needed; a separate `EBLC`/`EBDT` table pair is now wired into
+  `Font`.
+- New `EbdtTable` decodes the five bit-packed §5.6.2.2 image-data
+  formats: format 1 (small metrics, byte-aligned), 2 (small metrics,
+  bit-aligned), 5 (bit-aligned data only — metrics from the EBLC
+  IndexSubTable 2/5 `BigGlyphMetrics`), 6 (big metrics, byte-aligned),
+  7 (big metrics, bit-aligned). Pixels are unpacked MSB-first,
+  left-to-right, top-to-bottom into a `width × height` row-major grid
+  of one alpha-coverage byte per pixel; `bitDepth` 1 / 2 / 4 / 8
+  (§5.6.3.1) is scaled to the full 0..=255 range. Byte-aligned formats
+  pad each row to a byte boundary; bit-aligned formats pack the whole
+  glyph contiguously.
+- New public API: `Font::has_gray_bitmaps()`,
+  `Font::gray_strike_sizes()`, `Font::glyph_gray_bitmap(gid,
+  target_ppem) -> Option<GrayBitmap>` (closest-ppem strike selection,
+  larger-ppem tie-break, matching the colour path), and the
+  `GrayBitmap` struct.
+- Out of scope this round: format 4 (compressed) and formats 8 / 9
+  (composite) decode to `None`; `bitDepth == 32` (BGRA) routes to the
+  `CBDT` path; `EBSC` (§5.6.4 scaled-strike substitution) is not yet
+  decoded.
+
 ### Added — cmap subtable formats 8 and 10 (2026-06-11)
 
 The character → glyph mapper now decodes ALL eight base cmap
