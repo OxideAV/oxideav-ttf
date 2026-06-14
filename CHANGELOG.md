@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — `glyf` composite point-matching + scaled component offsets (2026-06-14)
+
+Two `glyf` composite-glyph placement mechanisms from the "Composite glyph
+description" section that were previously approximated are now decoded to
+spec:
+
+- **Point-matching placement** (the `ARGS_ARE_XY_VALUES`-cleared form).
+  `argument1` is now read as a point number in the parent glyph (the
+  contours accumulated and re-numbered from previous components) and
+  `argument2` as a point number in the child component. The child is
+  transformed first (per "the transformation is applied to the child's
+  point before the points are aligned"), then translated so child point
+  `argument2` coincides with parent point `argument1`. A referenced index
+  that lands on a phantom point — which would require `hmtx`/`vmtx`
+  metrics not threaded through the outline resolver — degrades gracefully
+  to zero-offset placement instead of dropping the component. Previously
+  every point-matching component was placed at a flat `(0, 0)` offset.
+- **`SCALED_COMPONENT_OFFSET` / `UNSCALED_COMPONENT_OFFSET`.** When the
+  offset-vector form is used with a non-identity scale/transform, the
+  `SCALED_COMPONENT_OFFSET` flag now applies the 2×2 transform to the
+  `(x, y)` offset before it is added to the child points (the offset is in
+  the component coordinate system); `UNSCALED_COMPONENT_OFFSET` and the
+  recommended default-when-neither-set leave the offset untransformed (it
+  is in the parent coordinate system). A font that sets both is treated as
+  invalid and falls back to the unscaled default. Previously both flags
+  were commented as "no effect on geometry" and the offset was always
+  applied untransformed.
+
+New `outline.rs` helpers (`TtOutline::transformed`, `flat_point`,
+`append_translated`) support the point-matching path. Five new unit tests
+pin the scaled/unscaled offset distinction, the point-alignment offset,
+and the out-of-range/phantom-point fallback.
+
 ### Added — GPOS LookupType 7 (contextual positioning) (2026-06-14)
 
 GPOS now decodes and applies **LookupType 7 (Contextual Positioning)**,

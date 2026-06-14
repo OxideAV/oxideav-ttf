@@ -18,7 +18,15 @@ ligatures and kerning.
   in both directions on top of the format-12-style sequential group
   search. Format 10 is the 32-bit trimmed-array analog of format 6
   for fonts covering one contiguous supplementary-plane window),
-  `name`, `OS/2`, `hmtx`, `loca`, `glyf` (simple + composite),
+  `name`, `OS/2`, `hmtx`, `loca`, `glyf` (simple + composite — the
+  composite path handles both component-placement forms from the "Composite
+  glyph description" section: the `ARGS_ARE_XY_VALUES` offset-vector form
+  *and* the point-matching form where `argument1`/`argument2` are parent /
+  child point numbers aligned after the child's 2×2 transform is applied,
+  with `SCALED_COMPONENT_OFFSET` / `UNSCALED_COMPONENT_OFFSET` honoured so
+  a scaled offset is transformed into the parent grid while the default /
+  unscaled offset is left raw; a reference to an unresolved phantom point
+  degrades to zero-offset placement),
   `post` (ISO/IEC 14496-22:2019 §5.2.10 — full structural decode of
   v1.0 / v2.0 / v2.5 / v3.0: 32-byte common header with `italicAngle`
   / underline geometry / `isFixedPitch` / four PostScript memory

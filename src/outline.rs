@@ -95,6 +95,70 @@ impl TtOutline {
         // Re-derive bounds from the merged point set.
         self.bounds = derive_bbox(&self.contours);
     }
+
+    /// The flat point at index `idx` in the component-local numbering the
+    /// `glyf` composite point-matching mechanism uses (contours
+    /// concatenated in order, points within a contour in order), or `None`
+    /// when `idx` is past the last real (non-phantom) point. The four
+    /// phantom points are not represented here; a reference to one returns
+    /// `None` and the caller degrades to zero-offset placement.
+    pub(crate) fn flat_point(&self, idx: usize) -> Option<Point> {
+        let mut seen = 0usize;
+        for c in &self.contours {
+            if idx < seen + c.points.len() {
+                return Some(c.points[idx - seen]);
+            }
+            seen += c.points.len();
+        }
+        None
+    }
+
+    /// Apply the affine transform `(xx, xy, yx, yy)` to `other`'s points
+    /// (no translation) and return the transformed outline. Used by the
+    /// point-matching placement path, which must transform the child
+    /// before computing the alignment offset (spec: "If a scale or
+    /// transform matrix is provided, the transformation is applied to the
+    /// child's point before the points are aligned.").
+    pub(crate) fn transformed(&self, xx: f32, xy: f32, yx: f32, yy: f32) -> TtOutline {
+        let mut out = TtOutline::default();
+        for c in &self.contours {
+            let mut nc = Contour {
+                points: Vec::with_capacity(c.points.len()),
+            };
+            for p in &c.points {
+                let px = p.x as f32;
+                let py = p.y as f32;
+                nc.points.push(Point {
+                    x: clamp_i16((px * xx + py * yx).round() as i32),
+                    y: clamp_i16((px * xy + py * yy).round() as i32),
+                    on_curve: p.on_curve,
+                });
+            }
+            out.contours.push(nc);
+        }
+        out.bounds = derive_bbox(&out.contours);
+        out
+    }
+
+    /// Append `other`'s already-transformed contours verbatim, shifting
+    /// each point by `(dx, dy)`. Used by the point-matching path after the
+    /// alignment offset has been computed in design units.
+    pub(crate) fn append_translated(&mut self, other: &TtOutline, dx: i32, dy: i32) {
+        for c in &other.contours {
+            let mut nc = Contour {
+                points: Vec::with_capacity(c.points.len()),
+            };
+            for p in &c.points {
+                nc.points.push(Point {
+                    x: clamp_i16(p.x as i32 + dx),
+                    y: clamp_i16(p.y as i32 + dy),
+                    on_curve: p.on_curve,
+                });
+            }
+            self.contours.push(nc);
+        }
+        self.bounds = derive_bbox(&self.contours);
+    }
 }
 
 fn clamp_i16(v: i32) -> i16 {
