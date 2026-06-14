@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — GPOS LookupType 7 (contextual positioning) (2026-06-14)
+
+GPOS now decodes and applies **LookupType 7 (Contextual Positioning)**,
+the non-chained sibling of the already-supported LookupType 8. It uses
+the shared `SequenceContext` sub-table family from the OpenType Layout
+Common Table Formats chapter (the GPOS-type-7 analogue of GSUB type 5):
+
+- **Format 1** (`SequenceContextFormat1`) — Coverage on the first input
+  glyph + per-coverage `SequenceRuleSet` of explicit input-glyph
+  sequences, each carrying a `SequenceLookupRecord[]`.
+- **Format 2** (`SequenceContextFormat2`) — Coverage gate + a `ClassDef`
+  whose class of the first glyph selects a `ClassSequenceRuleSet`; the
+  remaining positions match by class value.
+- **Format 3** (`SequenceContextFormat3`) — one Coverage table per input
+  position + a single `SequenceLookupRecord[]`.
+
+On a match, each `SequenceLookupRecord { sequenceIndex, lookupListIndex }`
+is recursively dispatched into the nested per-type positioning paths
+(LT 1 / 2 / 3 / 4 / 6 / 7 / 8), reusing the existing chained-context
+`apply_pos_records` machinery and `MAX_NESTED_LOOKUP_DEPTH` recursion
+fence. ExtensionPos (LookupType 9) wrappers are unwrapped transparently.
+
+New public API: `Font::gpos_apply_lookup_type_7` (plus the
+`GposTable::apply_lookup_type_7` lower-level entry). Six new unit tests
+cover all three formats (positive dispatch + no-match boundaries:
+uncovered glyph, class mismatch, short window, wrong lookup type,
+out-of-range index).
+
+Spec: OpenType Layout Common Table Formats §"Sequence Context Format
+1/2/3"; `GPOS` chapter §"Contextual positioning format 1/2/3".
+
 ### Added — EBDT / EBLC embedded monochrome + grayscale bitmaps (2026-06-13)
 
 The font can now decode embedded *monochrome and grayscale* bitmap

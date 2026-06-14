@@ -71,6 +71,7 @@ const LOOKUP_CURSIVE_POS: u16 = 3;
 const LOOKUP_MARK_BASE_POS: u16 = 4;
 const LOOKUP_MARK_LIGATURE_POS: u16 = 5;
 const LOOKUP_MARK_MARK_POS: u16 = 6;
+const LOOKUP_CONTEXT_POS: u16 = 7;
 const LOOKUP_CHAIN_CONTEXT_POS: u16 = 8;
 const LOOKUP_EXTENSION_POS: u16 = 9;
 
@@ -462,6 +463,48 @@ impl<'a> GposTable<'a> {
         pos: usize,
     ) -> Option<Vec<PosRecord>> {
         self.apply_chain_context_at(lookup_index, gids, pos, 0)
+    }
+
+    /// Apply GPOS LookupType 7 (Contextual Positioning) lookup
+    /// `lookup_index` to the glyph run starting at `pos`.
+    ///
+    /// LookupType 7 is the non-chained sibling of LookupType 8: it
+    /// matches an input glyph sequence (no backtrack / lookahead window)
+    /// and, on a hit, dispatches the rule's `SequenceLookupRecord[]`
+    /// into nested per-glyph positioning lookups exactly as the chained
+    /// path does. It is the GPOS analogue of GSUB LookupType 5.
+    ///
+    /// Returns `Some(records)` — a `Vec<PosRecord>` listing every
+    /// per-glyph adjustment the matched rule emits — when one of the
+    /// lookup's sub-tables matches the input window at `pos`. Each
+    /// `PosRecord.glyph_index` is an absolute offset into `gids`; the
+    /// caller folds the deltas into its own glyph-position state.
+    ///
+    /// All three sub-table formats are supported — the wire shapes are
+    /// the shared `SequenceContext` tables of the OpenType Layout Common
+    /// Table Formats chapter (`SequenceContextFormat1/2/3`):
+    ///
+    /// - **Format 1** — Coverage on the first input glyph + per-coverage
+    ///   `SequenceRuleSet` of explicit input-glyph sequences plus per-rule
+    ///   `SequenceLookupRecord[]`.
+    /// - **Format 2** — Coverage on the first input glyph plus a
+    ///   `ClassDef` and per-input-class `ClassSequenceRuleSet` whose
+    ///   rules are class sequences instead of glyph sequences.
+    /// - **Format 3** — an array of per-position Coverage tables (one per
+    ///   input glyph) + a single `SequenceLookupRecord[]`.
+    ///
+    /// Each `SequenceLookupRecord { sequenceIndex, lookupListIndex }`
+    /// is recursively dispatched into LookupType 1 / 2 / 3 / 4 / 6 / 8
+    /// (the same nested-dispatch table the chained path uses), bounded
+    /// by `MAX_NESTED_LOOKUP_DEPTH`. ExtensionPos (LookupType 9)
+    /// wrappers are unwrapped transparently.
+    pub fn apply_lookup_type_7(
+        &self,
+        lookup_index: u16,
+        gids: &[u16],
+        pos: usize,
+    ) -> Option<Vec<PosRecord>> {
+        self.apply_context_at(lookup_index, gids, pos, 0)
     }
 
     /// Look up the mark-to-base attachment offset for a `(base, mark)`
@@ -1271,6 +1314,59 @@ struct ChainPosMatch {
 }
 
 impl<'a> GposTable<'a> {
+    /// Non-chained context dispatch (LookupType 7). Mirror of
+    /// [`Self::apply_chain_context_at`] for the `SequenceContext`
+    /// sub-table family — no backtrack / lookahead window, otherwise
+    /// the same per-format match → `apply_pos_records` flow.
+    fn apply_context_at(
+        &self,
+        lookup_index: u16,
+        gids: &[u16],
+        pos: usize,
+        depth: u8,
+    ) -> Option<Vec<PosRecord>> {
+        if depth >= MAX_NESTED_LOOKUP_DEPTH {
+            return None;
+        }
+        if pos >= gids.len() || self.lookup_list_off == 0 {
+            return None;
+        }
+        let lookup = lookup_table_slice(self.bytes, self.lookup_list_off, lookup_index)?;
+        if lookup.len() < 6 {
+            return None;
+        }
+        let kind = read_u16(lookup, 0).ok()?;
+        let sub_count = read_u16(lookup, 4).ok()? as usize;
+        for s in 0..sub_count {
+            let sub_off = read_u16(lookup, 6 + s * 2).ok()? as usize;
+            let sub = lookup.get(sub_off..)?;
+            let (effective_kind, effective_sub) = match unwrap_extension(kind, sub) {
+                Some(p) => p,
+                None => continue,
+            };
+            if effective_kind != LOOKUP_CONTEXT_POS {
+                continue;
+            }
+            if effective_sub.len() < 2 {
+                continue;
+            }
+            let format = match read_u16(effective_sub, 0) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            let matched = match format {
+                1 => context_pos_format1_match(effective_sub, gids, pos),
+                2 => context_pos_format2_match(effective_sub, gids, pos),
+                3 => context_pos_format3_match(effective_sub, gids, pos),
+                _ => None,
+            };
+            if let Some(m) = matched {
+                return Some(self.apply_pos_records(gids, pos, &m, depth));
+            }
+        }
+        None
+    }
+
     fn apply_chain_context_at(
         &self,
         lookup_index: u16,
@@ -1447,6 +1543,13 @@ impl<'a> GposTable<'a> {
                         });
                     }
                 }
+                LOOKUP_CONTEXT_POS => {
+                    if let Some(mut nested) =
+                        self.apply_context_at(rec.lookup_index, gids, abs_idx, depth + 1)
+                    {
+                        out.append(&mut nested);
+                    }
+                }
                 LOOKUP_CHAIN_CONTEXT_POS => {
                     if let Some(mut nested) =
                         self.apply_chain_context_at(rec.lookup_index, gids, abs_idx, depth + 1)
@@ -1520,6 +1623,229 @@ impl<'a> GposTable<'a> {
         }
         None
     }
+}
+
+/// Match a SequenceContextFormat1 sub-table against `gids[pos..]`
+/// (GPOS LookupType 7, format 1).
+///
+/// Layout (per OpenType §"Sequence Context Format 1: simple glyph
+/// contexts" in the Common Table Formats chapter):
+/// ```text
+///   u16 format = 1
+///   Offset16 coverageOffset             (input[0] coverage)
+///   u16 seqRuleSetCount
+///   Offset16 seqRuleSetOffsets[seqRuleSetCount]   (may be NULL)
+///
+///   SequenceRuleSet { u16 seqRuleCount; Offset16 seqRuleOffsets[]; }
+///   SequenceRule    { u16 glyphCount; u16 seqLookupCount;
+///                     u16 inputSequence[glyphCount - 1];
+///                     SequenceLookupRecord seqLookupRecords[seqLookupCount]; }
+/// ```
+///
+/// The covered glyph's coverage index selects the `SequenceRuleSet`;
+/// the first rule whose input sequence matches `gids` is used.
+fn context_pos_format1_match(sub: &[u8], gids: &[u16], pos: usize) -> Option<ChainPosMatch> {
+    if sub.len() < 6 {
+        return None;
+    }
+    let coverage_off = read_u16(sub, 2).ok()? as usize;
+    let set_count = read_u16(sub, 4).ok()? as usize;
+    let coverage = sub.get(coverage_off..)?;
+    let cov_idx = coverage_lookup(coverage, gids[pos])? as usize;
+    if cov_idx >= set_count {
+        return None;
+    }
+    let set_off = read_u16(sub, 6 + cov_idx * 2).ok()? as usize;
+    if set_off == 0 {
+        return None;
+    }
+    let set = sub.get(set_off..)?;
+    if set.len() < 2 {
+        return None;
+    }
+    let rule_count = read_u16(set, 0).ok()? as usize;
+    for r in 0..rule_count {
+        let rule_off = read_u16(set, 2 + r * 2).ok()? as usize;
+        let rule = match set.get(rule_off..) {
+            Some(b) => b,
+            None => continue,
+        };
+        if let Some(m) = context_pos_format1_rule_match(rule, gids, pos) {
+            return Some(m);
+        }
+    }
+    None
+}
+
+fn context_pos_format1_rule_match(rule: &[u8], gids: &[u16], pos: usize) -> Option<ChainPosMatch> {
+    if rule.len() < 4 {
+        return None;
+    }
+    let glyph_count = read_u16(rule, 0).ok()? as usize;
+    if glyph_count == 0 {
+        return None;
+    }
+    let seq_lookup_count = read_u16(rule, 2).ok()? as usize;
+    let in_extra = glyph_count - 1;
+    let mut cur = 4usize;
+    if rule.len() < cur + in_extra * 2 {
+        return None;
+    }
+    if pos + glyph_count > gids.len() {
+        return None;
+    }
+    // inputSequence starts with the SECOND glyph (index 0 == sequence
+    // position 1); the first glyph was already matched by Coverage.
+    for i in 0..in_extra {
+        let want = read_u16(rule, cur + i * 2).ok()?;
+        if gids[pos + 1 + i] != want {
+            return None;
+        }
+    }
+    cur += in_extra * 2;
+    let records = read_pos_lookup_records(rule, cur, seq_lookup_count)?;
+    Some(ChainPosMatch {
+        input_len: glyph_count,
+        records,
+    })
+}
+
+/// Match a SequenceContextFormat2 sub-table against `gids[pos..]`
+/// (GPOS LookupType 7, format 2).
+///
+/// Layout (per OpenType §"Sequence Context Format 2: class-based glyph
+/// contexts"):
+/// ```text
+///   u16 format = 2
+///   Offset16 coverageOffset
+///   Offset16 classDefOffset
+///   u16 classSeqRuleSetCount
+///   Offset16 classSeqRuleSetOffsets[classSeqRuleSetCount]   (may be NULL)
+///
+///   ClassSequenceRuleSet { u16 classSeqRuleCount; Offset16 classSeqRuleOffsets[]; }
+///   ClassSequenceRule    { u16 glyphCount; u16 seqLookupCount;
+///                          u16 inputSequence[glyphCount - 1];   (class values)
+///                          SequenceLookupRecord seqLookupRecords[seqLookupCount]; }
+/// ```
+///
+/// Coverage gates participation; the first input glyph's class selects
+/// the `ClassSequenceRuleSet`. Remaining positions are matched by class.
+fn context_pos_format2_match(sub: &[u8], gids: &[u16], pos: usize) -> Option<ChainPosMatch> {
+    if sub.len() < 8 {
+        return None;
+    }
+    let coverage_off = read_u16(sub, 2).ok()? as usize;
+    let class_def_off = read_u16(sub, 4).ok()? as usize;
+    let set_count = read_u16(sub, 6).ok()? as usize;
+    let coverage = sub.get(coverage_off..)?;
+    coverage_lookup(coverage, gids[pos])?;
+    let class_def = sub.get(class_def_off..)?;
+    let in_class0 = class_def_lookup(class_def, gids[pos]).unwrap_or(0);
+    if in_class0 as usize >= set_count {
+        return None;
+    }
+    let set_off = read_u16(sub, 8 + in_class0 as usize * 2).ok()? as usize;
+    if set_off == 0 {
+        return None;
+    }
+    let set = sub.get(set_off..)?;
+    if set.len() < 2 {
+        return None;
+    }
+    let rule_count = read_u16(set, 0).ok()? as usize;
+    for r in 0..rule_count {
+        let rule_off = read_u16(set, 2 + r * 2).ok()? as usize;
+        let rule = match set.get(rule_off..) {
+            Some(b) => b,
+            None => continue,
+        };
+        if let Some(m) = context_pos_format2_rule_match(rule, gids, pos, class_def) {
+            return Some(m);
+        }
+    }
+    None
+}
+
+fn context_pos_format2_rule_match(
+    rule: &[u8],
+    gids: &[u16],
+    pos: usize,
+    class_def: &[u8],
+) -> Option<ChainPosMatch> {
+    if rule.len() < 4 {
+        return None;
+    }
+    let glyph_count = read_u16(rule, 0).ok()? as usize;
+    if glyph_count == 0 {
+        return None;
+    }
+    let seq_lookup_count = read_u16(rule, 2).ok()? as usize;
+    let in_extra = glyph_count - 1;
+    let mut cur = 4usize;
+    if rule.len() < cur + in_extra * 2 {
+        return None;
+    }
+    if pos + glyph_count > gids.len() {
+        return None;
+    }
+    // inputSequence is class values starting at the second position.
+    for i in 0..in_extra {
+        let want = read_u16(rule, cur + i * 2).ok()?;
+        let got = class_def_lookup(class_def, gids[pos + 1 + i]).unwrap_or(0);
+        if want != got {
+            return None;
+        }
+    }
+    cur += in_extra * 2;
+    let records = read_pos_lookup_records(rule, cur, seq_lookup_count)?;
+    Some(ChainPosMatch {
+        input_len: glyph_count,
+        records,
+    })
+}
+
+/// Match a SequenceContextFormat3 sub-table against `gids[pos..]`
+/// (GPOS LookupType 7, format 3).
+///
+/// Layout (per OpenType §"Sequence Context Format 3: coverage-based
+/// glyph contexts"):
+/// ```text
+///   u16 format = 3
+///   u16 glyphCount
+///   u16 seqLookupCount
+///   Offset16 coverageOffsets[glyphCount]
+///   SequenceLookupRecord seqLookupRecords[seqLookupCount]
+/// ```
+///
+/// Each input position is gated by its own Coverage table; a single
+/// record array applies when every position is covered.
+fn context_pos_format3_match(sub: &[u8], gids: &[u16], pos: usize) -> Option<ChainPosMatch> {
+    if sub.len() < 6 {
+        return None;
+    }
+    let glyph_count = read_u16(sub, 2).ok()? as usize;
+    if glyph_count == 0 {
+        return None;
+    }
+    let seq_lookup_count = read_u16(sub, 4).ok()? as usize;
+    let mut cur = 6usize;
+    if sub.len() < cur + glyph_count * 2 {
+        return None;
+    }
+    if pos + glyph_count > gids.len() {
+        return None;
+    }
+    for i in 0..glyph_count {
+        let cov_off = read_u16(sub, cur + i * 2).ok()? as usize;
+        let cov = sub.get(cov_off..)?;
+        coverage_lookup(cov, gids[pos + i])?;
+    }
+    cur += glyph_count * 2;
+    let records = read_pos_lookup_records(sub, cur, seq_lookup_count)?;
+    Some(ChainPosMatch {
+        input_len: glyph_count,
+        records,
+    })
 }
 
 /// Match a ChainContextPosFormat1 sub-table against `gids[pos..]`.
@@ -2976,5 +3302,234 @@ mod tests {
         let r = g.apply_lookup_type_3(0, 6).unwrap();
         assert_eq!(r.entry, Some((70, 110)));
         assert_eq!(r.exit, Some((130, 210)));
+    }
+
+    // ---- LookupType 7 (contextual positioning) ---------------------
+
+    /// SinglePos Format 1 sub-table: covers `gid`, x_adv = `adv`.
+    fn single_pos_sub(gid: u16, adv: i16) -> Vec<u8> {
+        let mut cov = Vec::new();
+        cov.extend_from_slice(&1u16.to_be_bytes());
+        cov.extend_from_slice(&1u16.to_be_bytes());
+        cov.extend_from_slice(&gid.to_be_bytes());
+        let mut sub = Vec::new();
+        sub.extend_from_slice(&1u16.to_be_bytes()); // format
+        sub.extend_from_slice(&8u16.to_be_bytes()); // covOff
+        sub.extend_from_slice(&VF_X_ADVANCE.to_be_bytes());
+        sub.extend_from_slice(&adv.to_be_bytes());
+        sub.extend_from_slice(&cov);
+        sub
+    }
+
+    /// Assemble a 2-lookup GPOS: lookup 0 = the supplied single-pos
+    /// sub-table, lookup 1 = the supplied context sub-table wrapped as
+    /// LookupType 7.
+    fn assemble_context_gpos(single_sub: &[u8], ctx_sub: &[u8]) -> Vec<u8> {
+        let lookup0 = wrap_lookup(LOOKUP_SINGLE_POS, single_sub);
+        let lookup1 = wrap_lookup(LOOKUP_CONTEXT_POS, ctx_sub);
+        let lookup_list_header_len = 2 + 2 * 2;
+        let mut lookup_list = Vec::new();
+        lookup_list.extend_from_slice(&2u16.to_be_bytes());
+        let mut running = lookup_list_header_len as u16;
+        lookup_list.extend_from_slice(&running.to_be_bytes());
+        running += lookup0.len() as u16;
+        lookup_list.extend_from_slice(&running.to_be_bytes());
+        lookup_list.extend_from_slice(&lookup0);
+        lookup_list.extend_from_slice(&lookup1);
+
+        let mut gpos = Vec::new();
+        gpos.extend_from_slice(&1u16.to_be_bytes()); // major
+        gpos.extend_from_slice(&0u16.to_be_bytes()); // minor
+        gpos.extend_from_slice(&0u16.to_be_bytes()); // scriptList
+        gpos.extend_from_slice(&0u16.to_be_bytes()); // featureList
+        gpos.extend_from_slice(&10u16.to_be_bytes()); // lookupList
+        gpos.extend_from_slice(&lookup_list);
+        gpos
+    }
+
+    /// SequenceContextFormat1: input sequence [10, 20], emits nested
+    /// single-pos lookup 0 at sequence index 1 (gid 20 → x_adv +50).
+    fn build_context_pos_format1() -> Vec<u8> {
+        let single_sub = single_pos_sub(20, 50);
+        // Coverage covers input[0] = gid 10.
+        let mut cov = Vec::new();
+        cov.extend_from_slice(&1u16.to_be_bytes());
+        cov.extend_from_slice(&1u16.to_be_bytes());
+        cov.extend_from_slice(&10u16.to_be_bytes());
+        // SequenceRule: glyphCount=2, seqLookupCount=1,
+        // inputSequence=[20] (second glyph), record (seq=1, lk=0).
+        let mut rule = Vec::new();
+        rule.extend_from_slice(&2u16.to_be_bytes()); // glyphCount
+        rule.extend_from_slice(&1u16.to_be_bytes()); // seqLookupCount
+        rule.extend_from_slice(&20u16.to_be_bytes()); // inputSequence[0]
+        rule.extend_from_slice(&1u16.to_be_bytes()); // seqIndex = 1
+        rule.extend_from_slice(&0u16.to_be_bytes()); // lookupIndex = 0
+                                                     // SequenceRuleSet: count=1 + offset (after 4-byte header).
+        let mut set = Vec::new();
+        set.extend_from_slice(&1u16.to_be_bytes());
+        set.extend_from_slice(&4u16.to_be_bytes());
+        set.extend_from_slice(&rule);
+        // Sub-table header: format + covOff + setCount + setOff[0] = 8.
+        let header_len = 8u16;
+        let cov_off = header_len;
+        let set_off = cov_off + cov.len() as u16;
+        let mut sub = Vec::new();
+        sub.extend_from_slice(&1u16.to_be_bytes()); // format
+        sub.extend_from_slice(&cov_off.to_be_bytes());
+        sub.extend_from_slice(&1u16.to_be_bytes()); // setCount
+        sub.extend_from_slice(&set_off.to_be_bytes());
+        sub.extend_from_slice(&cov);
+        sub.extend_from_slice(&set);
+        assemble_context_gpos(&single_sub, &sub)
+    }
+
+    #[test]
+    fn context_pos_format1_dispatches_nested_single_pos() {
+        let bytes = build_context_pos_format1();
+        let g = GposTable::parse(&bytes).unwrap();
+        // Run [10, 20]; rule fires at pos=0 → emit one PosRecord at the
+        // input glyph at sequence index 1 (abs index 1) with x_adv=+50.
+        let recs = g.apply_lookup_type_7(1, &[10, 20], 0).unwrap();
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].glyph_index, 1);
+        assert_eq!(recs[0].value.x_advance, 50);
+    }
+
+    #[test]
+    fn context_pos_format1_no_match() {
+        let bytes = build_context_pos_format1();
+        let g = GposTable::parse(&bytes).unwrap();
+        // Second input glyph differs.
+        assert_eq!(g.apply_lookup_type_7(1, &[10, 21], 0), None);
+        // First glyph not covered.
+        assert_eq!(g.apply_lookup_type_7(1, &[11, 20], 0), None);
+        // Window runs off the end.
+        assert_eq!(g.apply_lookup_type_7(1, &[10], 0), None);
+        // Out-of-range lookup index.
+        assert_eq!(g.apply_lookup_type_7(99, &[10, 20], 0), None);
+        // Wrong lookup type (lookup 0 is single-pos).
+        assert_eq!(g.apply_lookup_type_7(0, &[10, 20], 0), None);
+    }
+
+    /// SequenceContextFormat2: class-based. Class 1 = {10}, class 2 =
+    /// {20}; rule for class-1 first glyph requires class 2 at the
+    /// second position; emits single-pos lookup 0 at sequence index 1.
+    fn build_context_pos_format2() -> Vec<u8> {
+        let single_sub = single_pos_sub(20, 50);
+        // ClassDef format 2 with two ranges: 10→class1, 20→class2.
+        let mut cd = Vec::new();
+        cd.extend_from_slice(&2u16.to_be_bytes()); // format
+        cd.extend_from_slice(&2u16.to_be_bytes()); // rangeCount
+        cd.extend_from_slice(&10u16.to_be_bytes()); // start
+        cd.extend_from_slice(&10u16.to_be_bytes()); // end
+        cd.extend_from_slice(&1u16.to_be_bytes()); // class 1
+        cd.extend_from_slice(&20u16.to_be_bytes());
+        cd.extend_from_slice(&20u16.to_be_bytes());
+        cd.extend_from_slice(&2u16.to_be_bytes()); // class 2
+                                                   // Coverage covers the first-position glyph (gid 10).
+        let mut cov = Vec::new();
+        cov.extend_from_slice(&1u16.to_be_bytes());
+        cov.extend_from_slice(&1u16.to_be_bytes());
+        cov.extend_from_slice(&10u16.to_be_bytes());
+        // ClassSequenceRule: glyphCount=2, seqLookupCount=1,
+        // inputSequence=[class 2], record (seq=1, lk=0).
+        let mut rule = Vec::new();
+        rule.extend_from_slice(&2u16.to_be_bytes());
+        rule.extend_from_slice(&1u16.to_be_bytes());
+        rule.extend_from_slice(&2u16.to_be_bytes()); // class value at pos 1
+        rule.extend_from_slice(&1u16.to_be_bytes()); // seqIndex
+        rule.extend_from_slice(&0u16.to_be_bytes()); // lookupIndex
+        let mut set = Vec::new();
+        set.extend_from_slice(&1u16.to_be_bytes());
+        set.extend_from_slice(&4u16.to_be_bytes());
+        set.extend_from_slice(&rule);
+        // Header: format + covOff + cdOff + setCount + setOff[0..2].
+        // setCount=2 (class 0 → NULL, class 1 → real). Header = 8 + 4.
+        let set_count = 2u16;
+        let header_len = 8 + (set_count as usize) * 2;
+        let cov_off = header_len as u16;
+        let cd_off = cov_off + cov.len() as u16;
+        let set_off = cd_off + cd.len() as u16;
+        let mut sub = Vec::new();
+        sub.extend_from_slice(&2u16.to_be_bytes()); // format
+        sub.extend_from_slice(&cov_off.to_be_bytes());
+        sub.extend_from_slice(&cd_off.to_be_bytes());
+        sub.extend_from_slice(&set_count.to_be_bytes());
+        sub.extend_from_slice(&0u16.to_be_bytes()); // class 0 → NULL
+        sub.extend_from_slice(&set_off.to_be_bytes()); // class 1 → set
+        sub.extend_from_slice(&cov);
+        sub.extend_from_slice(&cd);
+        sub.extend_from_slice(&set);
+        assemble_context_gpos(&single_sub, &sub)
+    }
+
+    #[test]
+    fn context_pos_format2_class_based_dispatch() {
+        let bytes = build_context_pos_format2();
+        let g = GposTable::parse(&bytes).unwrap();
+        let recs = g.apply_lookup_type_7(1, &[10, 20], 0).unwrap();
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].glyph_index, 1);
+        assert_eq!(recs[0].value.x_advance, 50);
+    }
+
+    #[test]
+    fn context_pos_format2_no_match_when_class_differs() {
+        let bytes = build_context_pos_format2();
+        let g = GposTable::parse(&bytes).unwrap();
+        // gid 30 maps to class 0, not the rule's class 2 at pos 1.
+        // It is also not in coverage at pos 0, so a [10, 30] run misses.
+        assert_eq!(g.apply_lookup_type_7(1, &[10, 30], 0), None);
+    }
+
+    /// SequenceContextFormat3: per-position coverage. pos 0 covers
+    /// {10}, pos 1 covers {20}; single record (seq=1, lk=0).
+    fn build_context_pos_format3() -> Vec<u8> {
+        let single_sub = single_pos_sub(20, 50);
+        let mut cov0 = Vec::new();
+        cov0.extend_from_slice(&1u16.to_be_bytes());
+        cov0.extend_from_slice(&1u16.to_be_bytes());
+        cov0.extend_from_slice(&10u16.to_be_bytes());
+        let mut cov1 = Vec::new();
+        cov1.extend_from_slice(&1u16.to_be_bytes());
+        cov1.extend_from_slice(&1u16.to_be_bytes());
+        cov1.extend_from_slice(&20u16.to_be_bytes());
+        // Header: format + glyphCount + seqLookupCount + covOff[0..2]
+        //         + record = 2+2+2+ (2*2) + 4 = 14.
+        let glyph_count = 2u16;
+        let header_len = 6 + (glyph_count as usize) * 2 + 4;
+        let cov0_off = header_len as u16;
+        let cov1_off = cov0_off + cov0.len() as u16;
+        let mut sub = Vec::new();
+        sub.extend_from_slice(&3u16.to_be_bytes()); // format
+        sub.extend_from_slice(&glyph_count.to_be_bytes());
+        sub.extend_from_slice(&1u16.to_be_bytes()); // seqLookupCount
+        sub.extend_from_slice(&cov0_off.to_be_bytes());
+        sub.extend_from_slice(&cov1_off.to_be_bytes());
+        sub.extend_from_slice(&1u16.to_be_bytes()); // seqIndex
+        sub.extend_from_slice(&0u16.to_be_bytes()); // lookupIndex
+        sub.extend_from_slice(&cov0);
+        sub.extend_from_slice(&cov1);
+        assemble_context_gpos(&single_sub, &sub)
+    }
+
+    #[test]
+    fn context_pos_format3_coverage_based_dispatch() {
+        let bytes = build_context_pos_format3();
+        let g = GposTable::parse(&bytes).unwrap();
+        let recs = g.apply_lookup_type_7(1, &[10, 20], 0).unwrap();
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].glyph_index, 1);
+        assert_eq!(recs[0].value.x_advance, 50);
+    }
+
+    #[test]
+    fn context_pos_format3_no_match_when_window_short_or_uncovered() {
+        let bytes = build_context_pos_format3();
+        let g = GposTable::parse(&bytes).unwrap();
+        // Second-position glyph not covered.
+        assert_eq!(g.apply_lookup_type_7(1, &[10, 21], 0), None);
+        // Window too short.
+        assert_eq!(g.apply_lookup_type_7(1, &[10], 0), None);
     }
 }

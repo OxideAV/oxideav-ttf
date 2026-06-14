@@ -250,8 +250,11 @@ ligatures and kerning.
   script-font cursive chaining), LookupType 4 (mark-to-base
   attachment), LookupType 5 (mark-to-ligature attachment — closes
   the `fi`-ligature + above-mark gap), LookupType 6 (mark-to-mark
-  stacking), and LookupType 8 (chained-context positioning —
-  formats 1 / 2 / 3, with nested LT 1 / 2 / 3 / 4 / 6 / 8 dispatch).
+  stacking), LookupType 7 (contextual positioning — `SequenceContext`
+  formats 1 / 2 / 3, the non-chained sibling of LT 8, with nested
+  LT 1 / 2 / 3 / 4 / 6 / 7 / 8 dispatch), and LookupType 8
+  (chained-context positioning — formats 1 / 2 / 3, with nested
+  LT 1 / 2 / 3 / 4 / 6 / 8 dispatch).
   ExtensionPos (LookupType 9) is unwrapped transparently — both at
   the sub-table level (a LT-9 sub-table inside any lookup) and at
   the lookup level (a whole lookup whose `lookupType` is 9 wrapping

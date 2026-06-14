@@ -17,9 +17,14 @@
 //!   recursive sub-lookup dispatch), and LookupType 8 (reverse
 //!   chained context single substitution), discoverable via the
 //!   ScriptList / FeatureList / LookupList common-table walk.
-//! - `GPOS` LookupType 2 (pair-adjustment / kerning),
-//!   LookupType 4 (mark-to-base attachment for diacritics), and
-//!   LookupType 6 (mark-to-mark attachment for stacked diacritics).
+//! - `GPOS` LookupType 1 (single adjustment), LookupType 2
+//!   (pair-adjustment / kerning), LookupType 3 (cursive attachment),
+//!   LookupType 4 (mark-to-base attachment for diacritics), LookupType 5
+//!   (mark-to-ligature attachment), LookupType 6 (mark-to-mark
+//!   attachment for stacked diacritics), LookupType 7 (contextual
+//!   positioning — `SequenceContext` formats 1/2/3 with recursive
+//!   nested-lookup dispatch), and LookupType 8 (chained contexts
+//!   positioning).
 //! - `GDEF` (glyph class definitions).
 //! - Adobe Glyph List (AGL) glyph-name → Unicode resolution:
 //!   [`glyph_name_to_codepoints`] / [`glyph_name_to_char`] (direct
@@ -1676,6 +1681,33 @@ impl<'a> Font<'a> {
         self.gpos
             .as_ref()?
             .lookup_mark_to_ligature(ligature, ligature_component, mark)
+    }
+
+    /// Apply GPOS LookupType 7 (Contextual Positioning) to the glyph
+    /// run starting at `pos` via the lookup at `lookup_index`.
+    ///
+    /// LookupType 7 is the non-chained sibling of LookupType 8: it
+    /// matches an input glyph sequence (no backtrack / lookahead) and,
+    /// on a hit, dispatches the rule's `SequenceLookupRecord[]` into
+    /// nested per-glyph positioning lookups. Returns `Some(records)` —
+    /// a `Vec<PosRecord>` of the per-glyph adjustments emitted — when a
+    /// sub-table matches the input window at `pos`. Each
+    /// `PosRecord.glyph_index` is an absolute offset into `gids`.
+    ///
+    /// All three sub-table formats (1 glyph-sequence, 2 class-based,
+    /// 3 coverage-based) are supported. ExtensionPos (LookupType 9)
+    /// wrappers are unwrapped transparently; nested records into
+    /// LookupType 1 / 2 / 3 / 4 / 6 / 7 / 8 dispatch through the same
+    /// bounded-recursion machinery as the chained path.
+    pub fn gpos_apply_lookup_type_7(
+        &self,
+        lookup_index: u16,
+        gids: &[u16],
+        pos: usize,
+    ) -> Option<Vec<PosRecord>> {
+        self.gpos
+            .as_ref()?
+            .apply_lookup_type_7(lookup_index, gids, pos)
     }
 
     /// Apply GPOS LookupType 8 (Chained Contexts Positioning) to the
