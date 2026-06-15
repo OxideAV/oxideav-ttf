@@ -1346,6 +1346,49 @@ impl<'a> Font<'a> {
         }
     }
 
+    /// Like [`Self::gsub_features_for_script`], but honours the GSUB
+    /// **FeatureVariations** table (ISO/IEC 14496-22:2019 §6.2.9) at the
+    /// font's current variation instance.
+    ///
+    /// A variable font may publish a version-1.1 GSUB header that swaps
+    /// the lookups behind a feature for an alternate set when the
+    /// current instance falls inside a normalised range on one or more
+    /// `fvar` axes (the canonical use is optical-size- or
+    /// weight-conditional substitution). This accessor evaluates the
+    /// active condition set against [`Self::normalised_coords`] and, for
+    /// every feature whose index is overridden by the matching
+    /// FeatureTableSubstitution, returns the alternate lookup-index list
+    /// while keeping the feature tag unchanged.
+    ///
+    /// For static fonts, v1.0 GSUB headers, or instances that match no
+    /// condition set, the result is identical to
+    /// [`Self::gsub_features_for_script`]. Set the instance with
+    /// [`Self::set_variation_coords`] first.
+    pub fn gsub_features_for_script_at_instance(
+        &self,
+        script_tag: [u8; 4],
+        lang_tag: Option<[u8; 4]>,
+    ) -> Vec<GsubFeature> {
+        match self.gsub.as_ref() {
+            Some(g) => {
+                let coords = self.normalised_coords();
+                g.features_for_script_at_coords(script_tag, lang_tag, &coords)
+            }
+            None => Vec::new(),
+        }
+    }
+
+    /// `true` when the GSUB table carries a §6.2.9 FeatureVariations
+    /// table (a version-1.1 header with a non-zero offset). When this is
+    /// `false`, [`Self::gsub_features_for_script_at_instance`] is
+    /// identical to [`Self::gsub_features_for_script`].
+    pub fn gsub_has_feature_variations(&self) -> bool {
+        self.gsub
+            .as_ref()
+            .map(|g| g.has_feature_variations())
+            .unwrap_or(false)
+    }
+
     /// Apply GSUB LookupType 1 (Single Substitution) lookup
     /// `lookup_index` to a single input glyph `gid`.
     ///

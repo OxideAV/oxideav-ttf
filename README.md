@@ -252,6 +252,25 @@ ligatures and kerning.
   fonts). All sit behind a ScriptList / FeatureList walk so callers
   can ask "which lookup indices implement feature `init` for script
   `arab`?"
+- `GSUB` **FeatureVariations** (ISO/IEC 14496-22:2019 §6.2.9) — the
+  version-1.1 header's `featureVariationsOffset` is decoded so a
+  variable font can swap the lookups behind a feature for an alternate
+  set at the current variation instance (the canonical use is
+  optical-size- or weight-conditional substitution). The shared
+  `FeatureVariations` / `ConditionSet` / `ConditionTableFormat1` (font
+  variation axis range, the only defined condition format) /
+  `FeatureTableSubstitution` substructure evaluates each record's
+  AND-ed condition set against the avar-bent normalised coordinate
+  vector and applies the §6.2.9 first-match rule (universal-match on a
+  zero condition-set offset; unrecognised condition formats and
+  unsupported substitution-table versions both fail the record so a
+  later record can win, the spec's forward-compatibility behaviour).
+  `Font::gsub_features_for_script_at_instance(script, lang)` returns the
+  per-feature lookup lists for the current instance — identical to
+  `gsub_features_for_script` for static fonts, v1.0 headers, or
+  instances matching no condition set; `Font::gsub_has_feature_variations()`
+  gates. Set the instance with `set_variation_coords` first. Alternate
+  feature tables keep the default feature's tag per §6.2.9.
 - `GPOS` LookupType 1 (single positioning — formats 1 + 2),
   LookupType 2 (pair-adjustment / kerning), LookupType 3 (cursive
   attachment — entry/exit anchor pairs for Arabic Nastaliq +
@@ -708,6 +727,11 @@ if vfont.is_variable() {
 - STAT (style attributes) landed in r217 — see above. The format-2
   overlapping-range tie-break (§7.3.7.3) is documented as caller
   policy; we expose the full document-order record array unchanged.
+- GSUB FeatureVariations (§6.2.9) landed this round — see above. The
+  identical substructure on the **GPOS** v1.1 header is not yet wired
+  (GPOS has no `features_for_script` walker today); the shared
+  `tables::feature_variations` decoder is ready to drive it once that
+  walker exists.
 
 ## Test fixtures
 

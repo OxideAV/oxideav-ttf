@@ -85,6 +85,10 @@ pub struct GsubTable<'a> {
     script_list_off: u32,
     feature_list_off: u32,
     lookup_list_off: u32,
+    /// `Offset32 featureVariationsOffset` from a version-1.1 header
+    /// (ISO/IEC 14496-22:2019 §6.2.9). `0` for v1.0 fonts and for v1.1
+    /// fonts that ship no feature variations.
+    feature_variations_off: u32,
 }
 
 impl<'a> GsubTable<'a> {
@@ -100,11 +104,25 @@ impl<'a> GsubTable<'a> {
         // Offset16 scriptList at +4
         // Offset16 featureList at +6
         // Offset16 lookupList at +8
+        // Offset32 featureVariations at +10 (version 1.1 only)
+        let minor = read_u16(bytes, 2)?;
         let script_list_off = read_u16(bytes, 4)? as u32;
         let feature_list_off = read_u16(bytes, 6)? as u32;
         let lookup_list_off = read_u16(bytes, 8)? as u32;
+        // The v1.1 header (§6.2.9) carries a 4-byte featureVariations
+        // offset after the three v1.0 offsets. v1.0 fonts stop at +10.
+        let feature_variations_off = if minor >= 1 && bytes.len() >= 14 {
+            read_u32(bytes, 10)?
+        } else {
+            0
+        };
         // Each offset must either be 0 (table absent) or fit inside `bytes`.
-        for off in [script_list_off, feature_list_off, lookup_list_off] {
+        for off in [
+            script_list_off,
+            feature_list_off,
+            lookup_list_off,
+            feature_variations_off,
+        ] {
             if off != 0 && off as usize >= bytes.len() {
                 return Err(Error::BadOffset);
             }
@@ -114,6 +132,7 @@ impl<'a> GsubTable<'a> {
             script_list_off,
             feature_list_off,
             lookup_list_off,
+            feature_variations_off,
         })
     }
 
@@ -167,6 +186,53 @@ impl<'a> GsubTable<'a> {
         &self,
         script_tag: [u8; 4],
         lang_tag: Option<[u8; 4]>,
+    ) -> Vec<GsubFeature> {
+        self.features_for_script_inner(script_tag, lang_tag, None)
+    }
+
+    /// Like [`Self::features_for_script`], but applies the §6.2.9
+    /// FeatureVariations substitution active at `normalised_coords` (the
+    /// avar-bent normalised axis vector, e.g.
+    /// [`super::super::Font::normalised_coords`]).
+    ///
+    /// For each feature whose index is overridden by the matching
+    /// FeatureTableSubstitution, the returned [`GsubFeature`] carries the
+    /// alternate feature's lookup-index list instead of the default
+    /// one — the feature tag stays the same per §6.2.9 ("An alternate
+    /// feature table maintains the same feature tag association as the
+    /// default feature table"). Non-substituted features are unchanged.
+    ///
+    /// Static fonts, v1.0 GSUB headers, and fonts whose feature
+    /// variations match no record all behave identically to
+    /// [`Self::features_for_script`].
+    pub fn features_for_script_at_coords(
+        &self,
+        script_tag: [u8; 4],
+        lang_tag: Option<[u8; 4]>,
+        normalised_coords: &[f32],
+    ) -> Vec<GsubFeature> {
+        let fv = match super::feature_variations::FeatureVariations::parse(
+            self.bytes,
+            self.feature_variations_off,
+        ) {
+            Ok(Some(fv)) => fv,
+            _ => return self.features_for_script_inner(script_tag, lang_tag, None),
+        };
+        let subst = fv.active_substitution(normalised_coords);
+        self.features_for_script_inner(script_tag, lang_tag, subst.as_ref())
+    }
+
+    /// `true` when this GSUB table carries a non-empty
+    /// FeatureVariations table (a v1.1 header with a non-zero offset).
+    pub fn has_feature_variations(&self) -> bool {
+        self.feature_variations_off != 0
+    }
+
+    fn features_for_script_inner(
+        &self,
+        script_tag: [u8; 4],
+        lang_tag: Option<[u8; 4]>,
+        subst: Option<&super::feature_variations::FeatureTableSubstitution<'a>>,
     ) -> Vec<GsubFeature> {
         let mut out = Vec::new();
         if self.script_list_off == 0 || self.feature_list_off == 0 {
@@ -296,7 +362,10 @@ impl<'a> GsubTable<'a> {
             Err(_) => return out,
         };
 
-        // Helper to resolve one feature index → GsubFeature.
+        // Helper to resolve one feature index → GsubFeature. When a
+        // §6.2.9 FeatureTableSubstitution is active and overrides this
+        // feature index, the alternate feature's lookup-index list
+        // replaces the default one (the tag is unchanged per spec).
         let push_feature = |fi: u16, into: &mut Vec<GsubFeature>| {
             if (fi as usize) >= total_features {
                 return;
@@ -311,6 +380,17 @@ impl<'a> GsubTable<'a> {
                 feature_list[r + 2],
                 feature_list[r + 3],
             ];
+            // §6.2.9 substitution: if this feature index is overridden,
+            // use the alternate feature's lookup-index list directly.
+            if let Some(s) = subst {
+                if let Some(idxs) = s.lookup_indices_for_feature(fi) {
+                    into.push(GsubFeature {
+                        tag,
+                        lookup_indices: idxs,
+                    });
+                    return;
+                }
+            }
             let foff = match read_u16(feature_list, r + 4) {
                 Ok(v) => v as usize,
                 Err(_) => return,

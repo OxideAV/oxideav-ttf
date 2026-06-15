@@ -7,6 +7,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — GSUB FeatureVariations (variable-font feature substitution) (2026-06-15)
+
+GSUB now decodes the **FeatureVariations** substructure (ISO/IEC
+14496-22:2019 §6.2.9), the mechanism a variable font uses to swap the
+set of lookups behind a feature for an alternate set when the current
+variation instance falls inside a normalised range on one or more
+`fvar` axes (canonical use: optical-size- or weight-conditional
+substitution).
+
+- The GSUB header parse was extended to the **version 1.1** form: the
+  `Offset32 featureVariationsOffset` after the three v1.0 offsets is
+  read when `minorVersion >= 1` (v1.0 fonts and v1.1 fonts that ship no
+  feature variations are unaffected; the offset is bounds-checked).
+- New shared `tables::feature_variations` module decodes the whole
+  §6.2.9 substructure:
+  - **FeatureVariations** table (header + `FeatureVariationRecord[]`),
+    with the first-match record-evaluation rule and the universal-match
+    (zero `conditionSetOffset`) and no-substitution (zero
+    `featureTableSubstitutionOffset`) special cases.
+  - **ConditionSet** table — conditions are conjunctively AND-ed; an
+    empty set matches all contexts.
+  - **ConditionTableFormat1** (Font Variation Axis Range) — the only
+    defined format; the F2DOT14 `[filterRangeMin, filterRangeMax]`
+    inclusive range is tested against the axis's normalised value. An
+    unrecognised condition format fails the set (§6.2.9
+    forward-compatibility), and an axis index beyond the supplied
+    coordinate vector degrades the record to non-matching.
+  - **FeatureTableSubstitution** table — the sorted
+    `FeatureTableSubstitutionRecord[]` with the §6.2.9 "first record
+    with the index wins; stop on a higher index" lookup and the
+    "reject this record on an unsupported substitution-table major
+    version, continue to the next" rule. The alternate feature table
+    keeps the default feature's tag.
+- New public API:
+  - `Font::gsub_features_for_script_at_instance(script, lang)` — like
+    `gsub_features_for_script`, but applies the active FeatureVariations
+    substitution at the font's current variation instance (evaluated
+    against the existing avar-bent `Font::normalised_coords`). For every
+    feature whose index is overridden, the returned `GsubFeature`
+    carries the alternate lookup-index list while keeping the tag.
+  - `Font::gsub_has_feature_variations()` — presence gate.
+  - `GsubTable::features_for_script_at_coords` /
+    `GsubTable::has_feature_variations` — the lower-level entry points.
+- 7 unit tests in the new module (version rejection, zero-offset
+  no-table, in-range / out-of-range / boundary substitution, missing
+  axis coordinate, universal condition set, unsupported
+  substitution-version skip) plus a new `tests/feature_variations.rs`
+  integration suite (2 tests: a synthetic `wght` variable font that
+  swaps `liga` lookups at high weight through the `Font` boundary, and
+  a no-feature-variations baseline across the three bundled fixtures).
+
+Out of scope this round: the identical substructure on the GPOS v1.1
+header (GPOS has no `features_for_script` walker yet; the shared
+decoder is ready to drive it when that lands).
+
+Spec: ISO/IEC 14496-22:2019 §6.2.9 ("Feature variations") + the
+version-1.1 GSUB header layout.
+
 ### Added — `glyf` composite point-matching + scaled component offsets (2026-06-14)
 
 Two `glyf` composite-glyph placement mechanisms from the "Composite glyph
