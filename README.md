@@ -5,7 +5,7 @@ framework. Implements the sfnt container, the core OpenType tables, and
 just enough of GSUB / GPOS to do Latin/Cyrillic/Greek/CJK shaping with
 ligatures and kerning.
 
-## Round-1 scope (this release)
+## Supported tables
 
 - sfnt + table directory walker.
 - `head`, `hhea`, `maxp`, `cmap` (ALL base formats — 0, 2, 4, 6, 8,
@@ -109,8 +109,8 @@ ligatures and kerning.
   all_always_linear()` short-circuits the "every glyph carries the
   sentinel" common case for rasterisers that want to skip per-glyph
   probing. §5.7.4 names `hdmx` and `vdmx` as the complementary
-  precomputed-advance methods; `hdmx` landed alongside this round
-  (see below), `VDMX` also landed alongside this round (see below)),
+  precomputed-advance methods; both `hdmx` and `VDMX` are also
+  supported (see below)),
   `hdmx` (horizontal device metrics, ISO/IEC 14496-22:2019 §5.7.2 —
   the 8-byte header (`uint16 version`, `int16 numRecords`,
   `int32 sizeDeviceRecord`) plus `numRecords` device records, each
@@ -310,7 +310,7 @@ ligatures and kerning.
   14496-22:2019 §5.6.2 / §5.6.3) — the location side (`EBLC`) reuses
   the same `CblcTable` walker that drives `CBLC` (it already accepts
   the `majorVersion == 2` header and all five IndexSubTable formats
-  1–5), so this round adds the `EBDT` image-data decoder for the five
+  1–5), and the `EBDT` image-data decoder covers the five
   bit-packed §5.6.2.2 pixel formats: format 1 (small metrics,
   byte-aligned), 2 (small metrics, bit-aligned), 5 (bit-aligned data
   only, metrics lifted from the EBLC IndexSubTable 2/5 `BigGlyphMetrics`),
@@ -701,35 +701,37 @@ if vfont.is_variable() {
 }
 ```
 
-## Out of scope (round 2+)
+## Shaping coverage
 
-- CFF / Type 2 charstrings — moves to a sibling `oxideav-otf` crate.
-- Bidi, Arabic shaping, Indic conjuncts, complex contextual GSUB/GPOS.
-- TrueType bytecode hinting (modern AA at ≥ 16 px does not need it).
-- ~~cmap formats 8 and 10~~ landed in r276 — every base cmap
-  subtable format (0, 2, 4, 6, 8, 10, 12, 13) plus the format-14
-  UVS sidecar is now decoded; see above.
-- All GPOS lookup types except LookupType 7 (the now-fully-handled
-  LookupType 9 ExtensionPos wrapper plays its role) are implemented:
-  1 (single), 2 (pair), 3 (cursive attachment), 4 (mark-to-base),
-  5 (mark-to-ligature), 6 (mark-to-mark), 8 (chained context with
-  nested LT 1/2/3/4/6/8 dispatch). All seven public GSUB lookup
-  types (1 single, 2 multiple, 3 alternate, 4 ligature, 5
-  contextual, 6 chained context, 8 reverse chained context) are
-  implemented; ExtensionSubst LookupType 7 (GSUB) and ExtensionPos
-  LookupType 9 (GPOS) are unwrapped transparently for every type
-  both at the sub-table and lookup level.
+All seven public GSUB lookup types (1 single, 2 multiple, 3 alternate,
+4 ligature, 5 contextual, 6 chained context, 8 reverse chained context)
+are implemented. GPOS covers LookupTypes 1 (single), 2 (pair),
+3 (cursive attachment), 4 (mark-to-base), 5 (mark-to-ligature),
+6 (mark-to-mark), and 8 (chained context with nested dispatch);
+LookupType 7 plays no shaping role of its own. ExtensionSubst (GSUB
+LookupType 7) and ExtensionPos (GPOS LookupType 9) wrappers are
+unwrapped transparently at both the sub-table and lookup level. Every
+base cmap subtable format (0, 2, 4, 6, 8, 10, 12, 13) plus the
+format-14 UVS sidecar is decoded.
+
+## Not yet supported
+
+- CFF / Type 2 charstrings — belongs in a sibling `oxideav-otf` crate.
+- Bidi, Arabic shaping, Indic conjuncts, and other complex contextual
+  shaping beyond the GSUB/GPOS lookup coverage above.
+- TrueType bytecode hinting (modern anti-aliasing at ≥ 16 px does not
+  need it).
 - COLR **v1** paint graph (gradients, transforms, composites) — only
   the v0 flat layer stack is supported.
 - avar **v2** delta-set index map (variable-axis remap).
-- gvar delta propagation into composite-glyph component offsets and
-  the four phantom points.
-- STAT (style attributes) landed in r217 — see above. The format-2
-  overlapping-range tie-break (§7.3.7.3) is documented as caller
-  policy; we expose the full document-order record array unchanged.
-- GSUB FeatureVariations (§6.2.9) landed this round — see above. The
-  identical substructure on the **GPOS** v1.1 header is not yet wired
-  (GPOS has no `features_for_script` walker today); the shared
+- gvar delta propagation into composite-glyph component offsets and the
+  four phantom points.
+- The `STAT` format-2 overlapping-range tie-break (§7.3.7.3) is left to
+  caller policy; the full document-order record array is exposed
+  unchanged.
+- GSUB FeatureVariations (§6.2.9) is decoded, but the identical
+  substructure on the **GPOS** v1.1 header is not yet wired (GPOS has no
+  `features_for_script` walker today); the shared
   `tables::feature_variations` decoder is ready to drive it once that
   walker exists.
 
