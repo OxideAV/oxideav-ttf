@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.7](https://github.com/OxideAV/oxideav-ttf/compare/v0.1.6...v0.1.7) - 2026-06-15
+
+### Other
+
+- decode FeatureVariations (§6.2.9) for variable-font feature substitution
+- composite point-matching placement + scaled component offsets
+- GPOS LookupType 7 (contextual positioning) — SequenceContext formats 1/2/3
+- decode embedded monochrome + grayscale bitmap strikes
+- formats 8 (mixed 16/32-bit) and 10 (trimmed array) — all 8 base subtable formats now decoded
+- PCL 5 table parser (ISO/IEC 14496-22:2019 §5.7.7)
+- metadata table parser + 'dlng'/'slng' accessors + ScriptLangTag splitter (ISO/IEC 14496-22:2019 §5.7.6)
+- vertical device metrics table (ISO/IEC 14496-22:2019 §5.7.8)
+- horizontal device metrics table (ISO/IEC 14496-22:2019 §5.7.2)
+- drop release-plz.toml — use release-plz defaults across the workspace
+- linear-threshold table (ISO/IEC 14496-22:2019 §5.7.4)
+- full v1.0 / v2.0 / v2.5 / v3.0 structural decode + per-glyph PostScript name accessors (ISO/IEC 14496-22:2019 §5.2.10)
+- grid-fitting and scan-conversion procedure table (ISO/IEC 14496-22:2019 §5.3.7)
+- baseline table (ISO/IEC 14496-22:2019 §6.3.1)
+- vertical origin table (ISO/IEC 14496-22:2019 §5.4.4)
+- vhea + vmtx: vertical-layout metrics (ISO/IEC 14496-22:2019 §5.7.9 / §5.7.10)
+- style-attributes table (axes + format 1/2/3/4 axis values + elided fallback)
+- AttachList / LigCaretList / MarkAttachClassDef / MarkGlyphSetsDef / ItemVariationStore
+- per-glyph vertical-metrics variations table (ISO/IEC 14496-22:2019 §7.3.8)
+- per-glyph horizontal-metrics variations table (ISO/IEC 14496-22:2019 §7.3.5)
+- font-wide metrics-variations table (ISO/IEC 14496-22:2019 §7.3.6)
+- format 2 (high-byte mapping through table) for legacy CJK fonts
+
 ### Added — GSUB FeatureVariations (variable-font feature substitution) (2026-06-15)
 
 GSUB now decodes the **FeatureVariations** substructure (ISO/IEC
