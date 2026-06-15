@@ -289,6 +289,19 @@ ligatures and kerning.
   `Font::gsub_lookup_list()` enumerate every lookup as
   `(index, effective_type, subtable_count)` for shapers that need to
   find e.g. every chained-context lookup without probing each index.
+  GPOS also exposes the same ScriptList / FeatureList walk as GSUB:
+  `Font::gpos_features_for_script(script, lang)` resolves a feature tag
+  (`kern` / `mark` / `mkmk` / `curs` / `cpsp` …) to the lookup-index
+  list that implements it for the active script, with the required
+  feature emitted first. A version-1.1 GPOS header's
+  `featureVariationsOffset` is decoded through the shared §6.2.9
+  FeatureVariations substructure so a variable font can swap the lookups
+  behind a positioning feature at the current variation instance —
+  `Font::gpos_features_for_script_at_instance(script, lang)` runs the
+  AND-ed condition-set evaluation against the avar-bent normalised
+  coordinate vector (set the instance with `set_variation_coords`
+  first), and `Font::gpos_has_feature_variations()` gates. Alternate
+  feature tables keep the default feature's tag per §6.2.9.
 - `GDEF` glyph-definition table — v1.0 / v1.2 / v1.3 headers, with
   `glyphClassDef` (skip-mark filter for GPOS / GSUB), `AttachList`
   (per-glyph contour-point indices), `LigCaretList` (per-ligature
@@ -729,11 +742,9 @@ format-14 UVS sidecar is decoded.
 - The `STAT` format-2 overlapping-range tie-break (§7.3.7.3) is left to
   caller policy; the full document-order record array is exposed
   unchanged.
-- GSUB FeatureVariations (§6.2.9) is decoded, but the identical
-  substructure on the **GPOS** v1.1 header is not yet wired (GPOS has no
-  `features_for_script` walker today); the shared
-  `tables::feature_variations` decoder is ready to drive it once that
-  walker exists.
+- avar **v2** delta-set index map (variable-axis remap) — listed
+  above; the GPOS / GSUB FeatureVariations paths both honour the
+  current normalised instance but neither runs the avar v2 remap yet.
 
 ## Test fixtures
 

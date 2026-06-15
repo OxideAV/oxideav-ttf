@@ -55,6 +55,16 @@
 //! lookup itself (i.e. `apply_lookup_type_X` accepts an index whose
 //! lookup is `kind=9, inner=X` exactly the same as a plain `kind=X`).
 //!
+//! In addition to the per-lookup walkers, this module decodes the
+//! **ScriptList** + **FeatureList** at parse time so callers can ask
+//! "which lookup indices implement feature `kern` for script `latn`?"
+//! via [`super::super::Font::gpos_features_for_script`] — the same
+//! ScriptList / FeatureList / LangSys walk GSUB exposes. A version-1.1
+//! GPOS header's `featureVariationsOffset` is honoured through the
+//! shared §6.2.9 FeatureVariations substructure so a variable font can
+//! swap the lookups behind a positioning feature at the current
+//! variation instance.
+//!
 //! Spec: Microsoft OpenType §"GPOS — Glyph Positioning Table",
 //! §"Common Table Formats", Apple TrueType Reference §"GPOS",
 //! ISO/IEC 14496-22 §6 (OFF).
@@ -146,10 +156,34 @@ pub struct CursiveAttachment {
     pub exit: Option<(i16, i16)>,
 }
 
+/// One feature record from the GPOS FeatureList, resolved to the list
+/// of lookup indices that implement it. Returned by
+/// [`super::super::Font::gpos_features_for_script`] in the order the
+/// active LangSys lists its features.
+///
+/// The `tag` field is a four-byte ASCII feature identifier such as
+/// `*b"kern"`, `*b"mark"`, `*b"mkmk"`, `*b"curs"`, `*b"cpsp"` — the
+/// OpenType registered-feature catalogue. The companion structure for
+/// the GSUB FeatureList is [`super::gsub::GsubFeature`]; the two are
+/// kept distinct so callers don't accidentally feed a GSUB lookup
+/// index into a GPOS apply path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GposFeature {
+    pub tag: [u8; 4],
+    pub lookup_indices: Vec<u16>,
+}
+
 #[derive(Debug, Clone)]
 pub struct GposTable<'a> {
     bytes: &'a [u8],
+    script_list_off: u32,
+    feature_list_off: u32,
     lookup_list_off: u32,
+    /// `Offset32 featureVariationsOffset` from a version-1.1 header
+    /// (GPOS Header version 1.1; the FeatureVariations substructure is
+    /// shared with GSUB per ISO/IEC 14496-22:2019 §6.2.9). `0` for v1.0
+    /// fonts and for v1.1 fonts that ship no feature variations.
+    feature_variations_off: u32,
 }
 
 impl<'a> GposTable<'a> {
@@ -161,14 +195,302 @@ impl<'a> GposTable<'a> {
         if major != 1 {
             return Err(Error::BadStructure("GPOS: unsupported major version"));
         }
+        // GPOS Header layout (versions 1.0 and 1.1):
+        //   u16      majorVersion (= 1)
+        //   u16      minorVersion (0 or 1)
+        //   Offset16 scriptListOffset
+        //   Offset16 featureListOffset
+        //   Offset16 lookupListOffset
+        //   Offset32 featureVariationsOffset   (version 1.1 only)
+        // All offsets are from the beginning of the GPOS table.
+        let minor = read_u16(bytes, 2)?;
+        let script_list_off = read_u16(bytes, 4)? as u32;
+        let feature_list_off = read_u16(bytes, 6)? as u32;
         let lookup_list_off = read_u16(bytes, 8)? as u32;
-        if lookup_list_off as usize >= bytes.len() {
-            return Err(Error::BadOffset);
+        // The v1.1 header carries a 4-byte featureVariations offset after
+        // the three v1.0 offsets. v1.0 fonts stop at +10.
+        let feature_variations_off = if minor >= 1 && bytes.len() >= 14 {
+            read_u32(bytes, 10)?
+        } else {
+            0
+        };
+        // Each offset must either be 0 (table absent) or fit inside `bytes`.
+        for off in [
+            script_list_off,
+            feature_list_off,
+            lookup_list_off,
+            feature_variations_off,
+        ] {
+            if off != 0 && off as usize >= bytes.len() {
+                return Err(Error::BadOffset);
+            }
         }
         Ok(Self {
             bytes,
+            script_list_off,
+            feature_list_off,
             lookup_list_off,
+            feature_variations_off,
         })
+    }
+
+    /// Return all features active for `script_tag` under `lang_tag`.
+    ///
+    /// `lang_tag = None` → use the script's `DefaultLangSys`. If
+    /// `lang_tag` is supplied but isn't enumerated for the script, we
+    /// fall back to `DefaultLangSys`. If neither resolves the script at
+    /// all (or the table has no ScriptList) the returned `Vec` is empty.
+    ///
+    /// The order of returned features matches the LangSys's
+    /// `featureIndices` array order (the order a shaper should apply
+    /// them); the required feature (when present) is emitted first. The
+    /// ScriptList / FeatureList / LangSys substructure is the shared
+    /// OpenType Layout Common Table Formats layout — identical to the
+    /// one [`super::gsub::GsubTable::features_for_script`] walks.
+    pub fn features_for_script(
+        &self,
+        script_tag: [u8; 4],
+        lang_tag: Option<[u8; 4]>,
+    ) -> Vec<GposFeature> {
+        self.features_for_script_inner(script_tag, lang_tag, None)
+    }
+
+    /// Like [`Self::features_for_script`], but applies the
+    /// FeatureVariations substitution (shared §6.2.9 substructure)
+    /// active at `normalised_coords` (the avar-bent normalised axis
+    /// vector).
+    ///
+    /// For each feature whose index is overridden by the matching
+    /// FeatureTableSubstitution, the returned [`GposFeature`] carries the
+    /// alternate feature's lookup-index list instead of the default one
+    /// — the feature tag stays the same per §6.2.9. Non-substituted
+    /// features are unchanged. Static fonts, v1.0 GPOS headers, and
+    /// fonts whose feature variations match no record all behave
+    /// identically to [`Self::features_for_script`].
+    pub fn features_for_script_at_coords(
+        &self,
+        script_tag: [u8; 4],
+        lang_tag: Option<[u8; 4]>,
+        normalised_coords: &[f32],
+    ) -> Vec<GposFeature> {
+        let fv = match super::feature_variations::FeatureVariations::parse(
+            self.bytes,
+            self.feature_variations_off,
+        ) {
+            Ok(Some(fv)) => fv,
+            _ => return self.features_for_script_inner(script_tag, lang_tag, None),
+        };
+        let subst = fv.active_substitution(normalised_coords);
+        self.features_for_script_inner(script_tag, lang_tag, subst.as_ref())
+    }
+
+    /// `true` when this GPOS table carries a non-empty FeatureVariations
+    /// table (a v1.1 header with a non-zero offset).
+    pub fn has_feature_variations(&self) -> bool {
+        self.feature_variations_off != 0
+    }
+
+    fn features_for_script_inner(
+        &self,
+        script_tag: [u8; 4],
+        lang_tag: Option<[u8; 4]>,
+        subst: Option<&super::feature_variations::FeatureTableSubstitution<'a>>,
+    ) -> Vec<GposFeature> {
+        let mut out = Vec::new();
+        if self.script_list_off == 0 || self.feature_list_off == 0 {
+            return out;
+        }
+        let script_list = match self.bytes.get(self.script_list_off as usize..) {
+            Some(s) => s,
+            None => return out,
+        };
+        let feature_list = match self.bytes.get(self.feature_list_off as usize..) {
+            Some(s) => s,
+            None => return out,
+        };
+
+        // ScriptList layout: u16 scriptCount; ScriptRecord{ Tag tag,
+        // Offset16 scriptOffset } scriptRecords[scriptCount]; each
+        // scriptOffset is RELATIVE to the ScriptList start.
+        let script_count = match read_u16(script_list, 0) {
+            Ok(v) => v as usize,
+            Err(_) => return out,
+        };
+        if script_list.len() < 2 + script_count * 6 {
+            return out;
+        }
+        let mut script_off: Option<usize> = None;
+        for i in 0..script_count {
+            let r = 2 + i * 6;
+            let tag = [
+                script_list[r],
+                script_list[r + 1],
+                script_list[r + 2],
+                script_list[r + 3],
+            ];
+            if tag == script_tag {
+                let o = match read_u16(script_list, r + 4) {
+                    Ok(v) => v as usize,
+                    Err(_) => return out,
+                };
+                script_off = Some(o);
+                break;
+            }
+        }
+        let script_off = match script_off {
+            Some(o) => o,
+            None => return out,
+        };
+        let script = match script_list.get(script_off..) {
+            Some(s) => s,
+            None => return out,
+        };
+
+        // Script layout:
+        //   Offset16 defaultLangSysOffset    (0 if absent)
+        //   u16      langSysCount
+        //   LangSysRecord{ Tag tag, Offset16 langSysOffset }
+        //                                    langSysRecords[langSysCount];
+        // langSysOffsets are relative to the Script table start.
+        if script.len() < 4 {
+            return out;
+        }
+        let default_off = match read_u16(script, 0) {
+            Ok(v) => v as usize,
+            Err(_) => return out,
+        };
+        let lang_count = match read_u16(script, 2) {
+            Ok(v) => v as usize,
+            Err(_) => return out,
+        };
+        let mut chosen_off: Option<usize> = None;
+        if let Some(want) = lang_tag {
+            for i in 0..lang_count {
+                let r = 4 + i * 6;
+                if script.len() < r + 6 {
+                    break;
+                }
+                let tag = [script[r], script[r + 1], script[r + 2], script[r + 3]];
+                if tag == want {
+                    chosen_off = match read_u16(script, r + 4) {
+                        Ok(v) => Some(v as usize),
+                        Err(_) => None,
+                    };
+                    break;
+                }
+            }
+        }
+        let chosen_off = chosen_off.or(if default_off == 0 {
+            None
+        } else {
+            Some(default_off)
+        });
+        let chosen_off = match chosen_off {
+            Some(o) if o != 0 => o,
+            _ => return out,
+        };
+        let langsys = match script.get(chosen_off..) {
+            Some(s) => s,
+            None => return out,
+        };
+
+        // LangSys layout:
+        //   Offset16 lookupOrderOffset (= 0 reserved)
+        //   u16      requiredFeatureIndex (0xFFFF = none)
+        //   u16      featureIndexCount
+        //   u16      featureIndices[featureIndexCount]
+        if langsys.len() < 6 {
+            return out;
+        }
+        let required = match read_u16(langsys, 2) {
+            Ok(v) => v,
+            Err(_) => return out,
+        };
+        let feat_count = match read_u16(langsys, 4) {
+            Ok(v) => v as usize,
+            Err(_) => return out,
+        };
+        if langsys.len() < 6 + feat_count * 2 {
+            return out;
+        }
+
+        // FeatureList layout:
+        //   u16 featureCount;
+        //   FeatureRecord{ Tag tag, Offset16 featureOffset } records[];
+        // featureOffsets are relative to the FeatureList start.
+        let total_features = match read_u16(feature_list, 0) {
+            Ok(v) => v as usize,
+            Err(_) => return out,
+        };
+
+        let push_feature = |fi: u16, into: &mut Vec<GposFeature>| {
+            if (fi as usize) >= total_features {
+                return;
+            }
+            let r = 2 + fi as usize * 6;
+            if feature_list.len() < r + 6 {
+                return;
+            }
+            let tag = [
+                feature_list[r],
+                feature_list[r + 1],
+                feature_list[r + 2],
+                feature_list[r + 3],
+            ];
+            // §6.2.9 substitution: if this feature index is overridden,
+            // use the alternate feature's lookup-index list directly.
+            if let Some(s) = subst {
+                if let Some(idxs) = s.lookup_indices_for_feature(fi) {
+                    into.push(GposFeature {
+                        tag,
+                        lookup_indices: idxs,
+                    });
+                    return;
+                }
+            }
+            let foff = match read_u16(feature_list, r + 4) {
+                Ok(v) => v as usize,
+                Err(_) => return,
+            };
+            let feature = match feature_list.get(foff..) {
+                Some(s) => s,
+                None => return,
+            };
+            // Feature layout: Offset16 featureParamsOffset; u16
+            // lookupIndexCount; u16 lookupListIndices[count].
+            if feature.len() < 4 {
+                return;
+            }
+            let count = match read_u16(feature, 2) {
+                Ok(v) => v as usize,
+                Err(_) => return,
+            };
+            if feature.len() < 4 + count * 2 {
+                return;
+            }
+            let mut idxs = Vec::with_capacity(count);
+            for i in 0..count {
+                if let Ok(v) = read_u16(feature, 4 + i * 2) {
+                    idxs.push(v);
+                }
+            }
+            into.push(GposFeature {
+                tag,
+                lookup_indices: idxs,
+            });
+        };
+
+        if required != 0xFFFF {
+            push_feature(required, &mut out);
+        }
+        for i in 0..feat_count {
+            let fi = match read_u16(langsys, 6 + i * 2) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            push_feature(fi, &mut out);
+        }
+        out
     }
 
     /// Enumerate every lookup in the LookupList as
@@ -3531,5 +3853,165 @@ mod tests {
         assert_eq!(g.apply_lookup_type_7(1, &[10, 21], 0), None);
         // Window too short.
         assert_eq!(g.apply_lookup_type_7(1, &[10], 0), None);
+    }
+
+    /// Build a GPOS table with a full ScriptList + FeatureList +
+    /// LookupList so [`GposTable::features_for_script`] has something to
+    /// walk. Script `latn` → DefaultLangSys exposes three features in
+    /// declaration order: `kern` → lookup [0], `mark` → lookup [1],
+    /// `cpsp` → lookup [2]. The lookups are placeholder SinglePos
+    /// sub-tables — the walker resolves feature tags → lookup-index
+    /// lists, not the lookups' geometric content.
+    ///
+    /// `version_1_1` controls whether the optional Offset32
+    /// featureVariationsOffset is appended (NULL = 0 here, the common
+    /// "v1.1 header but no variations" case).
+    fn build_feature_tagged_gpos(version_1_1: bool) -> Vec<u8> {
+        // ----- LookupList: three SinglePosFormat1 lookups -----
+        fn single_pos_lookup(gid: u16, xadv: i16) -> Vec<u8> {
+            let mut cov = Vec::new();
+            cov.extend_from_slice(&1u16.to_be_bytes()); // coverage format 1
+            cov.extend_from_slice(&1u16.to_be_bytes()); // glyphCount
+            cov.extend_from_slice(&gid.to_be_bytes());
+            let mut sub = Vec::new();
+            sub.extend_from_slice(&1u16.to_be_bytes()); // SinglePos format 1
+            sub.extend_from_slice(&8u16.to_be_bytes()); // covOff (after 8-byte body)
+            sub.extend_from_slice(&VF_X_ADVANCE.to_be_bytes());
+            sub.extend_from_slice(&xadv.to_be_bytes());
+            sub.extend_from_slice(&cov);
+            wrap_lookup(LOOKUP_SINGLE_POS, &sub)
+        }
+        let l0 = single_pos_lookup(10, -50);
+        let l1 = single_pos_lookup(20, -30);
+        let l2 = single_pos_lookup(30, 40);
+        // LookupList: u16 lookupCount; Offset16 lookupOffsets[count];
+        // offsets relative to LookupList start.
+        let mut lookup_list = Vec::new();
+        lookup_list.extend_from_slice(&3u16.to_be_bytes());
+        let off0: u16 = 2 + 3 * 2;
+        let off1: u16 = off0 + l0.len() as u16;
+        let off2: u16 = off1 + l1.len() as u16;
+        lookup_list.extend_from_slice(&off0.to_be_bytes());
+        lookup_list.extend_from_slice(&off1.to_be_bytes());
+        lookup_list.extend_from_slice(&off2.to_be_bytes());
+        lookup_list.extend_from_slice(&l0);
+        lookup_list.extend_from_slice(&l1);
+        lookup_list.extend_from_slice(&l2);
+
+        // ----- FeatureList: kern→[0], mark→[1], cpsp→[2] -----
+        fn feature(lookup: u16) -> Vec<u8> {
+            let mut f = Vec::new();
+            f.extend_from_slice(&0u16.to_be_bytes()); // featureParamsOffset
+            f.extend_from_slice(&1u16.to_be_bytes()); // lookupIndexCount
+            f.extend_from_slice(&lookup.to_be_bytes());
+            f
+        }
+        let f0 = feature(0);
+        let f1 = feature(1);
+        let f2 = feature(2);
+        // FeatureList: u16 featureCount; FeatureRecord{ Tag, Offset16 } [];
+        // featureOffsets relative to FeatureList start.
+        let mut feature_list = Vec::new();
+        feature_list.extend_from_slice(&3u16.to_be_bytes());
+        let records_len: u16 = 2 + 3 * 6;
+        let fo0 = records_len;
+        let fo1 = fo0 + f0.len() as u16;
+        let fo2 = fo1 + f1.len() as u16;
+        feature_list.extend_from_slice(b"kern");
+        feature_list.extend_from_slice(&fo0.to_be_bytes());
+        feature_list.extend_from_slice(b"mark");
+        feature_list.extend_from_slice(&fo1.to_be_bytes());
+        feature_list.extend_from_slice(b"cpsp");
+        feature_list.extend_from_slice(&fo2.to_be_bytes());
+        feature_list.extend_from_slice(&f0);
+        feature_list.extend_from_slice(&f1);
+        feature_list.extend_from_slice(&f2);
+
+        // ----- ScriptList: latn → DefaultLangSys → features [0,1,2] -----
+        let mut langsys = Vec::new();
+        langsys.extend_from_slice(&0u16.to_be_bytes()); // lookupOrderOffset
+        langsys.extend_from_slice(&0xFFFFu16.to_be_bytes()); // requiredFeatureIndex
+        langsys.extend_from_slice(&3u16.to_be_bytes()); // featureIndexCount
+        langsys.extend_from_slice(&0u16.to_be_bytes());
+        langsys.extend_from_slice(&1u16.to_be_bytes());
+        langsys.extend_from_slice(&2u16.to_be_bytes());
+        let mut script = Vec::new();
+        script.extend_from_slice(&4u16.to_be_bytes()); // defaultLangSysOffset
+        script.extend_from_slice(&0u16.to_be_bytes()); // langSysCount
+        script.extend_from_slice(&langsys);
+        let mut script_list = Vec::new();
+        script_list.extend_from_slice(&1u16.to_be_bytes());
+        script_list.extend_from_slice(b"latn");
+        let script_off: u16 = 2 + 6;
+        script_list.extend_from_slice(&script_off.to_be_bytes());
+        script_list.extend_from_slice(&script);
+
+        // ----- GPOS header -----
+        let header_len: u16 = if version_1_1 { 14 } else { 10 };
+        let script_list_off = header_len;
+        let feature_list_off = script_list_off + script_list.len() as u16;
+        let lookup_list_off = feature_list_off + feature_list.len() as u16;
+        let mut gpos = Vec::new();
+        gpos.extend_from_slice(&1u16.to_be_bytes()); // majorVersion
+        gpos.extend_from_slice(&(version_1_1 as u16).to_be_bytes()); // minorVersion
+        gpos.extend_from_slice(&script_list_off.to_be_bytes());
+        gpos.extend_from_slice(&feature_list_off.to_be_bytes());
+        gpos.extend_from_slice(&lookup_list_off.to_be_bytes());
+        if version_1_1 {
+            gpos.extend_from_slice(&0u32.to_be_bytes()); // featureVariationsOffset = NULL
+        }
+        gpos.extend_from_slice(&script_list);
+        gpos.extend_from_slice(&feature_list);
+        gpos.extend_from_slice(&lookup_list);
+        gpos
+    }
+
+    #[test]
+    fn gpos_features_for_script_resolves_tags_and_lookup_indices() {
+        let bytes = build_feature_tagged_gpos(false);
+        let g = GposTable::parse(&bytes).unwrap();
+        let feats = g.features_for_script(*b"latn", None);
+        let tags: Vec<[u8; 4]> = feats.iter().map(|f| f.tag).collect();
+        assert_eq!(
+            tags,
+            vec![*b"kern", *b"mark", *b"cpsp"],
+            "latn features in declaration order"
+        );
+        assert_eq!(feats[0].lookup_indices, vec![0]);
+        assert_eq!(feats[1].lookup_indices, vec![1]);
+        assert_eq!(feats[2].lookup_indices, vec![2]);
+        // The resolved lookup index drives the existing apply path.
+        let adj = g
+            .apply_lookup_type_1(feats[0].lookup_indices[0], 10)
+            .unwrap();
+        assert_eq!(adj.x_advance, -50);
+    }
+
+    #[test]
+    fn gpos_features_for_script_unknown_script_is_empty() {
+        let bytes = build_feature_tagged_gpos(false);
+        let g = GposTable::parse(&bytes).unwrap();
+        assert!(g.features_for_script(*b"arab", None).is_empty());
+    }
+
+    #[test]
+    fn gpos_v1_1_header_parses_and_has_no_feature_variations_when_null() {
+        let bytes = build_feature_tagged_gpos(true);
+        let g = GposTable::parse(&bytes).unwrap();
+        // A v1.1 header with a NULL featureVariationsOffset reports false.
+        assert!(!g.has_feature_variations());
+        // The ScriptList/FeatureList walk is unaffected by the version.
+        let feats = g.features_for_script(*b"latn", None);
+        assert_eq!(feats.len(), 3);
+        // At-coords lookup with no variations == the plain walk.
+        let at = g.features_for_script_at_coords(*b"latn", None, &[0.5]);
+        assert_eq!(at, feats);
+    }
+
+    #[test]
+    fn gpos_v1_0_header_has_no_feature_variations() {
+        let bytes = build_feature_tagged_gpos(false);
+        let g = GposTable::parse(&bytes).unwrap();
+        assert!(!g.has_feature_variations());
     }
 }

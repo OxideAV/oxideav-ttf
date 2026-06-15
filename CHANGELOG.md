@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- GPOS ScriptList / FeatureList walker (`Font::gpos_features_for_script`)
+  plus version-1.1 FeatureVariations wiring
+  (`Font::gpos_features_for_script_at_instance` /
+  `Font::gpos_has_feature_variations`), reusing the shared §6.2.9
+  substructure already driving GSUB. The new `GposFeature` struct
+  resolves a positioning-feature tag to its lookup-index list.
+
 ## [0.1.7](https://github.com/OxideAV/oxideav-ttf/compare/v0.1.6...v0.1.7) - 2026-06-15
 
 ### Other

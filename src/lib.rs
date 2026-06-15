@@ -85,7 +85,7 @@ pub use tables::gasp::{
     GASP_SYMMETRIC_GRIDFIT, GASP_SYMMETRIC_SMOOTHING, GASP_TABLE_TAG, GASP_VERSION_0,
     GASP_VERSION_1,
 };
-pub use tables::gpos::{CursiveAttachment, PosRecord, PosValue};
+pub use tables::gpos::{CursiveAttachment, GposFeature, PosRecord, PosValue};
 pub use tables::gsub::GsubFeature;
 pub use tables::hdmx::{
     HdmxRecord, HDMX_HEADER_LEN, HDMX_RECORD_HEADER_LEN, HDMX_TABLE_TAG, HDMX_VERSION_0,
@@ -1384,6 +1384,76 @@ impl<'a> Font<'a> {
     /// identical to [`Self::gsub_features_for_script`].
     pub fn gsub_has_feature_variations(&self) -> bool {
         self.gsub
+            .as_ref()
+            .map(|g| g.has_feature_variations())
+            .unwrap_or(false)
+    }
+
+    /// Return all GPOS features active for `script_tag` under `lang_tag`,
+    /// each resolved to the list of lookup indices that implement it.
+    ///
+    /// The GPOS sibling of [`Self::gsub_features_for_script`]: it walks
+    /// the same OpenType Layout ScriptList / FeatureList / LangSys
+    /// substructure but over the positioning table, so a shaper can
+    /// discover which lookup indices implement `kern` / `mark` / `mkmk`
+    /// / `curs` / `cpsp` for the current script and feed them to the
+    /// matching `gpos_apply_lookup_type_*` path.
+    ///
+    /// `lang_tag = None` selects the script's `DefaultLangSys`; an
+    /// unrecognised `lang_tag` falls back to it too. The required
+    /// feature (when present) is emitted first, then the LangSys's
+    /// declared features in order. Returns an empty `Vec` when the font
+    /// has no GPOS table or the script is absent.
+    pub fn gpos_features_for_script(
+        &self,
+        script_tag: [u8; 4],
+        lang_tag: Option<[u8; 4]>,
+    ) -> Vec<GposFeature> {
+        match self.gpos.as_ref() {
+            Some(g) => g.features_for_script(script_tag, lang_tag),
+            None => Vec::new(),
+        }
+    }
+
+    /// Like [`Self::gpos_features_for_script`], but honours the GPOS
+    /// **FeatureVariations** table (the shared ISO/IEC 14496-22:2019
+    /// §6.2.9 substructure, reachable through a version-1.1 GPOS header)
+    /// at the font's current variation instance.
+    ///
+    /// A variable font may publish a version-1.1 GPOS header that swaps
+    /// the lookups behind a positioning feature for an alternate set
+    /// when the current instance falls inside a normalised range on one
+    /// or more `fvar` axes (e.g. weight-conditional kerning). This
+    /// accessor evaluates the active condition set against
+    /// [`Self::normalised_coords`] and, for every feature whose index is
+    /// overridden by the matching FeatureTableSubstitution, returns the
+    /// alternate lookup-index list while keeping the feature tag
+    /// unchanged.
+    ///
+    /// For static fonts, v1.0 GPOS headers, or instances that match no
+    /// condition set, the result is identical to
+    /// [`Self::gpos_features_for_script`]. Set the instance with
+    /// [`Self::set_variation_coords`] first.
+    pub fn gpos_features_for_script_at_instance(
+        &self,
+        script_tag: [u8; 4],
+        lang_tag: Option<[u8; 4]>,
+    ) -> Vec<GposFeature> {
+        match self.gpos.as_ref() {
+            Some(g) => {
+                let coords = self.normalised_coords();
+                g.features_for_script_at_coords(script_tag, lang_tag, &coords)
+            }
+            None => Vec::new(),
+        }
+    }
+
+    /// `true` when the GPOS table carries a §6.2.9 FeatureVariations
+    /// table (a version-1.1 header with a non-zero offset). When this is
+    /// `false`, [`Self::gpos_features_for_script_at_instance`] is
+    /// identical to [`Self::gpos_features_for_script`].
+    pub fn gpos_has_feature_variations(&self) -> bool {
+        self.gpos
             .as_ref()
             .map(|g| g.has_feature_variations())
             .unwrap_or(false)
