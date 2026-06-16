@@ -173,3 +173,103 @@ fn light_weight_also_differs_from_regular() {
         });
     assert!(any_diff, "wght=100 must differ from wght=400");
 }
+
+/// Helper: the `wght` axis index for InterVariable.
+fn wght_axis(font: &Font) -> usize {
+    font.variation_axes()
+        .iter()
+        .position(|a| &a.tag == b"wght")
+        .expect("Inter ships a wght axis")
+}
+
+/// Helper: a glyph's outline at a given `wght` instance.
+fn outline_at_wght(ch: char, wght: f32) -> oxideav_ttf::TtOutline {
+    let mut font = Font::from_bytes(FONT).unwrap();
+    let wi = wght_axis(&font);
+    let gid = font.glyph_index(ch).expect("glyph present");
+    let mut nc = font.variation_coords().to_vec();
+    nc[wi] = wght;
+    font.set_variation_coords(&nc);
+    font.glyph_outline(gid).expect("outline")
+}
+
+/// A composite accented glyph ('é' = base 'e' + acute accent) must vary
+/// under `wght` through the §7.3.4.3 composite-glyph path: each
+/// component glyph is resolved with *its own* gvar deltas applied and
+/// then placed at its (delta-adjusted) component offset. The
+/// pre-§7.3.4.3 path mis-indexed component-addressed gvar deltas as
+/// flattened outline points and could not reproduce this.
+#[test]
+fn composite_glyph_components_vary_under_weight() {
+    let regular = outline_at_wght('é', 400.0);
+    let bold = outline_at_wght('é', 900.0);
+
+    // 'é' in Inter is a two-contour composite (base 'e' + accent).
+    assert!(
+        regular.contours.len() >= 2,
+        "expected é to be a multi-contour composite"
+    );
+    assert_eq!(
+        bold.contours.len(),
+        regular.contours.len(),
+        "weight axis must not change composite topology"
+    );
+
+    // The composite must actually move under the weight axis.
+    let any_diff = regular
+        .contours
+        .iter()
+        .zip(bold.contours.iter())
+        .any(|(rc, bc)| {
+            rc.points
+                .iter()
+                .zip(bc.points.iter())
+                .any(|(rp, bp)| rp.x != bp.x || rp.y != bp.y)
+        });
+    assert!(
+        any_diff,
+        "composite é must vary under wght via the component path"
+    );
+}
+
+/// The decisive §7.3.4.3 correctness anchor: the base component of a
+/// variable composite must carry its **own** variation. The base 'e'
+/// sub-outline embedded in a varied 'é' must equal the standalone
+/// varied 'e' outline up to a single constant component-placement
+/// offset — i.e. the component glyph was re-decoded with its gvar
+/// deltas applied, not copied from a static cache. (A
+/// flattened-point-only implementation cannot satisfy this, because it
+/// would apply the parent's component-indexed deltas to the wrong
+/// outline points and the base sub-outline would diverge from
+/// standalone 'e'.)
+#[test]
+fn composite_base_component_matches_standalone_varied_glyph() {
+    for &wght in &[100.0f32, 400.0, 900.0] {
+        let e = outline_at_wght('e', wght);
+        let eacute = outline_at_wght('é', wght);
+        let ec = e.contours.first().expect("e has a contour");
+        let base = eacute.contours.first().expect("é has a base contour");
+        assert_eq!(
+            base.points.len(),
+            ec.points.len(),
+            "base component point count must match standalone 'e' at wght={wght}"
+        );
+        // The base sub-outline must equal standalone 'e' shifted by a
+        // single constant (dx, dy) placement offset.
+        let d = (
+            base.points[0].x as i32 - ec.points[0].x as i32,
+            base.points[0].y as i32 - ec.points[0].y as i32,
+        );
+        let coherent = ec
+            .points
+            .iter()
+            .zip(base.points.iter())
+            .all(|(p, q)| (q.x as i32 - p.x as i32, q.y as i32 - p.y as i32) == d);
+        assert!(
+            coherent,
+            "at wght={wght} the base component of 'é' must be the \
+             standalone varied 'e' outline translated by a single \
+             placement offset {d:?} (§7.3.4.3 per-component variation)"
+        );
+    }
+}

@@ -105,8 +105,109 @@ impl<'a> GlyfTable<'a> {
         if n_contours >= 0 {
             decode_simple(payload, n_contours as u16, bbox)
         } else {
-            self.decode_composite(payload, loca, depth)
+            self.decode_composite(payload, loca, depth, None, None)
         }
+    }
+
+    /// Count the component entries in a composite glyph body (the payload
+    /// after the 10-byte header). Used by the variable-font path to size
+    /// the per-component gvar delta vector before decoding.
+    ///
+    /// Returns `Ok(0)` for a glyph that is not composite (`numberOfContours
+    /// >= 0`) or empty.
+    pub fn composite_component_count(&self, range: core::ops::Range<usize>) -> Result<u16, Error> {
+        let body = self.bytes.get(range).ok_or(Error::BadOffset)?;
+        if body.len() < 10 {
+            return Ok(0);
+        }
+        if read_i16(body, 0)? >= 0 {
+            return Ok(0);
+        }
+        let bytes = &body[10..];
+        let mut off = 0usize;
+        let mut count: u16 = 0;
+        loop {
+            if off + 4 > bytes.len() {
+                return Err(Error::BadStructure("composite truncated"));
+            }
+            let flags = read_u16(bytes, off)?;
+            off += 4;
+            count = count.saturating_add(1);
+            // Advance past arg1/arg2.
+            off += if flags & C_ARG_1_AND_2_ARE_WORDS != 0 {
+                4
+            } else {
+                2
+            };
+            // Advance past the transform, if any.
+            if flags & C_WE_HAVE_A_SCALE != 0 {
+                off += 2;
+            } else if flags & C_WE_HAVE_AN_X_AND_Y_SCALE != 0 {
+                off += 4;
+            } else if flags & C_WE_HAVE_A_TWO_BY_TWO != 0 {
+                off += 8;
+            }
+            if off > bytes.len() {
+                return Err(Error::BadStructure("composite component truncated"));
+            }
+            if flags & C_MORE_COMPONENTS == 0 {
+                break;
+            }
+        }
+        Ok(count)
+    }
+
+    /// Decode a composite glyph outline with per-component gvar placement
+    /// deltas applied (ISO/IEC 14496-22:2019 §7.3.4.3). `component_deltas`
+    /// holds one `(dx, dy)` per component, in component order; index `i`'s
+    /// delta is added to component `i`'s `argument1` / `argument2` X / Y
+    /// offset, but **only** when that component uses the `ARGS_ARE_XY_VALUES`
+    /// placement form (point-matched components take no delta per the
+    /// spec). If the component offset is scaled (`SCALED_COMPONENT_OFFSET`),
+    /// the delta-adjusted offset is what the 2×2 transform scales.
+    ///
+    /// `child_resolver` resolves each referenced component glyph's own
+    /// outline by `(glyph_index, depth)`. §7.3.4.3 mandates that
+    /// processing "begin with the most deeply-nested" glyphs: each
+    /// component glyph carries its own gvar entry and must be decoded
+    /// **with its own variation applied** before being placed. The
+    /// resolver lets the `Font` layer (which owns gvar + the coordinate
+    /// vector) recurse per-component; a runaway-recursion guard at
+    /// `MAX_COMPOSITE_DEPTH` is enforced here against `depth`.
+    pub fn glyph_outline_var(
+        &self,
+        range: core::ops::Range<usize>,
+        loca: &LocaTable<'a>,
+        depth: u8,
+        component_deltas: &[(i32, i32)],
+        child_resolver: &dyn Fn(u16, u8) -> Result<TtOutline, Error>,
+    ) -> Result<TtOutline, Error> {
+        if depth >= MAX_COMPOSITE_DEPTH {
+            return Err(Error::CompositeTooDeep);
+        }
+        let body = self.bytes.get(range).ok_or(Error::BadOffset)?;
+        if body.len() < 10 {
+            return Ok(TtOutline::default());
+        }
+        let n_contours = read_i16(body, 0)?;
+        if n_contours >= 0 {
+            // Not composite — caller should not have routed here, but be
+            // defensive and decode the static simple outline.
+            let bbox = BBox {
+                x_min: read_i16(body, 2)?,
+                y_min: read_i16(body, 4)?,
+                x_max: read_i16(body, 6)?,
+                y_max: read_i16(body, 8)?,
+            };
+            return decode_simple(&body[10..], n_contours as u16, bbox);
+        }
+        self.decode_composite(
+            &body[10..],
+            loca,
+            depth,
+            Some(component_deltas),
+            Some(child_resolver),
+        )
     }
 
     fn decode_composite(
@@ -114,9 +215,12 @@ impl<'a> GlyfTable<'a> {
         bytes: &[u8],
         loca: &LocaTable<'a>,
         depth: u8,
+        component_deltas: Option<&[(i32, i32)]>,
+        child_resolver: Option<&dyn Fn(u16, u8) -> Result<TtOutline, Error>>,
     ) -> Result<TtOutline, Error> {
         let mut out = TtOutline::default();
         let mut off = 0usize;
+        let mut component_index = 0usize;
         loop {
             if off + 4 > bytes.len() {
                 return Err(Error::BadStructure("composite truncated"));
@@ -180,12 +284,37 @@ impl<'a> GlyfTable<'a> {
                 yy = 1.0;
             }
 
-            let child_range = loca.glyph_range(glyph_index)?;
-            let child = self.glyph_outline(child_range, loca, depth + 1)?;
+            // Resolve the component glyph's outline. §7.3.4.3: each
+            // component glyph carries its own gvar entry and must be
+            // decoded with its own variation applied ("processing must
+            // begin with the most deeply-nested" glyphs). When a
+            // `child_resolver` is supplied (the variable-font path), it
+            // recurses through the `Font` layer so the child's own gvar
+            // deltas are applied; otherwise (static path) we decode the
+            // child outline directly.
+            let child = match child_resolver {
+                Some(resolve) => resolve(glyph_index, depth + 1)?,
+                None => {
+                    let child_range = loca.glyph_range(glyph_index)?;
+                    self.glyph_outline(child_range, loca, depth + 1)?
+                }
+            };
+
+            // §7.3.4.3: the per-component placement delta is added to the
+            // component's argument1/argument2 X/Y offsets, but only for
+            // the ARGS_ARE_XY_VALUES form. Point-matched components keep
+            // their default placement.
+            let (cdx, cdy) = component_deltas
+                .and_then(|d| d.get(component_index).copied())
+                .unwrap_or((0, 0));
+            component_index += 1;
 
             if flags & C_ARGS_ARE_XY_VALUES != 0 {
                 // Offset-vector placement. argument1/argument2 are an
-                // (x, y) translation in design units.
+                // (x, y) translation in design units; the gvar delta is
+                // folded into them *before* any component-offset scaling.
+                let arg1 = arg1 + cdx;
+                let arg2 = arg2 + cdy;
                 let scale_offset = flags & C_SCALED_COMPONENT_OFFSET != 0
                     && flags & C_UNSCALED_COMPONENT_OFFSET == 0;
                 let (dx, dy) = if scale_offset {
@@ -774,5 +903,178 @@ mod tests {
             .glyph_outline(tri_len as usize..total as usize, &loca, 0)
             .expect_err("self-cycle must reject, not stack-overflow");
         assert_eq!(err, Error::CompositeTooDeep);
+    }
+
+    /// Build a two-component composite "é"-shape glyph: component 0 is
+    /// glyph 0 (triangle) at offset (0,0), component 1 is glyph 0 at
+    /// offset (`c1x`, `c1y`). Both use ARGS_ARE_XY_VALUES word args, no
+    /// transform. Mirrors the §7.3.4.3 example layout (a base + accent
+    /// composite with two XY-placed components).
+    fn build_two_component_composite(c1x: i16, c1y: i16) -> Vec<u8> {
+        let mut g = Vec::new();
+        g.extend_from_slice(&(-1i16).to_be_bytes());
+        for _ in 0..4 {
+            g.extend_from_slice(&0i16.to_be_bytes());
+        }
+        // Component 0: XY offset (0,0), MORE_COMPONENTS set.
+        let c0 = C_ARGS_ARE_XY_VALUES | C_ARG_1_AND_2_ARE_WORDS | C_MORE_COMPONENTS;
+        g.extend_from_slice(&c0.to_be_bytes());
+        g.extend_from_slice(&0u16.to_be_bytes()); // child = glyph 0
+        g.extend_from_slice(&0i16.to_be_bytes()); // arg1
+        g.extend_from_slice(&0i16.to_be_bytes()); // arg2
+                                                  // Component 1: XY offset (c1x, c1y), last component.
+        let c1 = C_ARGS_ARE_XY_VALUES | C_ARG_1_AND_2_ARE_WORDS;
+        g.extend_from_slice(&c1.to_be_bytes());
+        g.extend_from_slice(&0u16.to_be_bytes()); // child = glyph 0
+        g.extend_from_slice(&c1x.to_be_bytes());
+        g.extend_from_slice(&c1y.to_be_bytes());
+        g
+    }
+
+    #[test]
+    fn composite_component_count_walks_all_entries() {
+        let triangle = build_triangle();
+        let composite = build_two_component_composite(286, 0);
+        let glyf_bytes: Vec<u8> = [triangle.as_slice(), composite.as_slice()].concat();
+        let tri_len = triangle.len();
+        let total = glyf_bytes.len();
+        let glyf = GlyfTable::new(&glyf_bytes);
+        // Composite has 2 components.
+        assert_eq!(glyf.composite_component_count(tri_len..total).unwrap(), 2);
+        // A simple glyph reports 0.
+        assert_eq!(glyf.composite_component_count(0..tri_len).unwrap(), 0);
+    }
+
+    /// §7.3.4.3: a per-component placement delta is added to the
+    /// component's argument1/argument2 X/Y offset for the
+    /// ARGS_ARE_XY_VALUES form. Component 0 keeps (0,0); component 1's
+    /// default offset (286, 0) plus a delta of (54, 0) lands the second
+    /// triangle at X = 340.
+    #[test]
+    fn composite_var_folds_component_delta_into_offset() {
+        let triangle = build_triangle(); // points (0,0) (100,0) (50,100)
+        let composite = build_two_component_composite(286, 0);
+        let glyf_bytes: Vec<u8> = [triangle.as_slice(), composite.as_slice()].concat();
+        let tri_len = triangle.len() as u32;
+        let total = glyf_bytes.len() as u32;
+        let mut loca_bytes = Vec::new();
+        for v in [0u32, tri_len, total] {
+            loca_bytes.extend_from_slice(&v.to_be_bytes());
+        }
+        let loca = LocaTable::parse(&loca_bytes, 2, 1).unwrap();
+        let glyf = GlyfTable::new(&glyf_bytes);
+
+        // Component-0 delta (0,0); component-1 delta (54,0).
+        let deltas = [(0i32, 0i32), (54i32, 0i32)];
+        // Static child resolver: components decode without their own var.
+        let resolve = |gid: u16, depth: u8| {
+            let r = loca.glyph_range(gid)?;
+            glyf.glyph_outline(r, &loca, depth)
+        };
+        let out = glyf
+            .glyph_outline_var(
+                tri_len as usize..total as usize,
+                &loca,
+                0,
+                &deltas,
+                &resolve,
+            )
+            .unwrap();
+        assert_eq!(out.contours.len(), 2);
+        // Component 0 sits at the origin unchanged.
+        let a = &out.contours[0].points;
+        assert_eq!((a[0].x, a[0].y), (0, 0));
+        // Component 1: default offset 286 + delta 54 = 340.
+        let b = &out.contours[1].points;
+        assert_eq!((b[0].x, b[0].y), (340, 0));
+        assert_eq!((b[1].x, b[1].y), (440, 0));
+        assert_eq!((b[2].x, b[2].y), (390, 100));
+    }
+
+    /// With an empty / all-zero delta slice the variable composite path
+    /// reproduces the static placement exactly.
+    #[test]
+    fn composite_var_zero_deltas_matches_static() {
+        let triangle = build_triangle();
+        let composite = build_two_component_composite(286, 0);
+        let glyf_bytes: Vec<u8> = [triangle.as_slice(), composite.as_slice()].concat();
+        let tri_len = triangle.len() as u32;
+        let total = glyf_bytes.len() as u32;
+        let mut loca_bytes = Vec::new();
+        for v in [0u32, tri_len, total] {
+            loca_bytes.extend_from_slice(&v.to_be_bytes());
+        }
+        let loca = LocaTable::parse(&loca_bytes, 2, 1).unwrap();
+        let glyf = GlyfTable::new(&glyf_bytes);
+
+        let r = tri_len as usize..total as usize;
+        let resolve = |gid: u16, depth: u8| {
+            let rr = loca.glyph_range(gid)?;
+            glyf.glyph_outline(rr, &loca, depth)
+        };
+        let var = glyf
+            .glyph_outline_var(r.clone(), &loca, 0, &[(0, 0), (0, 0)], &resolve)
+            .unwrap();
+        let stat = glyf.glyph_outline(r, &loca, 0).unwrap();
+        assert_eq!(var, stat);
+    }
+
+    /// §7.3.4.3: point-matched components (ARGS_ARE_XY_VALUES clear) take
+    /// no delta. A delta supplied for such a component must be ignored.
+    #[test]
+    fn composite_var_point_matched_component_ignores_delta() {
+        let triangle = build_triangle();
+        // Composite: component 0 XY-placed (gets delta), component 1
+        // point-matched (must NOT get a delta).
+        let mut composite = Vec::new();
+        composite.extend_from_slice(&(-1i16).to_be_bytes());
+        for _ in 0..4 {
+            composite.extend_from_slice(&0i16.to_be_bytes());
+        }
+        let c0 = C_ARGS_ARE_XY_VALUES | C_MORE_COMPONENTS;
+        composite.extend_from_slice(&c0.to_be_bytes());
+        composite.extend_from_slice(&0u16.to_be_bytes());
+        composite.push(0); // arg1
+        composite.push(0); // arg2
+        let c1 = 0u16; // point-matched, last component
+        composite.extend_from_slice(&c1.to_be_bytes());
+        composite.extend_from_slice(&0u16.to_be_bytes());
+        composite.push(1); // arg1 = parent point 1
+        composite.push(0); // arg2 = child point 0
+
+        let glyf_bytes: Vec<u8> = [triangle.as_slice(), composite.as_slice()].concat();
+        let tri_len = triangle.len() as u32;
+        let total = glyf_bytes.len() as u32;
+        let mut loca_bytes = Vec::new();
+        for v in [0u32, tri_len, total] {
+            loca_bytes.extend_from_slice(&v.to_be_bytes());
+        }
+        let loca = LocaTable::parse(&loca_bytes, 2, 1).unwrap();
+        let glyf = GlyfTable::new(&glyf_bytes);
+
+        // Component 0 delta (5,0); component 1 delta (999,999) must be
+        // ignored because it is point-matched.
+        let deltas = [(5i32, 0i32), (999i32, 999i32)];
+        let resolve = |gid: u16, depth: u8| {
+            let r = loca.glyph_range(gid)?;
+            glyf.glyph_outline(r, &loca, depth)
+        };
+        let out = glyf
+            .glyph_outline_var(
+                tri_len as usize..total as usize,
+                &loca,
+                0,
+                &deltas,
+                &resolve,
+            )
+            .unwrap();
+        assert_eq!(out.contours.len(), 2);
+        // Component 0 shifted by its (5,0) delta from the origin.
+        let a = &out.contours[0].points;
+        assert_eq!((a[0].x, a[0].y), (5, 0));
+        // Component 1 point-matched: child point 0 aligns onto parent
+        // point 1 (component 0's point 1 = (105, 0)), with NO 999 shift.
+        let b = &out.contours[1].points;
+        assert_eq!((b[0].x, b[0].y), (105, 0));
     }
 }

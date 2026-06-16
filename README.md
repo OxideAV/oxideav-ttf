@@ -431,6 +431,24 @@ ligatures and kerning.
   `is_elidable()` convenience accessors, and `Font::stat_axis_values_for_tag`
   filters the array down to a single axis (resolving format-4
   contributors that touch it).
+- `gvar` **composite-glyph variation** (ISO/IEC 14496-22:2019 §7.3.4.3) —
+  `Font::glyph_outline` now retargets composite glyphs (accented Latin,
+  CJK radicals, …) at the active variation instance, not just simple
+  glyphs. For a composite the gvar packed point numbers address the
+  *components* (pseudo-points `0..componentCount`) plus the four trailing
+  lsb / rsb / tsb / bsb phantom points — **not** flattened outline points;
+  `GvarTable::glyph_component_deltas` interpolates the per-component
+  `(dx, dy)` placement deltas and `GlyfTable::glyph_outline_var` folds each
+  into the component's `argument1` / `argument2` X/Y offset (point-matched
+  components take no delta, and a `SCALED_COMPONENT_OFFSET` component scales
+  the delta-adjusted offset). Crucially each component glyph is re-decoded
+  with **its own** gvar deltas applied before placement, matching the
+  spec's "most deeply-nested first" order — verified against
+  InterVariable.ttf, where the base 'e' sub-outline inside a varied 'é'
+  equals the standalone varied 'e' outline up to a single component
+  offset across the wght axis. Phantom-point deltas (metrics) and the
+  §7.3.4.4 IUP inference (simple-glyph-only by the spec's NOTE) are
+  out of scope of this geometry path.
 
 The companion [`oxideav-scribe`](https://github.com/OxideAV/oxideav-scribe)
 crate consumes the outlines + shaping output to rasterise text to RGBA
@@ -764,8 +782,6 @@ format-14 UVS sidecar is decoded.
 - COLR **v1** paint graph (gradients, transforms, composites) — only
   the v0 flat layer stack is supported.
 - avar **v2** delta-set index map (variable-axis remap).
-- gvar delta propagation into composite-glyph component offsets and the
-  four phantom points.
 - The `STAT` format-2 overlapping-range tie-break (§7.3.7.3) is left to
   caller policy; the full document-order record array is exposed
   unchanged.

@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `gvar` composite-glyph variation (ISO/IEC 14496-22:2019 §7.3.4.3):
+  `Font::glyph_outline` now applies variation deltas to composite
+  glyphs (previously only simple glyphs were retargeted). For a
+  composite, gvar packed point numbers address the *components* plus
+  the four phantom points rather than flattened outline points; the
+  new `GvarTable::glyph_component_deltas` interpolates per-component
+  `(dx, dy)` placement deltas and `GlyfTable::glyph_outline_var`
+  (with `GlyfTable::composite_component_count`) folds each into the
+  component's `argument1`/`argument2` X/Y offset — only for
+  `ARGS_ARE_XY_VALUES` components, scaling the delta-adjusted offset
+  under `SCALED_COMPONENT_OFFSET`. Each component glyph is re-decoded
+  with its own gvar deltas applied before placement, per the spec's
+  "most deeply-nested first" order. Phantom-point (metrics) deltas and
+  the §7.3.4.4 simple-glyph-only IUP inference remain out of scope of
+  this geometry path.
+
 - `post` table — the 258 standard Macintosh glyph names
   (`STANDARD_MAC_GLYPH_NAMES: [&str; 258]` + the
   `standard_mac_glyph_name(index)` helper), transcribed verbatim from

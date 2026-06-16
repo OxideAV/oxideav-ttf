@@ -227,10 +227,70 @@ impl<'a> GvarTable<'a> {
         coords: &[f32],
     ) -> Result<Vec<(i32, i32)>, Error> {
         let np = num_points as usize;
-        if np > MAX_POINTS_PER_GLYPH {
+        // The gvar stream addresses `np + 4` points (the four trailing
+        // phantom points: lsb, rsb, tsb, bsb). We decode the full set
+        // and hand the caller back only the `np` outline points.
+        let total = np.checked_add(4).ok_or(Error::BadOffset)?;
+        let mut full = self.decode_deltas(glyph_id, total, coords)?;
+        full.truncate(np);
+        Ok(full)
+    }
+
+    /// Decode the per-**component** `(dx, dy)` placement deltas for a
+    /// composite `glyph_id` at the normalised coordinate `coords`
+    /// (ISO/IEC 14496-22:2019 §7.3.4.3 "Point Numbers and processing
+    /// for composite glyphs").
+    ///
+    /// For a composite glyph the gvar packed point numbers do **not**
+    /// address outline points: pseudo-point `i` (for `i` in
+    /// `0..num_components`) is the *i*-th component's placement, and
+    /// the four trailing pseudo-points (indices `num_components` through
+    /// `num_components + 3`) are the lsb / rsb / tsb / bsb phantom
+    /// points. This routine
+    /// returns the interpolated `(dx, dy)` to add to each component's
+    /// `argument1` / `argument2` X / Y placement offset; the caller
+    /// applies them only to components whose `ARGS_ARE_XY_VALUES` flag
+    /// is set (point-matched components take no delta per §7.3.4.3).
+    ///
+    /// Per §7.3.4.4's NOTE, inferred (IUP-style) deltas apply only to
+    /// simple glyphs — never to composites — so this path never
+    /// interpolates un-referenced pseudo-points; an omitted component
+    /// simply keeps its default placement, which falls out of the
+    /// zero-initialised accumulator.
+    ///
+    /// Returns `Ok(vec![(0,0); num_components])` for a glyph with no
+    /// variation data or an all-default coord request.
+    pub fn glyph_component_deltas(
+        &self,
+        glyph_id: u16,
+        num_components: u16,
+        coords: &[f32],
+    ) -> Result<Vec<(i32, i32)>, Error> {
+        let nc = num_components as usize;
+        let total = nc.checked_add(4).ok_or(Error::BadOffset)?;
+        let mut full = self.decode_deltas(glyph_id, total, coords)?;
+        full.truncate(nc);
+        Ok(full)
+    }
+
+    /// Shared TupleVariationStore decoder. `total_points` is the full
+    /// pseudo-point count the gvar stream for this glyph addresses
+    /// (outline points + 4 for simple glyphs; component count + 4 for
+    /// composites). Returns a `(dx, dy)` vector of length
+    /// `total_points`. No IUP inference is performed here — the simple-
+    /// glyph inference path is applied by the caller in
+    /// [`Self::glyph_deltas`]'s consumer where contour structure is
+    /// known; composite processing never infers (§7.3.4.4 NOTE).
+    fn decode_deltas(
+        &self,
+        glyph_id: u16,
+        total_points: usize,
+        coords: &[f32],
+    ) -> Result<Vec<(i32, i32)>, Error> {
+        if total_points > MAX_POINTS_PER_GLYPH {
             return Err(Error::BadStructure("gvar point count exceeds cap"));
         }
-        let mut out = vec![(0i32, 0i32); np];
+        let mut out = vec![(0i32, 0i32); total_points];
 
         if glyph_id >= self.glyph_count {
             return Err(Error::GlyphOutOfRange(glyph_id));
@@ -273,7 +333,6 @@ impl<'a> GvarTable<'a> {
         // Per-glyph data area starts here. The optional shared
         // point-number set lives at the very start of it.
         let mut data_cursor = data_offset;
-        let total_points = np + 4;
 
         // Decode the shared point-number set that lives at the very
         // top of the data area. Per OpenType §"GlyphVariationData
@@ -370,11 +429,11 @@ impl<'a> GvarTable<'a> {
             let dys = decode_packed_deltas(tuple_data, &mut td_off, n_pts)?;
 
             // Apply scaled deltas to `out`. Out-of-range point indices
-            // (e.g. phantom points addressed but not requested by the
-            // caller) are dropped.
+            // (a corrupt point set addressing past the declared
+            // pseudo-point count) are dropped.
             for (i, &p_idx) in points.iter().enumerate() {
                 let pi = p_idx as usize;
-                if pi >= np {
+                if pi >= total_points {
                     continue;
                 }
                 let dx = (dxs[i] as f32 * scalar).round() as i32;
@@ -658,5 +717,98 @@ mod tests {
         // Outside [start, end] → 0.
         let s = tuple_scalar(&[2.5], &[1.0], Some(&[0.0]), Some(&[2.0]));
         assert_eq!(s, 0.0);
+    }
+
+    /// Build a single-glyph gvar (1 axis, 0 shared tuples) holding one
+    /// tuple with an embedded peak at +1.0, an all-points shared set,
+    /// and the supplied per-point `dx` / `dy` word deltas. `total` is
+    /// the number of pseudo-points the stream addresses (outline points
+    /// or component count, **plus** the four phantom points).
+    fn build_one_tuple_glyph(dxs: &[i16], dys: &[i16]) -> Vec<u8> {
+        assert_eq!(dxs.len(), dys.len());
+        let n = dxs.len();
+        // --- per-glyph variation data block ---------------------------
+        // shared point set: all-points sentinel (single 0x00 byte).
+        let mut data_area = vec![0x00u8];
+        // tuple data: dx[] then dy[] as word runs.
+        // word run control: 0x40 | (n-1), each i16 BE.
+        let mut tuple_data = Vec::new();
+        tuple_data.push(0x40 | ((n - 1) as u8));
+        for &d in dxs {
+            tuple_data.extend_from_slice(&d.to_be_bytes());
+        }
+        tuple_data.push(0x40 | ((n - 1) as u8));
+        for &d in dys {
+            tuple_data.extend_from_slice(&d.to_be_bytes());
+        }
+        let var_data_size = tuple_data.len() as u16;
+        data_area.extend_from_slice(&tuple_data);
+
+        // GlyphVariationData header: tupleVariationCount=1, dataOffset.
+        // header = 2 (count) + 2 (dataOffset) + tupleHeader(4 + 2 peak).
+        let tuple_header_len = 4 + 2; // size + index + embedded peak (1 axis)
+        let data_offset = (4 + tuple_header_len) as u16;
+        let mut block = Vec::new();
+        block.extend_from_slice(&1u16.to_be_bytes()); // tupleVariationCount
+        block.extend_from_slice(&data_offset.to_be_bytes());
+        // TupleVariationHeader: variationDataSize, tupleIndex (EMBEDDED_PEAK).
+        block.extend_from_slice(&var_data_size.to_be_bytes());
+        block.extend_from_slice(&TI_EMBEDDED_PEAK.to_be_bytes());
+        // embedded peak tuple: +1.0 in F2DOT14 = 0x4000.
+        block.extend_from_slice(&0x4000i16.to_be_bytes());
+        block.extend_from_slice(&data_area);
+
+        // --- gvar header (20) + offsets[2] (short, /2) ----------------
+        let mut b = vec![0u8; 20];
+        b[0..2].copy_from_slice(&1u16.to_be_bytes()); // major
+        b[4..6].copy_from_slice(&1u16.to_be_bytes()); // axisCount
+        b[12..14].copy_from_slice(&1u16.to_be_bytes()); // glyphCount
+                                                        // flags = 0 (short offsets)
+        let data_array_off = 24u32; // header(20) + offsets[2]*2 = 24
+        b[16..20].copy_from_slice(&data_array_off.to_be_bytes());
+        // offsets[0] = 0 (÷2), offsets[1] = block.len()/2. Block length
+        // must be even for the short encoding; pad if odd.
+        if block.len() % 2 != 0 {
+            block.push(0);
+        }
+        let end_half = (block.len() / 2) as u16;
+        b.extend_from_slice(&0u16.to_be_bytes()); // offsets[0]
+        b.extend_from_slice(&end_half.to_be_bytes()); // offsets[1]
+        b.extend_from_slice(&block);
+        b
+    }
+
+    #[test]
+    fn gvar_glyph_deltas_at_peak_returns_outline_deltas() {
+        // 3 outline points + 4 phantom = 7 pseudo-points.
+        let dxs = [10, 20, 30, 0, 0, 0, 0];
+        let dys = [-1, -2, -3, 0, 0, 0, 0];
+        let raw = build_one_tuple_glyph(&dxs, &dys);
+        let g = GvarTable::parse(&raw).expect("parse");
+        // At peak (+1.0) the deltas pass through unscaled; the 4 phantom
+        // points are truncated away, leaving the 3 outline points.
+        let out = g.glyph_deltas(0, 3, &[1.0]).expect("deltas");
+        assert_eq!(out, vec![(10, -1), (20, -2), (30, -3)]);
+        // Half-way (+0.5) scales linearly.
+        let half = g.glyph_deltas(0, 3, &[0.5]).expect("deltas");
+        assert_eq!(half, vec![(5, -1), (10, -1), (15, -2)]);
+    }
+
+    #[test]
+    fn gvar_glyph_component_deltas_addresses_components_not_points() {
+        // A composite with 2 components → pseudo-points 0,1 are the
+        // component placements; 2..5 are the phantom points. The stream
+        // addresses 2 + 4 = 6 pseudo-points.
+        let dxs = [100, 200, 7, 7, 0, 0];
+        let dys = [5, 6, 0, 0, 9, 9];
+        let raw = build_one_tuple_glyph(&dxs, &dys);
+        let g = GvarTable::parse(&raw).expect("parse");
+        let comp = g.glyph_component_deltas(0, 2, &[1.0]).expect("comp deltas");
+        // Only the first 2 (component) pseudo-points are returned; the
+        // phantom-point deltas (indices 2..5) are dropped.
+        assert_eq!(comp, vec![(100, 5), (200, 6)]);
+        // Default position → no deltas.
+        let comp0 = g.glyph_component_deltas(0, 2, &[0.0]).expect("comp deltas");
+        assert_eq!(comp0, vec![(0, 0), (0, 0)]);
     }
 }

@@ -848,12 +848,46 @@ impl<'a> Font<'a> {
     /// caller has set non-default coordinates via
     /// [`Font::set_variation_coords`], the static outline returned
     /// here has gvar deltas applied (with avar remap on the input
-    /// coords first). Composite glyphs do not currently propagate
-    /// per-component variation deltas — only simple glyphs are
-    /// retargeted; this is sufficient for nearly all Latin/Cyrillic/
-    /// Greek glyphs, which are simple, and degrades gracefully on the
-    /// composite-heavy CJK case (the static outline is still returned).
+    /// coords first).
+    ///
+    /// Both simple **and** composite glyphs are retargeted. For a
+    /// composite glyph the gvar packed point numbers address the
+    /// *components* (plus four phantom points), not flattened outline
+    /// points, per ISO/IEC 14496-22:2019 §7.3.4.3 — the per-component
+    /// `(dx, dy)` placement deltas are folded into each component's
+    /// X/Y offset (and scaled with the offset where
+    /// `SCALED_COMPONENT_OFFSET` is set) before the children are
+    /// flattened. Point-matched components take no delta, and nested
+    /// components inherit their own glyph's variation when decoded as
+    /// top-level glyphs, matching the spec's "most deeply-nested
+    /// first" processing order.
     pub fn glyph_outline(&self, glyph_id: u16) -> Result<TtOutline, Error> {
+        if glyph_id >= self.maxp.num_glyphs {
+            return Err(Error::GlyphOutOfRange(glyph_id));
+        }
+        let variable =
+            self.gvar.is_some() && !self.var_coords.is_empty() && self.coords_differ_from_default();
+        // Compute the avar-bent normalised coordinate vector once and
+        // share it across the whole (possibly recursive) composite walk.
+        let normalised = if variable {
+            self.normalised_coords()
+        } else {
+            Vec::new()
+        };
+        self.glyph_outline_at_depth(glyph_id, 0, variable, &normalised)
+    }
+
+    /// Recursive outline resolver. `depth` guards composite recursion;
+    /// `variable` + `normalised` carry the variation context down through
+    /// the §7.3.4.3 component walk so each component glyph is resolved
+    /// with its own gvar deltas applied before placement.
+    fn glyph_outline_at_depth(
+        &self,
+        glyph_id: u16,
+        depth: u8,
+        variable: bool,
+        normalised: &[f32],
+    ) -> Result<TtOutline, Error> {
         if glyph_id >= self.maxp.num_glyphs {
             return Err(Error::GlyphOutOfRange(glyph_id));
         }
@@ -865,27 +899,49 @@ impl<'a> Font<'a> {
         if range.is_empty() {
             return Ok(TtOutline::default());
         }
-        let mut out = glyf.glyph_outline(range, loca, 0)?;
-        if let Some(gvar) = self.gvar.as_ref() {
-            if !self.var_coords.is_empty() && self.coords_differ_from_default() {
-                let n_pts: usize = out.contours.iter().map(|c| c.points.len()).sum();
-                if n_pts > 0 && n_pts <= u16::MAX as usize {
-                    let normalised = self.normalised_coords();
-                    if let Ok(deltas) = gvar.glyph_deltas(glyph_id, n_pts as u16, &normalised) {
-                        let mut idx = 0usize;
-                        for c in out.contours.iter_mut() {
-                            for p in c.points.iter_mut() {
-                                let (dx, dy) = deltas[idx];
-                                let nx = p.x as i32 + dx;
-                                let ny = p.y as i32 + dy;
-                                p.x = clamp_i16_for_outline(nx);
-                                p.y = clamp_i16_for_outline(ny);
-                                idx += 1;
-                            }
-                        }
-                        // Re-derive bounds after delta application.
-                        out.bounds = outline::derive_bbox(&out.contours);
+
+        // Composite-glyph variation path (§7.3.4.3): apply per-component
+        // placement deltas inside the composite decode rather than to
+        // flattened outline points, and resolve each component glyph's
+        // own variation via a recursive child resolver.
+        if variable {
+            if let Ok(n_comp) = glyf.composite_component_count(range.clone()) {
+                if n_comp > 0 {
+                    let gvar = self.gvar.as_ref().unwrap();
+                    if let Ok(deltas) = gvar.glyph_component_deltas(glyph_id, n_comp, normalised) {
+                        let resolve = |child_gid: u16, child_depth: u8| {
+                            self.glyph_outline_at_depth(
+                                child_gid,
+                                child_depth,
+                                variable,
+                                normalised,
+                            )
+                        };
+                        return glyf.glyph_outline_var(range, loca, depth, &deltas, &resolve);
                     }
+                }
+            }
+        }
+
+        let mut out = glyf.glyph_outline(range, loca, depth)?;
+        if variable {
+            let gvar = self.gvar.as_ref().unwrap();
+            let n_pts: usize = out.contours.iter().map(|c| c.points.len()).sum();
+            if n_pts > 0 && n_pts <= u16::MAX as usize {
+                if let Ok(deltas) = gvar.glyph_deltas(glyph_id, n_pts as u16, normalised) {
+                    let mut idx = 0usize;
+                    for c in out.contours.iter_mut() {
+                        for p in c.points.iter_mut() {
+                            let (dx, dy) = deltas[idx];
+                            let nx = p.x as i32 + dx;
+                            let ny = p.y as i32 + dy;
+                            p.x = clamp_i16_for_outline(nx);
+                            p.y = clamp_i16_for_outline(ny);
+                            idx += 1;
+                        }
+                    }
+                    // Re-derive bounds after delta application.
+                    out.bounds = outline::derive_bbox(&out.contours);
                 }
             }
         }
