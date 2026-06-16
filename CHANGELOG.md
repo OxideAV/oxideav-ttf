@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `EBSC` embedded bitmap scaling table (ISO/IEC 14496-22:2019 §5.6.4):
+  header + `BitmapScale[]` array with the shared §5.6.3.2
+  `SbitLineMetrics` struct. `Font::has_ebsc()` / `Font::ebsc_table()` /
+  `Font::ebsc_target_sizes()` introspect the table;
+  `Font::glyph_gray_bitmap_scaled(gid, target_ppem)` redirects a
+  requested ppem to the real `EBLC`/`EBDT` substitute strike and scales
+  the per-glyph metrics by the §5.6.4 `target / substitute` ppem ratio
+  (independent X/Y, nearest-integer-pixel rounding), passing the source
+  pixel grid through unresampled.
 - GPOS ScriptList / FeatureList walker (`Font::gpos_features_for_script`)
   plus version-1.1 FeatureVariations wiring
   (`Font::gpos_features_for_script_at_instance` /

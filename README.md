@@ -339,8 +339,32 @@ ligatures and kerning.
   colour path); `Font::has_gray_bitmaps()` / `Font::gray_strike_sizes()`
   gate and enumerate. Format 4 (compressed) and formats 8 / 9
   (composite) decode to `None`; `bitDepth == 32` (BGRA) routes to the
-  `CBDT` colour path instead. `EBSC` (scaled-strike substitution,
-  §5.6.4) is not yet decoded.
+  `CBDT` colour path instead.
+- `EBSC` embedded bitmap scaling table (ISO/IEC 14496-22:2019 §5.6.4) —
+  the 8-byte header (`uint16 majorVersion == 2`, `uint16 minorVersion`,
+  `uint32 numSizes`) plus a `BitmapScale[numSizes]` array, each record
+  carrying a `hori` / `vert` `SbitLineMetrics` pair (the §5.6.3.2 12-byte
+  line-metrics struct shared with `EBLC`'s `BitmapSize`) and the four
+  ppem bytes `(ppemX, ppemY, substitutePpemX, substitutePpemY)`. `EBSC`
+  carries no glyph imagery: each `BitmapScale` declares a *synthesised*
+  strike at `(ppemX, ppemY)` produced by scaling the real
+  `EBLC`/`EBDT` strike at `(substitutePpemX, substitutePpemY)` — the
+  spec's motivating case is small Kanji sizes where scaling an authored
+  bitmap reads better than scan-converting an outline. `majorVersion` is
+  pinned to 2 (the minor version is surfaced rather than fixed so a
+  future `2.x` revision still decodes); `numSizes` is capped at 256 to
+  bound allocation. `Font::has_ebsc()` / `Font::ebsc_table()` expose the
+  parsed table and `Font::ebsc_target_sizes()` lists the synthesisable
+  `(ppemX, ppemY)` targets. `Font::glyph_gray_bitmap_scaled(gid,
+  target_ppem)` resolves a glyph at the `BitmapScale` whose target
+  `ppemY` matches, pulling the substitute strike's pixels and scaling the
+  per-glyph metrics (width / height / bearings / advance) independently
+  in X and Y by the §5.6.4 `target / substitute` ppem ratio, rounded to
+  the nearest integer pixel; the source pixel grid passes through
+  unresampled so the consumer crate can resample at its chosen filter
+  quality (§5.6.4 leaves the actual scaling to the rasteriser). The
+  reported `width` / `height` are the scaled dimensions the resampled
+  grid should target.
 - Adobe Glyph List (AGL) glyph-name → Unicode resolution
   (`glyph_name_to_codepoints` / `glyph_name_to_char`). Direct table
   lookup against the embedded AGL 2.0 data: a PostScript glyph name

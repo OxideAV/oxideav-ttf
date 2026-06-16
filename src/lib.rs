@@ -60,13 +60,13 @@ pub use collection::{is_collection, CollectionHeader, TTC_MAGIC};
 use crate::parser::TableDirectory;
 use crate::tables::{
     avar::AvarTable, base::BaseTable, cbdt::CbdtTable, cblc::CblcTable, cmap::CmapTable,
-    colr::ColrTable, cpal::CpalTable, ebdt::EbdtTable, fvar::FvarTable, gasp::GaspTable,
-    gdef::GdefTable, glyf::GlyfTable, gpos::GposTable, gsub::GsubTable, gvar::GvarTable,
-    hdmx::HdmxTable, head::HeadTable, hhea::HheaTable, hmtx::HmtxTable, hvar::HvarTable,
-    kern::KernTable, loca::LocaTable, ltsh::LtshTable, maxp::MaxpTable, meta::MetaTable,
-    mvar::MvarTable, name::NameTable, os2::Os2Table, pclt::PcltTable, post::PostTable,
-    sbix::SbixTable, stat::StatTable, vdmx::VdmxTable, vhea::VheaTable, vmtx::VmtxTable,
-    vorg::VorgTable, vvar::VvarTable,
+    colr::ColrTable, cpal::CpalTable, ebdt::EbdtTable, ebsc::EbscTable, fvar::FvarTable,
+    gasp::GaspTable, gdef::GdefTable, glyf::GlyfTable, gpos::GposTable, gsub::GsubTable,
+    gvar::GvarTable, hdmx::HdmxTable, head::HeadTable, hhea::HheaTable, hmtx::HmtxTable,
+    hvar::HvarTable, kern::KernTable, loca::LocaTable, ltsh::LtshTable, maxp::MaxpTable,
+    meta::MetaTable, mvar::MvarTable, name::NameTable, os2::Os2Table, pclt::PcltTable,
+    post::PostTable, sbix::SbixTable, stat::StatTable, vdmx::VdmxTable, vhea::VheaTable,
+    vmtx::VmtxTable, vorg::VorgTable, vvar::VvarTable,
 };
 
 pub use outline::{BBox, Contour, Point, TtOutline};
@@ -79,6 +79,7 @@ pub use tables::cbdt::ColorBitmap;
 pub use tables::cblc::{BigGlyphMetrics, SmallGlyphMetrics};
 pub use tables::colr::ColorLayer;
 pub use tables::ebdt::GrayBitmap;
+pub use tables::ebsc::{BitmapScale, SbitLineMetrics, EBSC_MAJOR_VERSION, EBSC_MINOR_VERSION};
 pub use tables::fvar::{NamedInstance, VariationAxis};
 pub use tables::gasp::{
     GaspRange, GASP_DOGRAY, GASP_GRIDFIT, GASP_PPEM_SENTINEL, GASP_RESERVED_MASK,
@@ -239,6 +240,13 @@ pub struct Font<'a> {
     /// does. Present on legacy
     /// pixel / CJK bitmap faces.
     ebdt: Option<EbdtTable<'a>>,
+    /// Embedded bitmap *scaling* table (`EBSC`, ISO/IEC 14496-22:2019
+    /// §5.6.4). Declares synthesised strikes built by scaling an existing
+    /// `EBLC`/`EBDT` strike up or down (small Kanji sizes are the spec's
+    /// motivating case). Owns no glyph imagery; it redirects a requested
+    /// ppem to a real `substitutePpem` strike. Carries no lifetime — every
+    /// field copies out of the slice at parse time.
+    ebsc: Option<EbscTable>,
     colr: Option<ColrTable<'a>>,
     cpal: Option<CpalTable<'a>>,
     sbix: Option<SbixTable<'a>>,
@@ -454,6 +462,7 @@ impl<'a> Font<'a> {
         let cbdt = dir.find(b"CBDT", bytes).map(CbdtTable::parse).transpose()?;
         let eblc = dir.find(b"EBLC", bytes).map(CblcTable::parse).transpose()?;
         let ebdt = dir.find(b"EBDT", bytes).map(EbdtTable::parse).transpose()?;
+        let ebsc = dir.find(b"EBSC", bytes).map(EbscTable::parse).transpose()?;
         let colr = dir.find(b"COLR", bytes).map(ColrTable::parse).transpose()?;
         let cpal = dir.find(b"CPAL", bytes).map(CpalTable::parse).transpose()?;
         let sbix = dir
@@ -537,6 +546,7 @@ impl<'a> Font<'a> {
             cbdt,
             eblc,
             ebdt,
+            ebsc,
             colr,
             cpal,
             sbix,
@@ -1952,6 +1962,92 @@ impl<'a> Font<'a> {
         let ebdt = self.ebdt.as_ref()?;
         let entry = eblc.lookup_glyph(glyph_id, target_ppem)?;
         ebdt.lookup(&entry).ok().flatten()
+    }
+
+    // ---- scaled embedded bitmaps (EBSC) ----------------------------------
+
+    /// `true` if this font ships an `EBSC` table (ISO/IEC 14496-22:2019
+    /// §5.6.4) — i.e. declares one or more synthesised bitmap strikes
+    /// built by scaling a real `EBLC`/`EBDT` strike. Returns `false` for
+    /// fonts without `EBSC`, including the common case of a font that has
+    /// real embedded bitmaps but never scales them.
+    pub fn has_ebsc(&self) -> bool {
+        self.ebsc.is_some()
+    }
+
+    /// The parsed `EBSC` table, for tooling that wants to introspect the
+    /// `BitmapScale` records directly (target / substitute ppem pairs and
+    /// the per-strike line metrics).
+    pub fn ebsc_table(&self) -> Option<&EbscTable> {
+        self.ebsc.as_ref()
+    }
+
+    /// All target `(ppemX, ppemY)` sizes the `EBSC` table can synthesise
+    /// by scaling, in declaration order. These are sizes at which a
+    /// rasteriser can obtain a bitmap *without* a real strike existing at
+    /// that ppem — [`Font::glyph_gray_bitmap_scaled`] resolves them.
+    /// Empty when the font has no `EBSC`.
+    pub fn ebsc_target_sizes(&self) -> Vec<(u8, u8)> {
+        self.ebsc
+            .as_ref()
+            .map(|t| t.target_ppem_sizes().collect())
+            .unwrap_or_default()
+    }
+
+    /// Resolve `glyph_id` at an `EBSC`-synthesised strike whose target
+    /// `ppemY` equals `target_ppem`, returning a [`GrayBitmap`] whose
+    /// pixel grid is the **real** substitute strike's imagery with the
+    /// per-glyph metrics (width, height, bearings, advance) scaled by the
+    /// `target / substitute` ppem ratio and rounded to the nearest integer
+    /// pixel per §5.6.4. The `ppem` field of the returned bitmap is set to
+    /// the synthesised target so the caller knows the intended display
+    /// size.
+    ///
+    /// The pixel buffer itself is *not* resampled here — §5.6.4 leaves the
+    /// actual scaling to the rasteriser ("a font to define a bitmap strike
+    /// as a scaled version of another strike"); this method performs the
+    /// table-level redirection and the metric scaling the spec mandates,
+    /// and hands the source pixels through so the consumer crate can
+    /// resample at its chosen filter quality. The reported `width` /
+    /// `height` are the scaled dimensions the resampled grid should target.
+    ///
+    /// Returns `None` when the font has no `EBSC`, no `BitmapScale` record
+    /// targets `target_ppem`, no real strike exists at the record's
+    /// `substitutePpemY`, the substitute strike lacks `glyph_id`, or the
+    /// substitute entry is in an undecoded `EBDT` format.
+    pub fn glyph_gray_bitmap_scaled(&self, glyph_id: u16, target_ppem: u8) -> Option<GrayBitmap> {
+        use crate::tables::ebsc::scale_metric;
+        let ebsc = self.ebsc.as_ref()?;
+        let eblc = self.eblc.as_ref()?;
+        let ebdt = self.ebdt.as_ref()?;
+        let scale = ebsc.scale_for_target_ppem(target_ppem)?;
+        // Pull the real (substitute) strike's bitmap. We ask for the exact
+        // substitute ppemY; `lookup_glyph` picks the strike whose ppemY is
+        // closest, which lands on an exact match when the substitute strike
+        // is present.
+        let entry = eblc.lookup_glyph(glyph_id, scale.substitute_ppem_y)?;
+        let src = ebdt.lookup(&entry).ok().flatten()?;
+        // Scale metrics independently in X and Y per §5.6.4 ("scaling in
+        // the x direction is independent of scaling in the y direction").
+        let sx = scale.substitute_ppem_x;
+        let sy = scale.substitute_ppem_y;
+        let scaled_width = scale_metric(src.width as i32, scale.ppem_x, sx).clamp(0, 255) as u8;
+        let scaled_height = scale_metric(src.height as i32, scale.ppem_y, sy).clamp(0, 255) as u8;
+        let scaled_bearing_x =
+            scale_metric(src.bearing_x as i32, scale.ppem_x, sx).clamp(-128, 127) as i8;
+        let scaled_bearing_y =
+            scale_metric(src.bearing_y as i32, scale.ppem_y, sy).clamp(-128, 127) as i8;
+        let scaled_advance = scale_metric(src.advance as i32, scale.ppem_x, sx).clamp(0, 255) as u8;
+        Some(GrayBitmap {
+            width: scaled_width,
+            height: scaled_height,
+            bearing_x: scaled_bearing_x,
+            bearing_y: scaled_bearing_y,
+            advance: scaled_advance,
+            ppem: scale.ppem_y,
+            bit_depth: src.bit_depth,
+            pixels: src.pixels,
+        })
     }
 
     // ---- color layer glyphs (COLR / CPAL) --------------------------------
