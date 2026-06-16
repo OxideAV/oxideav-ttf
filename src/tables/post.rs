@@ -30,30 +30,25 @@
 //! scope per §5.2.10 ("not supported in OpenType"); it is rejected
 //! here as an unsupported version.
 //!
-//! ## Standard-Macintosh-glyph-name list (gap)
+//! ## Standard-Macintosh-glyph-name list
 //!
 //! ISO §5.2.10.1 defers to "Reference [2]" (Apple's TrueType
-//! Reference Manual, Chap 6 — the on-line `RM06/Chap6post.html`
-//! page) for the list of the 258 standard Macintosh glyph names. The
-//! MS Learn `otspec-post` page does the same. That reference is the
-//! sole canonical source of the 258-name array and is not yet
-//! staged in `docs/text/opentype/`. Until it is, this module:
+//! Reference Manual, Chap 6 — the `RM06/Chap6post.html` page) for the
+//! list of the 258 standard Macintosh glyph names. The MS Learn
+//! `otspec-post` page does the same. That 258-name array is now staged
+//! at `docs/text/opentype/post-standard-mac-glyph-names.md` and
+//! transcribed verbatim into [`STANDARD_MAC_GLYPH_NAMES`]. This module:
 //!
 //! - decodes the post-table **structure** for all four versions
 //!   (header + numGlyphs + index array + Pascal strings);
 //! - exposes the per-glyph name index ([`GlyphNameRef::StandardMac`]
 //!   `{ index }`) and the per-glyph Pascal string
-//!   ([`GlyphNameRef::Custom`] `(&str)`) so a caller that supplies its
-//!   own 258-name array can resolve names today;
-//! - returns `None` from the convenience
-//!   [`Font::glyph_name`](crate::Font::glyph_name) accessor whenever
-//!   the resolution would require a standard Macintosh name, with
-//!   the `Some(name)` path returning Pascal strings unchanged.
-//!
-//! Once the 258-name list is staged a single-commit follow-up adds
-//! `STANDARD_MAC_GLYPH_NAMES: [&str; 258]` and turns the `StandardMac`
-//! branch into a real `Some(&str)`. The decoder layout below is the
-//! foundation that follow-up plugs into.
+//!   ([`GlyphNameRef::Custom`] `(&str)`) for callers that want the raw
+//!   reference;
+//! - resolves both branches into a single `Option<&str>` through
+//!   [`PostTable::resolved_glyph_name`] and the convenience
+//!   [`Font::glyph_name`](crate::Font::glyph_name) accessor, looking a
+//!   `StandardMac` index up in [`STANDARD_MAC_GLYPH_NAMES`].
 
 use crate::parser::{read_i16, read_i32, read_u16, read_u32, read_u8};
 use crate::Error;
@@ -95,6 +90,287 @@ pub const STANDARD_MAC_GLYPH_COUNT: u16 = 258;
 /// [`PostTable::has_oversize_glyph_name`] so callers can downgrade
 /// gracefully.
 pub const RECOMMENDED_GLYPH_NAME_MAX_LEN: usize = 63;
+
+/// The 258 standard Macintosh glyph names, in their canonical ordering,
+/// as referenced by `post` table formats 1.0, 2.0 (for
+/// `glyphNameIndex < 258`), and 2.5.
+///
+/// Index 0 = `.notdef`, 1 = `.null`, 2 = `nonmarkingreturn`, …,
+/// 257 = `dcroat`. All 258 entries are distinct. The ordering and the
+/// names themselves are standards data defined by Apple's *TrueType
+/// Reference Manual*, Chapter 6 `post` table, "`'post'` Format 1"
+/// (Microsoft's OpenType `post` spec defers to Apple for the list) —
+/// transcribed verbatim from
+/// `docs/text/opentype/post-standard-mac-glyph-names.md`.
+pub static STANDARD_MAC_GLYPH_NAMES: [&str; STANDARD_MAC_GLYPH_COUNT as usize] = [
+    ".notdef",
+    ".null",
+    "nonmarkingreturn",
+    "space",
+    "exclam",
+    "quotedbl",
+    "numbersign",
+    "dollar",
+    "percent",
+    "ampersand",
+    "quotesingle",
+    "parenleft",
+    "parenright",
+    "asterisk",
+    "plus",
+    "comma",
+    "hyphen",
+    "period",
+    "slash",
+    "zero",
+    "one",
+    "two",
+    "three",
+    "four",
+    "five",
+    "six",
+    "seven",
+    "eight",
+    "nine",
+    "colon",
+    "semicolon",
+    "less",
+    "equal",
+    "greater",
+    "question",
+    "at",
+    "A",
+    "B",
+    "C",
+    "D",
+    "E",
+    "F",
+    "G",
+    "H",
+    "I",
+    "J",
+    "K",
+    "L",
+    "M",
+    "N",
+    "O",
+    "P",
+    "Q",
+    "R",
+    "S",
+    "T",
+    "U",
+    "V",
+    "W",
+    "X",
+    "Y",
+    "Z",
+    "bracketleft",
+    "backslash",
+    "bracketright",
+    "asciicircum",
+    "underscore",
+    "grave",
+    "a",
+    "b",
+    "c",
+    "d",
+    "e",
+    "f",
+    "g",
+    "h",
+    "i",
+    "j",
+    "k",
+    "l",
+    "m",
+    "n",
+    "o",
+    "p",
+    "q",
+    "r",
+    "s",
+    "t",
+    "u",
+    "v",
+    "w",
+    "x",
+    "y",
+    "z",
+    "braceleft",
+    "bar",
+    "braceright",
+    "asciitilde",
+    "Adieresis",
+    "Aring",
+    "Ccedilla",
+    "Eacute",
+    "Ntilde",
+    "Odieresis",
+    "Udieresis",
+    "aacute",
+    "agrave",
+    "acircumflex",
+    "adieresis",
+    "atilde",
+    "aring",
+    "ccedilla",
+    "eacute",
+    "egrave",
+    "ecircumflex",
+    "edieresis",
+    "iacute",
+    "igrave",
+    "icircumflex",
+    "idieresis",
+    "ntilde",
+    "oacute",
+    "ograve",
+    "ocircumflex",
+    "odieresis",
+    "otilde",
+    "uacute",
+    "ugrave",
+    "ucircumflex",
+    "udieresis",
+    "dagger",
+    "degree",
+    "cent",
+    "sterling",
+    "section",
+    "bullet",
+    "paragraph",
+    "germandbls",
+    "registered",
+    "copyright",
+    "trademark",
+    "acute",
+    "dieresis",
+    "notequal",
+    "AE",
+    "Oslash",
+    "infinity",
+    "plusminus",
+    "lessequal",
+    "greaterequal",
+    "yen",
+    "mu",
+    "partialdiff",
+    "summation",
+    "product",
+    "pi",
+    "integral",
+    "ordfeminine",
+    "ordmasculine",
+    "Omega",
+    "ae",
+    "oslash",
+    "questiondown",
+    "exclamdown",
+    "logicalnot",
+    "radical",
+    "florin",
+    "approxequal",
+    "Delta",
+    "guillemotleft",
+    "guillemotright",
+    "ellipsis",
+    "nonbreakingspace",
+    "Agrave",
+    "Atilde",
+    "Otilde",
+    "OE",
+    "oe",
+    "endash",
+    "emdash",
+    "quotedblleft",
+    "quotedblright",
+    "quoteleft",
+    "quoteright",
+    "divide",
+    "lozenge",
+    "ydieresis",
+    "Ydieresis",
+    "fraction",
+    "currency",
+    "guilsinglleft",
+    "guilsinglright",
+    "fi",
+    "fl",
+    "daggerdbl",
+    "periodcentered",
+    "quotesinglbase",
+    "quotedblbase",
+    "perthousand",
+    "Acircumflex",
+    "Ecircumflex",
+    "Aacute",
+    "Edieresis",
+    "Egrave",
+    "Iacute",
+    "Icircumflex",
+    "Idieresis",
+    "Igrave",
+    "Oacute",
+    "Ocircumflex",
+    "apple",
+    "Ograve",
+    "Uacute",
+    "Ucircumflex",
+    "Ugrave",
+    "dotlessi",
+    "circumflex",
+    "tilde",
+    "macron",
+    "breve",
+    "dotaccent",
+    "ring",
+    "cedilla",
+    "hungarumlaut",
+    "ogonek",
+    "caron",
+    "Lslash",
+    "lslash",
+    "Scaron",
+    "scaron",
+    "Zcaron",
+    "zcaron",
+    "brokenbar",
+    "Eth",
+    "eth",
+    "Yacute",
+    "yacute",
+    "Thorn",
+    "thorn",
+    "minus",
+    "multiply",
+    "onesuperior",
+    "twosuperior",
+    "threesuperior",
+    "onehalf",
+    "onequarter",
+    "threequarters",
+    "franc",
+    "Gbreve",
+    "gbreve",
+    "Idotaccent",
+    "Scedilla",
+    "scedilla",
+    "Cacute",
+    "cacute",
+    "Ccaron",
+    "ccaron",
+    "dcroat",
+];
+
+/// Resolve a standard-Macintosh glyph-name index to its name.
+///
+/// Returns `None` for `index >= 258` (outside the standard set). The
+/// [`GlyphNameRef::StandardMac`] variant guarantees `index < 258`, so a
+/// lookup driven by it always succeeds.
+pub fn standard_mac_glyph_name(index: u16) -> Option<&'static str> {
+    STANDARD_MAC_GLYPH_NAMES.get(index as usize).copied()
+}
 
 /// Parsed `post` table. The common header is always populated;
 /// `format` carries the version-dependent trailing data.
@@ -187,12 +463,11 @@ pub struct PostV25 {
 /// Resolved name of a single glyph as carried by `post`.
 ///
 /// Callers consume this via [`PostTable::glyph_name_ref`]. The
-/// `StandardMac { index }` variant is the bridge for the pending
-/// 258-name list (docs gap #1277). Once the list is staged a
-/// `standard_mac_glyph_name(index)` helper can synthesise a
-/// `&'static str` from the index; until then the index itself is
-/// surfaced verbatim so tooling can either bring its own 258-name
-/// array or treat the glyph as unnamed.
+/// `StandardMac { index }` variant carries a 0-based index into the
+/// 258-name standard Macintosh glyph order; resolve it through
+/// [`standard_mac_glyph_name`] (or use [`PostTable::resolved_glyph_name`]
+/// to resolve both branches at once). The raw index is surfaced so
+/// tooling can introspect the reference without name resolution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GlyphNameRef<'a> {
     /// The glyph's name is the `index`th entry of the 258-name
@@ -338,6 +613,20 @@ impl PostTable {
         match self.glyph_name_ref(gid)? {
             GlyphNameRef::Custom(s) => Some(s),
             GlyphNameRef::StandardMac { .. } => None,
+        }
+    }
+
+    /// Fully resolve a glyph's PostScript name, covering **both**
+    /// branches: a font-supplied v2.0 Pascal string is returned
+    /// directly, and a `StandardMac { index }` reference is resolved
+    /// through [`STANDARD_MAC_GLYPH_NAMES`] into the canonical standard
+    /// Macintosh name. Returns `None` only when the table publishes no
+    /// name for `gid` (no `post`, v3.0, out-of-range glyph id, or an
+    /// unsatisfiable Pascal pool reference).
+    pub fn resolved_glyph_name(&self, gid: u16) -> Option<&str> {
+        match self.glyph_name_ref(gid)? {
+            GlyphNameRef::Custom(s) => Some(s),
+            GlyphNameRef::StandardMac { index } => standard_mac_glyph_name(index),
         }
     }
 }
@@ -491,6 +780,10 @@ mod tests {
         );
         // gid == 258 is out of the standard set; v1.0 cannot name it.
         assert!(p.glyph_name_ref(258).is_none());
+        // Resolution into the canonical standard Macintosh names.
+        assert_eq!(p.resolved_glyph_name(0), Some(".notdef"));
+        assert_eq!(p.resolved_glyph_name(217), Some("tilde"));
+        assert!(p.resolved_glyph_name(258).is_none());
     }
 
     /// §5.2.10.2 worked example: glyphNameIndex[302] is 217 → standard
@@ -527,6 +820,10 @@ mod tests {
         assert_eq!(p.glyph_name_ref(408), Some(GlyphNameRef::Custom("weird")));
         assert_eq!(p.custom_glyph_name(408), Some("weird"));
         assert!(p.custom_glyph_name(302).is_none());
+        // resolved_glyph_name covers both branches: the standard-Mac
+        // reference resolves to "tilde", the custom one to "weird".
+        assert_eq!(p.resolved_glyph_name(302), Some("tilde"));
+        assert_eq!(p.resolved_glyph_name(408), Some("weird"));
     }
 
     #[test]
@@ -614,6 +911,10 @@ mod tests {
             p.glyph_name_ref(2),
             Some(GlyphNameRef::StandardMac { index: 38 })
         );
+        // Standard indices 36/37/38 are A/B/C.
+        assert_eq!(p.resolved_glyph_name(0), Some("A"));
+        assert_eq!(p.resolved_glyph_name(1), Some("B"));
+        assert_eq!(p.resolved_glyph_name(2), Some("C"));
     }
 
     #[test]
@@ -650,6 +951,38 @@ mod tests {
         );
         // gid 250 + 127 = 377 (out of [0,258)).
         assert!(p.glyph_name_ref(250).is_none());
+    }
+
+    #[test]
+    fn standard_mac_glyph_names_table_is_well_formed() {
+        // Exactly 258 entries, all distinct (the count is keyed off the
+        // shared STANDARD_MAC_GLYPH_COUNT constant).
+        assert_eq!(STANDARD_MAC_GLYPH_NAMES.len(), 258);
+        assert_eq!(
+            STANDARD_MAC_GLYPH_NAMES.len(),
+            STANDARD_MAC_GLYPH_COUNT as usize
+        );
+        let mut sorted: Vec<&str> = STANDARD_MAC_GLYPH_NAMES.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), 258, "all 258 names must be distinct");
+    }
+
+    #[test]
+    fn standard_mac_glyph_name_spot_checks() {
+        // Anchors from the staged ordering doc.
+        assert_eq!(standard_mac_glyph_name(0), Some(".notdef"));
+        assert_eq!(standard_mac_glyph_name(1), Some(".null"));
+        assert_eq!(standard_mac_glyph_name(2), Some("nonmarkingreturn"));
+        assert_eq!(standard_mac_glyph_name(3), Some("space"));
+        assert_eq!(standard_mac_glyph_name(36), Some("A"));
+        assert_eq!(standard_mac_glyph_name(192), Some("fi"));
+        assert_eq!(standard_mac_glyph_name(193), Some("fl"));
+        assert_eq!(standard_mac_glyph_name(217), Some("tilde"));
+        assert_eq!(standard_mac_glyph_name(257), Some("dcroat"));
+        // Out of the standard set.
+        assert_eq!(standard_mac_glyph_name(258), None);
+        assert_eq!(standard_mac_glyph_name(u16::MAX), None);
     }
 
     #[test]

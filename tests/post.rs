@@ -59,25 +59,22 @@ fn dejavu_sans_resolves_at_least_one_custom_glyph_name() {
         custom_count > 0,
         "DejaVu Sans is expected to carry at least one Pascal glyph name"
     );
-    // The Font::glyph_name() convenience returns Some only for the
-    // Custom branch; ensure that count matches.
+    // With the 258-name standard Macintosh table staged, the
+    // Font::glyph_name() convenience now resolves *both* the Custom and
+    // StandardMac branches, so its Some-count equals the total number
+    // of glyphs that carry any name reference.
     let convenience_count: usize = (0..font.glyph_count())
         .filter(|gid| font.glyph_name(*gid).is_some())
         .count();
-    assert_eq!(convenience_count, custom_count);
-    // StandardMac references are #1277-pending so the convenience
-    // accessor returns None for them; that means there should be at
-    // least one glyph the lower-level ref resolves but the
-    // convenience does not.
-    if std_count > 0 {
-        let std_only_gid = (0..font.glyph_count()).find(|gid| {
-            matches!(
-                font.glyph_name_ref(*gid),
-                Some(GlyphNameRef::StandardMac { .. })
-            )
-        });
-        if let Some(gid) = std_only_gid {
-            assert!(font.glyph_name(gid).is_none());
+    assert_eq!(convenience_count, custom_count + std_count);
+    // Every StandardMac reference must now resolve to a real name
+    // through the convenience accessor (no more #1277-pending None).
+    for gid in 0..font.glyph_count() {
+        if let Some(GlyphNameRef::StandardMac { index }) = font.glyph_name_ref(gid) {
+            let name = font
+                .glyph_name(gid)
+                .expect("StandardMac glyph name must resolve");
+            assert_eq!(name, oxideav_ttf::standard_mac_glyph_name(index).unwrap());
         }
     }
 }

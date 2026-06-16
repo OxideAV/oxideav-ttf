@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `post` table — the 258 standard Macintosh glyph names
+  (`STANDARD_MAC_GLYPH_NAMES: [&str; 258]` + the
+  `standard_mac_glyph_name(index)` helper), transcribed verbatim from
+  the now-staged `docs/text/opentype/post-standard-mac-glyph-names.md`
+  (docs gap #1277 closed). `Font::glyph_name(gid)` and the new
+  `PostTable::resolved_glyph_name(gid)` now resolve **both** the
+  `Custom` (Pascal-string) and `StandardMac { index }` branches into a
+  single `Option<&str>`, where previously the convenience accessor
+  returned `None` for the `StandardMac` branch.
+
 - `EBSC` embedded bitmap scaling table (ISO/IEC 14496-22:2019 §5.6.4):
   header + `BitmapScale[]` array with the shared §5.6.3.2
   `SbitLineMetrics` struct. `Font::has_ebsc()` / `Font::ebsc_table()` /

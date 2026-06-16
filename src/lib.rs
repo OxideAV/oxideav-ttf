@@ -106,9 +106,9 @@ pub use tables::pclt::{
     PCLT_WIDTH_TYPE_RANGE,
 };
 pub use tables::post::{
-    GlyphNameRef, PostFormat, PostV20, PostV25, POST_HEADER_LEN, POST_TABLE_TAG, POST_VERSION_10,
-    POST_VERSION_20, POST_VERSION_25, POST_VERSION_30, RECOMMENDED_GLYPH_NAME_MAX_LEN,
-    STANDARD_MAC_GLYPH_COUNT,
+    standard_mac_glyph_name, GlyphNameRef, PostFormat, PostV20, PostV25, POST_HEADER_LEN,
+    POST_TABLE_TAG, POST_VERSION_10, POST_VERSION_20, POST_VERSION_25, POST_VERSION_30,
+    RECOMMENDED_GLYPH_NAME_MAX_LEN, STANDARD_MAC_GLYPH_COUNT, STANDARD_MAC_GLYPH_NAMES,
 };
 pub use tables::sbix::{SbixGlyph, MAX_DUPE_DEPTH as SBIX_MAX_DUPE_DEPTH};
 pub use tables::stat::{
@@ -769,14 +769,11 @@ impl<'a> Font<'a> {
     /// - `Some(GlyphNameRef::StandardMac { index })` — the glyph
     ///   resolves to entry `index` of the 258-name standard Macintosh
     ///   glyph table (referenced through v1.0, v2.0, or v2.5). The
-    ///   258-name array itself is the subject of a documented gap
-    ///   (#1277 — the standard Macintosh glyph names list, defined
-    ///   exclusively by Apple's TrueType Reference Manual Chapter 6
-    ///   `post` Format 1, is not yet staged in `docs/text/opentype/`).
-    ///   Until the list is staged, [`Font::glyph_name`] returns
-    ///   `None` for these glyphs; this lower-level accessor still
-    ///   surfaces the index so tooling that owns its own copy of the
-    ///   258-name array can resolve names today.
+    ///   258-name array is staged in `docs/text/opentype/` and exposed
+    ///   as [`STANDARD_MAC_GLYPH_NAMES`]; [`Font::glyph_name`] resolves
+    ///   the index into the canonical name. This lower-level accessor
+    ///   surfaces the raw index so tooling can introspect the reference
+    ///   without name resolution.
     /// - `None` — the font has no `post` table, the table is v3.0
     ///   (no glyph names at all), `gid` falls outside the v2.0 /
     ///   v2.5 index array, or the index references a Pascal string
@@ -785,20 +782,26 @@ impl<'a> Font<'a> {
         self.post.as_ref()?.glyph_name_ref(gid)
     }
 
-    /// Convenience accessor: return the glyph's PostScript name when
-    /// the font supplies a custom one (v2.0 Pascal string).
+    /// Convenience accessor: return the glyph's PostScript name,
+    /// resolving **both** `post`-name branches.
     ///
-    /// Returns `None` for every other case — including the
-    /// `StandardMac { index }` branch, which would need the 258-name
-    /// list from #1277 to render. Once the docs gap closes a
-    /// follow-up commit can route the `StandardMac` index through a
-    /// `STANDARD_MAC_GLYPH_NAMES[i]` lookup; the current behaviour is
-    /// the §5.2.10.2 spec's documented "no name available" semantics
-    /// for callers that need a single `Option<&str>` shape.
+    /// A font-supplied v2.0 Pascal string is returned directly; a
+    /// `StandardMac { index }` reference (from v1.0, v2.0 with
+    /// `glyphNameIndex < 258`, or v2.5) is resolved through the
+    /// [`STANDARD_MAC_GLYPH_NAMES`] table into its canonical standard
+    /// Macintosh name.
+    ///
+    /// Returns `None` when no name is available — the font has no
+    /// `post` table, the table is v3.0 (no names at all), or `gid`
+    /// falls outside the table's index space. Use
+    /// [`Font::glyph_name_ref`] to distinguish the custom and
+    /// standard-Mac branches when that matters.
     pub fn glyph_name(&self, gid: u16) -> Option<&str> {
         match self.glyph_name_ref(gid)? {
             GlyphNameRef::Custom(s) => Some(s),
-            GlyphNameRef::StandardMac { .. } => None,
+            GlyphNameRef::StandardMac { index } => {
+                crate::tables::post::standard_mac_glyph_name(index)
+            }
         }
     }
 

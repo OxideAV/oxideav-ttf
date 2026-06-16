@@ -40,10 +40,13 @@ ligatures and kerning.
   out-of-scope. `Font::glyph_name_ref(gid)` exposes both the
   `Custom(&str)` (Pascal-string) and `StandardMac { index }` branches;
   `Font::glyph_name(gid)` is the convenience accessor returning
-  `Some(&str)` for the Pascal-string branch. The 258-name standard
-  Macintosh glyph table itself is pending docs gap #1277 — the
-  decoder publishes the index today and the convenience accessor
-  returns `None` for the `StandardMac` branch until the list lands),
+  `Some(&str)` for **both** branches — Pascal strings directly, and
+  `StandardMac` indices resolved through the 258-name standard
+  Macintosh glyph table (docs gap #1277 closed: the list is staged at
+  `docs/text/opentype/post-standard-mac-glyph-names.md`, transcribed
+  verbatim into `STANDARD_MAC_GLYPH_NAMES: [&str; 258]` and exposed
+  alongside the `standard_mac_glyph_name(index)` helper and
+  `PostTable::resolved_glyph_name(gid)`)),
   `VORG` (vertical origin table, ISO/IEC 14496-22:2019 §5.4.4 — header
   fields `defaultVertOriginY` + the optional sorted
   `vertOriginYMetrics` array of per-glyph overrides, with the §5.4.4
