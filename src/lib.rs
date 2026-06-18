@@ -65,8 +65,8 @@ use crate::tables::{
     gvar::GvarTable, hdmx::HdmxTable, head::HeadTable, hhea::HheaTable, hmtx::HmtxTable,
     hvar::HvarTable, kern::KernTable, loca::LocaTable, ltsh::LtshTable, maxp::MaxpTable,
     meta::MetaTable, mvar::MvarTable, name::NameTable, os2::Os2Table, pclt::PcltTable,
-    post::PostTable, sbix::SbixTable, stat::StatTable, vdmx::VdmxTable, vhea::VheaTable,
-    vmtx::VmtxTable, vorg::VorgTable, vvar::VvarTable,
+    post::PostTable, sbix::SbixTable, stat::StatTable, svg::SvgTable, vdmx::VdmxTable,
+    vhea::VheaTable, vmtx::VmtxTable, vorg::VorgTable, vvar::VvarTable,
 };
 
 pub use outline::{BBox, Contour, Point, TtOutline};
@@ -117,6 +117,10 @@ pub use tables::stat::{
     FLAG_OLDER_SIBLING_FONT_ATTRIBUTE as STAT_FLAG_OLDER_SIBLING_FONT_ATTRIBUTE,
     RANGE_MAX_POS_INFINITY as STAT_RANGE_MAX_POS_INFINITY,
     RANGE_MIN_NEG_INFINITY as STAT_RANGE_MIN_NEG_INFINITY,
+};
+pub use tables::svg::{
+    SvgDocument, SVG_DOCUMENT_RECORD_LEN, SVG_GZIP_MAGIC, SVG_HEADER_LEN, SVG_TABLE_TAG,
+    SVG_VERSION_0,
 };
 pub use tables::vdmx::{
     RatioRange as VdmxRatioRange, VdmxGroup, VdmxVTableRecord, VDMX_GROUP_HEADER_LEN,
@@ -346,6 +350,11 @@ pub struct Font<'a> {
     /// the 6-byte PCL file name, and the stroke-weight / width-type
     /// / serif-style classification bytes.
     pclt: Option<PcltTable>,
+    /// SVG table (`SVG `, ISO/IEC 14496-22:2019/Amd.1:2020 §5.5.1).
+    /// Optional; carries per-glyph-range SVG 1.1 vector colour-glyph
+    /// documents (plain UTF-8 or gzip-encoded). Records borrow from the
+    /// on-wire `SVG ` byte slice — the table does not copy the markup.
+    svg: Option<SvgTable<'a>>,
     /// Current user-space coordinate vector, one per axis (defaults
     /// to each axis's `default` value when `fvar` is present, empty
     /// vec otherwise). `set_variation_coords` updates this; the
@@ -518,6 +527,15 @@ impl<'a> Font<'a> {
         // selection attributes. All fields copy out of the slice at
         // parse time so the parsed table carries no lifetime.
         let pclt = dir.find(b"PCLT", bytes).map(PcltTable::parse).transpose()?;
+        // §5.5.1 (Amd.1:2020) SVG table — per-glyph-range SVG 1.1 vector
+        // colour-glyph documents. The tag carries a trailing space
+        // (`'SVG '`). Document payloads borrow from this byte slice so
+        // the `'a` lifetime of `Font<'a>` covers every document exposed
+        // through the `svg_*` accessors.
+        let svg = dir
+            .find(&SVG_TABLE_TAG, bytes)
+            .map(SvgTable::parse)
+            .transpose()?;
         let var_coords = match fvar.as_ref() {
             Some(f) => f.axes().iter().map(|a| a.default).collect(),
             None => Vec::new(),
@@ -564,6 +582,7 @@ impl<'a> Font<'a> {
             vdmx,
             meta,
             pclt,
+            svg,
             var_coords,
         })
     }
@@ -1357,6 +1376,37 @@ impl<'a> Font<'a> {
     /// stroke-weight / width-type / serif-style classification bytes.
     pub fn pclt_table(&self) -> Option<&PcltTable> {
         self.pclt.as_ref()
+    }
+
+    /// `true` when the font ships an `SVG ` table per ISO/IEC
+    /// 14496-22:2019/Amd.1:2020 §5.5.1 — vector colour-glyph
+    /// descriptions as SVG 1.1 documents. This is one of the four
+    /// colour-glyph mechanisms (`COLR`/`CPAL`, `CBDT`/`CBLC`, `sbix`,
+    /// `SVG `); a font may ship more than one.
+    pub fn has_svg(&self) -> bool {
+        self.svg.is_some()
+    }
+
+    /// Borrow the parsed `SVG ` table when present.
+    ///
+    /// The returned [`SvgTable`] carries the §5.5.1 document records,
+    /// each covering a contiguous glyph-ID range. Document payloads
+    /// borrow from the on-wire `SVG ` byte slice and are surfaced raw
+    /// (plain UTF-8 markup or gzip-encoded — test with
+    /// [`SvgDocument::is_gzip_encoded`]).
+    pub fn svg_table(&self) -> Option<&SvgTable<'a>> {
+        self.svg.as_ref()
+    }
+
+    /// Resolve the raw SVG document covering `glyph_id`, or `None` when
+    /// the font has no `SVG ` table or no document range covers the
+    /// glyph. The returned [`SvgDocument`] borrows the on-wire document
+    /// bytes (plain UTF-8 SVG 1.1 markup or a gzip-encoded stream per
+    /// §5.5.2); inflation + XML parsing are the consumer renderer's
+    /// responsibility, matching the raw-payload policy used for `sbix`
+    /// and `CBDT` image strikes.
+    pub fn svg_document(&self, glyph_id: u16) -> Option<&SvgDocument<'a>> {
+        self.svg.as_ref()?.document_for_glyph(glyph_id)
     }
 
     /// Glyph bounding box from the `glyf` header (xMin/yMin/xMax/yMax).

@@ -368,6 +368,32 @@ ligatures and kerning.
   quality (§5.6.4 leaves the actual scaling to the rasteriser). The
   reported `width` / `height` are the scaled dimensions the resampled
   grid should target.
+- `SVG ` table (ISO/IEC 14496-22:2019/Amd.1:2020 §5.5.1) — the fourth
+  colour-glyph mechanism, carrying per-glyph-range SVG 1.1 vector
+  documents (an alternative to `COLR`/`CPAL`, `CBDT`/`CBLC`, and `sbix`).
+  The 10-byte header (`version`, `offsetToSVGDocumentList`, `reserved`)
+  and the SVGDocumentList (`numEntries` + 12-byte `SVGDocumentRecord[]`,
+  each `startGlyphID` / `endGlyphID` / `Offset32 svgDocOffset` /
+  `uint32 svgDocLength`) decode with the §5.5.1 invariants enforced at
+  parse time: `version == 0`, the document-list offset non-zero and in
+  bounds, `numEntries` non-zero, `startGlyphID ≤ endGlyphID` per record,
+  the strictly-ascending-disjoint range ordering (`startGlyphID` greater
+  than the previous record's `endGlyphID`, so the ranges never overlap
+  or touch), non-zero `svgDocOffset` / `svgDocLength`, and each document
+  slice in bounds (`svgDocOffset` measured from the SVGDocumentList
+  start, not the table start). Document payloads are surfaced **raw** —
+  plain UTF-8 SVG 1.1 markup *or* gzip-encoded — with
+  `SvgDocument::is_gzip_encoded()` testing the §5.5.2 `0x1F 0x8B 0x08`
+  gzip magic; actual deflate inflation and XML parsing are left to the
+  consumer renderer, matching the raw-payload policy already used for
+  `sbix` PNG/JPEG/TIFF blobs and `CBDT` PNG strikes. Two records may
+  point at one document so a single SVG covers discontinuous glyph-ID
+  ranges (§5.5.1 NOTE); both ranges still resolve. `Font::has_svg()` /
+  `Font::svg_table()` gate and expose the table, and
+  `Font::svg_document(gid)` binary-searches the sorted range records to
+  resolve the document covering a glyph. The §5.5.2 SVG capability
+  restrictions (no `<text>` / `<script>` / `<a>` elements, no relative
+  `em` / `ex` units, …) are a renderer concern, not a table-decode one.
 - Adobe Glyph List (AGL) glyph-name → Unicode resolution
   (`glyph_name_to_codepoints` / `glyph_name_to_char`). Direct table
   lookup against the embedded AGL 2.0 data: a PostScript glyph name
@@ -707,11 +733,12 @@ let _ = chain_pos_lookups;
 // presentation selectors and registered IVS for CJK.
 let _ = font.lookup_variation('\u{1F600}', '\u{FE0F}'); // grinning face + VS-16
 
-// Colour glyphs — three families covered:
+// Colour glyphs — four families covered:
 //
 //   COLR/CPAL: vector layer stack (Microsoft Segoe UI Emoji, Twemoji-Mozilla, …)
 //   CBDT/CBLC: PNG-payload bitmap strikes (Noto Color Emoji and friends)
 //   sbix:      Apple-style PNG/JPEG bitmap strikes (Apple Color Emoji)
+//   SVG :      SVG 1.1 vector documents (per-glyph-range; Twitter Twemoji SVG, …)
 //
 if font.has_color_layers() {
     for layer in font.color_layers(gid_a) {
@@ -732,6 +759,21 @@ if font.has_sbix() {
     // explicit cycle detection; returns the first non-`'dupe'`
     // entry or `None` if the chain cycles / overflows / dangles.
     let _ = font.sbix_glyph_resolved(gid_a, 64);
+}
+
+// SVG — per-glyph-range SVG 1.1 vector colour-glyph documents. The
+// returned document bytes are raw: plain UTF-8 markup or gzip-encoded
+// (test with `is_gzip_encoded`). Inflation + XML parsing live in the
+// consumer renderer.
+if font.has_svg() {
+    if let Some(doc) = font.svg_document(gid_a) {
+        let _ = (doc.start_glyph_id, doc.end_glyph_id);
+        if doc.is_gzip_encoded() {
+            // RFC 1952/1951 deflate stream — inflate before parsing.
+        } else {
+            // doc.data is plain UTF-8 SVG 1.1 markup.
+        }
+    }
 }
 
 // TTC (TrueType Collection) — pick one subfont from a `.ttc` file.

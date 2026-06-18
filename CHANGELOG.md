@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `SVG ` table (ISO/IEC 14496-22:2019/Amd.1:2020 §5.5.1) — the fourth
+  colour-glyph mechanism, carrying per-glyph-range SVG 1.1 vector
+  documents. `SvgTable::parse` decodes the 10-byte header (`version`,
+  `offsetToSVGDocumentList`, `reserved`) and the SVGDocumentList
+  (`numEntries` + 12-byte `SVGDocumentRecord[]`), enforcing the §5.5.1
+  invariants: `version == 0`, non-zero document-list offset, non-zero
+  `numEntries`, `startGlyphID <= endGlyphID`, non-zero `svgDocOffset` /
+  `svgDocLength`, the strictly-ascending-disjoint range ordering
+  (`startGlyphID > previous endGlyphID`), and in-bounds document slices
+  (`svgDocOffset` measured from the SVGDocumentList start). Document
+  payloads are surfaced raw — plain UTF-8 markup or gzip-encoded, with
+  `SvgDocument::is_gzip_encoded()` testing the §5.5.2 `0x1F 0x8B 0x08`
+  magic — matching the raw-payload policy already used for `sbix` and
+  `CBDT` image strikes; gzip inflation + XML parsing stay in the
+  consumer renderer. `Font::has_svg()` / `Font::svg_table()` gate and
+  expose the table; `Font::svg_document(gid)` binary-searches the range
+  records to resolve the document covering a glyph. Shared documents
+  (two records pointing at one payload for discontinuous ranges, §5.5.1
+  NOTE) round-trip.
+
 - `gvar` composite-glyph variation (ISO/IEC 14496-22:2019 §7.3.4.3):
   `Font::glyph_outline` now applies variation deltas to composite
   glyphs (previously only simple glyphs were retargeted). For a
