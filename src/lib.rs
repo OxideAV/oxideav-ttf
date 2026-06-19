@@ -1999,6 +1999,30 @@ impl<'a> Font<'a> {
         }
     }
 
+    /// The `lookupFlag` of GSUB lookup `lookup_index` (`0` when there's
+    /// no GSUB or the index is out of range). The low-byte skip bits —
+    /// RIGHT_TO_LEFT `0x0001`, IGNORE_BASE_GLYPHS `0x0002`,
+    /// IGNORE_LIGATURES `0x0004`, IGNORE_MARKS `0x0008`,
+    /// USE_MARK_FILTERING_SET `0x0010` — control which glyphs a shaper
+    /// skips when matching the lookup's input; the high byte is the
+    /// `markAttachmentType` class. [`Self::shape`] honours these.
+    pub fn gsub_lookup_flags(&self, lookup_index: u16) -> u16 {
+        self.gsub
+            .as_ref()
+            .map(|g| g.lookup_flags(lookup_index))
+            .unwrap_or(0)
+    }
+
+    /// The `lookupFlag` of GPOS lookup `lookup_index` (`0` when there's
+    /// no GPOS or the index is out of range). Same bit layout as
+    /// [`Self::gsub_lookup_flags`].
+    pub fn gpos_lookup_flags(&self, lookup_index: u16) -> u16 {
+        self.gpos
+            .as_ref()
+            .map(|g| g.lookup_flags(lookup_index))
+            .unwrap_or(0)
+    }
+
     // ---- color bitmap glyphs (CBDT/CBLC) ---------------------------------
 
     /// `true` if this font ships a CBDT/CBLC pair — i.e. carries

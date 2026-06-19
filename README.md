@@ -335,7 +335,12 @@ kerning, and mark attachment.
   chained-context positioning, accumulating placement and advance
   deltas. Variation-instance-aware feature resolution is used so a
   variable font shaped after `set_variation_coords` honours its
-  FeatureVariations substitutions. Validated against DejaVu Sans (Latin
+  FeatureVariations substitutions. Lookup `lookupFlag` bits are honoured
+  via `Font::gsub_lookup_flags` / `gpos_lookup_flags`: a ligature lookup
+  with IGNORE_MARKS (`0x0008`) matches over the non-mark glyphs and keeps
+  interspersed combining marks (to re-anchor in GPOS), while a lookup
+  without the flag stays correctly blocked by an intervening mark.
+  Validated against DejaVu Sans (Latin
   `kern` advance reduction + `liga` ligation) and Noto Sans Arabic
   (`init`/`medi`/`fina` joining + `mark` mark-to-base attachment).
   General shaper — no script-specific glyph reordering (which the spec

@@ -185,13 +185,18 @@ impl<'a> Font<'a> {
                 .find(|(idx, _, _)| *idx == li)
                 .map(|(_, k, _)| *k)
                 .unwrap_or(0);
-            self.apply_gsub_lookup(buf, li, kind);
+            let flags = self.gsub.as_ref().map(|g| g.lookup_flags(li)).unwrap_or(0);
+            self.apply_gsub_lookup(buf, li, kind, flags);
         }
     }
 
     /// Apply one GSUB lookup of the given effective `kind` across the
-    /// whole buffer.
-    fn apply_gsub_lookup(&self, buf: &mut Vec<WorkGlyph>, li: u16, kind: u16) {
+    /// whole buffer. `flags` is the lookup's `lookupFlag`; the
+    /// IGNORE_MARKS / IGNORE_BASE_GLYPHS / IGNORE_LIGATURES skip bits are
+    /// honoured where they affect substitution (most consequentially
+    /// IGNORE_MARKS on ligature lookups, so a combining mark sitting
+    /// between two ligature components doesn't block the ligature).
+    fn apply_gsub_lookup(&self, buf: &mut Vec<WorkGlyph>, li: u16, kind: u16, flags: u16) {
         match kind {
             1 => {
                 // Single substitution: 1:1, no length change.
@@ -240,18 +245,40 @@ impl<'a> Font<'a> {
             4 => {
                 // Ligature substitution: N → 1, consuming a prefix from
                 // each position. The ligature inherits the cluster of its
-                // first component.
+                // first component. When IGNORE_MARKS is set we match the
+                // ligature over the *non-mark* glyphs and remove only the
+                // consumed non-mark components, leaving interspersed marks
+                // in place (they re-anchor to the ligature during GPOS).
+                let ignore_marks = (flags & 0x0008) != 0;
                 let mut i = 0usize;
                 while i < buf.len() {
-                    let tail: Vec<u16> = buf[i..].iter().map(|w| w.gid).collect();
-                    if let Some((lig, consumed)) = self.gsub_apply_lookup_type_4(li, &tail) {
+                    if ignore_marks && self.is_mark_glyph(buf[i].gid) {
+                        i += 1;
+                        continue;
+                    }
+                    // Build the candidate run from position i, recording
+                    // which absolute indices the non-skipped gids came from.
+                    let mut cand_gids: Vec<u16> = Vec::new();
+                    let mut cand_idx: Vec<usize> = Vec::new();
+                    for (off, w) in buf[i..].iter().enumerate() {
+                        if ignore_marks && self.is_mark_glyph(w.gid) {
+                            continue;
+                        }
+                        cand_gids.push(w.gid);
+                        cand_idx.push(i + off);
+                    }
+                    if let Some((lig, consumed)) = self.gsub_apply_lookup_type_4(li, &cand_gids) {
                         if consumed >= 1 {
                             let cluster = buf[i].cluster;
                             buf[i] = WorkGlyph { gid: lig, cluster };
-                            // Remove the remaining consumed components.
-                            for _ in 1..consumed {
-                                if i + 1 < buf.len() {
-                                    buf.remove(i + 1);
+                            // Remove the consumed components 1..consumed
+                            // (their absolute indices), highest first so
+                            // earlier removals don't shift later indices.
+                            let to_remove: Vec<usize> =
+                                cand_idx[1..consumed.min(cand_idx.len())].to_vec();
+                            for &idx in to_remove.iter().rev() {
+                                if idx < buf.len() {
+                                    buf.remove(idx);
                                 }
                             }
                             i += 1;

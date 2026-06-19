@@ -215,3 +215,57 @@ fn shape_is_panic_free_across_mixed_input() {
         }
     }
 }
+
+/// The GSUB/GPOS `lookupFlag` accessors the shaper relies on report the
+/// on-disk flag bits. DejaVu Sans ships ligature lookups both with and
+/// without IGNORE_MARKS, plus single-substitution lookups with the flag;
+/// we assert at least one of each kind is visible and that the bit
+/// decoding is consistent (an out-of-range index reports 0).
+#[test]
+fn lookup_flags_accessor_reports_ignore_marks_bit() {
+    let f = Font::from_bytes(DEJAVU).unwrap();
+    let mut any_ignore_marks = false;
+    let mut any_plain = false;
+    for (idx, kind, _) in f.gsub_lookup_list() {
+        let fl = f.gsub_lookup_flags(idx);
+        if kind == 4 {
+            if (fl & 0x0008) != 0 {
+                any_ignore_marks = true;
+            } else {
+                any_plain = true;
+            }
+        }
+    }
+    assert!(
+        any_ignore_marks,
+        "DejaVu must ship at least one IGNORE_MARKS ligature lookup"
+    );
+    assert!(
+        any_plain,
+        "DejaVu must ship at least one non-IGNORE_MARKS ligature lookup"
+    );
+    // Out-of-range / no-table indices report 0.
+    assert_eq!(f.gsub_lookup_flags(u16::MAX), 0);
+    assert_eq!(f.gpos_lookup_flags(u16::MAX), 0);
+}
+
+/// Spec-correct mark handling: the DejaVu `liga` "fi" ligature lookup
+/// does NOT set IGNORE_MARKS, so a combining mark between `f` and `i`
+/// legitimately blocks the ligature — the run stays three glyphs. (A
+/// lookup that DID set IGNORE_MARKS would ligate across the mark; the
+/// shaper honours whichever the lookup declares.)
+#[test]
+fn shape_mark_blocks_non_ignore_marks_ligature() {
+    let f = Font::from_bytes(DEJAVU).unwrap();
+    // Without a mark, fi ligates to a single glyph.
+    let ligated = f.shape("fi", *b"latn", None, &[*b"liga"]);
+    assert_eq!(ligated.len(), 1, "'fi' ligates to one glyph");
+    // With a combining acute between f and i, the (non-ignore-marks)
+    // liga lookup cannot match across the mark, so no ligature forms.
+    let blocked = f.shape("f\u{0301}i", *b"latn", None, &[*b"liga"]);
+    assert_eq!(
+        blocked.len(),
+        3,
+        "a mark between the components blocks a non-IGNORE_MARKS ligature"
+    );
+}

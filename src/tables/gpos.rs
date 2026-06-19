@@ -531,6 +531,21 @@ impl<'a> GposTable<'a> {
         })
     }
 
+    /// Return the `lookupFlag` of lookup `lookup_index`, or `0` when the
+    /// index is out of range. The Lookup table layout is
+    /// `{ u16 lookupType, u16 lookupFlag, … }`; the low-byte bits are the
+    /// shaper skip filters (RIGHT_TO_LEFT `0x0001`, IGNORE_BASE_GLYPHS
+    /// `0x0002`, IGNORE_LIGATURES `0x0004`, IGNORE_MARKS `0x0008`,
+    /// USE_MARK_FILTERING_SET `0x0010`) and the high byte is the
+    /// `markAttachmentType` class. The GSUB sibling is
+    /// [`super::gsub::GsubTable::lookup_flags`].
+    pub fn lookup_flags(&self, lookup_index: u16) -> u16 {
+        lookup_table_slice(self.bytes, self.lookup_list_off, lookup_index)
+            .filter(|l| l.len() >= 6)
+            .and_then(|l| read_u16(l, 2).ok())
+            .unwrap_or(0)
+    }
+
     /// Apply GPOS LookupType 1 (Single Adjustment Positioning) lookup
     /// `lookup_index` to `gid`.
     ///

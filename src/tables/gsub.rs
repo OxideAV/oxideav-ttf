@@ -170,6 +170,26 @@ impl<'a> GsubTable<'a> {
         })
     }
 
+    /// Return the `lookupFlag` of lookup `lookup_index`, or `0` when the
+    /// index is out of range / the table has no LookupList.
+    ///
+    /// The Lookup table layout (OFF §6.2.2) is
+    /// `{ u16 lookupType, u16 lookupFlag, u16 subTableCount, … }`, so the
+    /// flag sits at offset +2. The low-byte bits are the skip filters a
+    /// shaper honours when matching a lookup's input — RIGHT_TO_LEFT
+    /// (`0x0001`, cursive-only), IGNORE_BASE_GLYPHS (`0x0002`),
+    /// IGNORE_LIGATURES (`0x0004`), IGNORE_MARKS (`0x0008`),
+    /// USE_MARK_FILTERING_SET (`0x0010`) — and the high byte is the
+    /// `markAttachmentType` class. The flag is read from the *outer*
+    /// lookup (the LookupType-7 ExtensionSubst wrapper, when present,
+    /// carries the operative flag, not the wrapped inner lookup).
+    pub fn lookup_flags(&self, lookup_index: u16) -> u16 {
+        lookup_table_slice(self.bytes, self.lookup_list_off, lookup_index)
+            .filter(|l| l.len() >= 6)
+            .and_then(|l| read_u16(l, 2).ok())
+            .unwrap_or(0)
+    }
+
     /// Return all features active for `script_tag` under `lang_tag`.
     ///
     /// `lang_tag = None` → use the script's `DefaultLangSys`. If

@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Lookup-flag-aware shaping.** New `GsubTable::lookup_flags` /
+  `GposTable::lookup_flags` accessors (surfaced as
+  `Font::gsub_lookup_flags` / `gpos_lookup_flags`) read the Lookup
+  table's `lookupFlag` (offset +2): the low-byte skip filters
+  (RIGHT_TO_LEFT `0x0001`, IGNORE_BASE_GLYPHS `0x0002`, IGNORE_LIGATURES
+  `0x0004`, IGNORE_MARKS `0x0008`, USE_MARK_FILTERING_SET `0x0010`) and
+  the high-byte `markAttachmentType` class. `Font::shape` now honours
+  IGNORE_MARKS on ligature lookups: a ligature whose lookup sets the flag
+  matches over the *non-mark* glyphs and removes only the consumed
+  non-mark components, leaving interspersed combining marks in place to
+  re-anchor during GPOS — while a lookup that does NOT set the flag stays
+  spec-correctly blocked by an intervening mark. Two integration tests
+  (`tests/shape.rs`) validate the accessor against DejaVu Sans (which
+  ships ligature lookups both with and without IGNORE_MARKS) and the
+  mark-blocks-non-ignore-marks-ligature invariant.
 - **`Font::shape(text, script, lang, features)` — OpenType GSUB/GPOS
   shaping pipeline.** New `shape` module wiring the per-lookup-type GSUB
   substitution and GPOS positioning primitives into a single end-to-end
