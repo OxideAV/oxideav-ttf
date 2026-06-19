@@ -1,9 +1,10 @@
 # oxideav-ttf
 
 Pure-Rust TrueType font parser for the [oxideav](https://github.com/OxideAV)
-framework. Implements the sfnt container, the core OpenType tables, and
-just enough of GSUB / GPOS to do Latin/Cyrillic/Greek/CJK shaping with
-ligatures and kerning.
+framework. Implements the sfnt container, the core OpenType tables, and a
+coherent GSUB / GPOS shaping engine (`Font::shape`) doing
+Latin/Cyrillic/Greek/CJK/Arabic shaping with positional forms, ligatures,
+kerning, and mark attachment.
 
 ## Supported tables
 
@@ -316,6 +317,30 @@ ligatures and kerning.
   ItemVariationStore feeding CaretValueFormat3 VariationIndex
   references through the same IVS decoder shared with MVAR / HVAR /
   VVAR.
+- **`Font::shape(text, script, lang, features)` — end-to-end OpenType
+  shaping.** The integration capstone over the GSUB / GPOS / GDEF
+  primitives above: it maps text to nominal glyphs through `cmap`, runs
+  the requested features' GSUB lookups, then their GPOS lookups,
+  returning a `Vec<ShapedGlyph>` carrying `glyph_id`, originating
+  `cluster` (input byte index, preserved across ligation and
+  multiple-substitution expansion), and `(x_offset, y_offset,
+  x_advance, y_advance)` in font design units (TT Y-up). Per the
+  common-table-format rules the *union* of lookups behind the active
+  features is applied **in LookupList order** (not feature order), so
+  lookups from different features interleave correctly. The GSUB stage
+  drives single / multiple / alternate / ligature / contextual /
+  chained-context / reverse-chained substitution; the GPOS stage seeds
+  advances from `hmtx` then layers single / pair-kern / cursive /
+  mark-to-base / mark-to-ligature / mark-to-mark / contextual /
+  chained-context positioning, accumulating placement and advance
+  deltas. Variation-instance-aware feature resolution is used so a
+  variable font shaped after `set_variation_coords` honours its
+  FeatureVariations substitutions. Validated against DejaVu Sans (Latin
+  `kern` advance reduction + `liga` ligation) and Noto Sans Arabic
+  (`init`/`medi`/`fina` joining + `mark` mark-to-base attachment).
+  General shaper — no script-specific glyph reordering (which the spec
+  places in the text-processing client); driven directly by the
+  requested feature set.
 - sbix `'dupe'` indirection chasing (`sbix_glyph_resolved`): walks
   the per-strike indirection chain up to `SBIX_MAX_DUPE_DEPTH` (= 8)
   hops with explicit cycle detection (two-glyph, self-loop, and

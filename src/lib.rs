@@ -52,10 +52,12 @@ pub mod agl;
 pub mod collection;
 pub mod outline;
 pub mod parser;
+pub mod shape;
 pub mod tables;
 
 pub use agl::{glyph_name_to_char, glyph_name_to_codepoints};
 pub use collection::{is_collection, CollectionHeader, TTC_MAGIC};
+pub use shape::ShapedGlyph;
 
 use crate::parser::TableDirectory;
 use crate::tables::{

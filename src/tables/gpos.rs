@@ -1003,6 +1003,113 @@ impl<'a> GposTable<'a> {
         }
         0
     }
+
+    /// Walk the sub-tables of one specific lookup (`lookup_index`),
+    /// unwrapping ExtensionPos (LookupType 9) wrappers, and call `f` with
+    /// every sub-table whose effective type equals `want_kind`. The first
+    /// `Some(_)` returned by `f` is returned; `None` if no sub-table
+    /// matched. This is the per-lookup-index counterpart of the
+    /// whole-LookupList scans (`lookup_kerning`, `lookup_mark_to_base`,
+    /// `lookup_mark_to_mark`) and is what the shaping pipeline uses to
+    /// apply a single resolved lookup in LookupList order.
+    fn walk_lookup_subtables<T>(
+        &self,
+        lookup_index: u16,
+        want_kind: u16,
+        mut f: impl FnMut(&[u8]) -> Option<T>,
+    ) -> Option<T> {
+        let lookup = lookup_table_slice(self.bytes, self.lookup_list_off, lookup_index)?;
+        if lookup.len() < 6 {
+            return None;
+        }
+        let kind = read_u16(lookup, 0).ok()?;
+        let sub_count = read_u16(lookup, 4).ok()? as usize;
+        for s in 0..sub_count {
+            let sub_off = read_u16(lookup, 6 + s * 2).ok()? as usize;
+            let sub = lookup.get(sub_off..)?;
+            let (effective_kind, effective_sub) = if kind == LOOKUP_EXTENSION_POS {
+                if sub.len() < 8 {
+                    continue;
+                }
+                let ext_type = read_u16(sub, 2).ok()?;
+                let ext_off = read_u32(sub, 4).ok()? as usize;
+                let ext = match sub.get(ext_off..) {
+                    Some(s) => s,
+                    None => continue,
+                };
+                (ext_type, ext)
+            } else {
+                (kind, sub)
+            };
+            if effective_kind != want_kind {
+                continue;
+            }
+            if let Some(v) = f(effective_sub) {
+                return Some(v);
+            }
+        }
+        None
+    }
+
+    /// Per-lookup-index pair (kerning) adjustment: like
+    /// [`Self::lookup_kerning`] but scoped to one resolved LookupType-2
+    /// lookup rather than scanning every lookup. Honours the lookup's
+    /// IGNORE_MARKS flag against `gdef`. Returns the `xAdvance` applied to
+    /// `left`, or `0` when no pair rule fires.
+    pub fn lookup_kerning_at(
+        &self,
+        lookup_index: u16,
+        left: u16,
+        right: u16,
+        gdef: Option<&GdefTable<'_>>,
+    ) -> i16 {
+        let lookup = match lookup_table_slice(self.bytes, self.lookup_list_off, lookup_index) {
+            Some(l) if l.len() >= 6 => l,
+            _ => return 0,
+        };
+        let flag = read_u16(lookup, 2).unwrap_or(0);
+        if (flag & 0x0008) != 0 {
+            if let Some(g) = gdef {
+                if g.is_mark(left) || g.is_mark(right) {
+                    return 0;
+                }
+            }
+        }
+        self.walk_lookup_subtables(lookup_index, LOOKUP_PAIR_POS, |sub| {
+            pair_pos_lookup(sub, left, right)
+        })
+        .unwrap_or(0)
+    }
+
+    /// Per-lookup-index mark-to-base attachment: like
+    /// [`Self::lookup_mark_to_base`] but scoped to one resolved
+    /// LookupType-4 lookup. Returns `(dx, dy)` in font units (TT Y-up) to
+    /// add to the mark's pen origin, or `None` on no match.
+    pub fn apply_mark_to_base_at(
+        &self,
+        lookup_index: u16,
+        base: u16,
+        mark: u16,
+    ) -> Option<(i16, i16)> {
+        self.walk_lookup_subtables(lookup_index, LOOKUP_MARK_BASE_POS, |sub| {
+            mark_base_pos_lookup(sub, base, mark)
+        })
+    }
+
+    /// Per-lookup-index mark-to-mark attachment: like
+    /// [`Self::lookup_mark_to_mark`] but scoped to one resolved
+    /// LookupType-6 lookup. `mark1` is the previously-positioned mark,
+    /// `mark2` the new mark stacking onto it.
+    pub fn apply_mark_to_mark_at(
+        &self,
+        lookup_index: u16,
+        mark1: u16,
+        mark2: u16,
+    ) -> Option<(i16, i16)> {
+        self.walk_lookup_subtables(lookup_index, LOOKUP_MARK_MARK_POS, |sub| {
+            mark_mark_pos_lookup(sub, mark1, mark2)
+        })
+    }
 }
 
 /// Walk a PairPos subtable (format 1 or 2) looking for `(left, right)`.

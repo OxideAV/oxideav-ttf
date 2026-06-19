@@ -9,6 +9,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`Font::shape(text, script, lang, features)` — OpenType GSUB/GPOS
+  shaping pipeline.** New `shape` module wiring the per-lookup-type GSUB
+  substitution and GPOS positioning primitives into a single end-to-end
+  entry point: text → `cmap` nominal glyphs → GSUB substitution stage →
+  GPOS positioning stage → `Vec<ShapedGlyph>`. Each `ShapedGlyph`
+  carries `glyph_id`, originating `cluster` (input byte index, preserved
+  across ligature collapse and multiple-substitution expansion), and
+  `(x_offset, y_offset, x_advance, y_advance)` in font design units (TT
+  Y-up). Per the ISO/IEC 14496-22:2019 §6 common-table-format rules the
+  union of lookups referenced by the active requested features is
+  applied **in LookupList order** (not feature order), interleaving
+  lookups from different features as the spec requires. The GSUB stage
+  dispatches single / multiple / alternate / ligature / contextual /
+  chained-context / reverse-chained-context substitution across the
+  whole glyph buffer; the GPOS stage seeds advances from `hmtx` then
+  layers single / pair (kerning) / cursive / mark-to-base /
+  mark-to-ligature / mark-to-mark / contextual / chained-context
+  positioning, accumulating placement and advance deltas. Uses the
+  variation-instance-aware feature resolution
+  (`gsub_features_for_script_at_instance` /
+  `gpos_features_for_script_at_instance`) so variable-font
+  FeatureVariations substitutions are honoured at the current instance.
+  Three new per-lookup-index GPOS helpers
+  (`GposTable::lookup_kerning_at`, `apply_mark_to_base_at`,
+  `apply_mark_to_mark_at`) scope a pair / mark-to-base / mark-to-mark
+  lookup to one resolved LookupList index (the whole-LookupList scans
+  remain for non-shaper callers). Validated against DejaVu Sans (Latin
+  kerning advance reduction + `liga` ligation, cluster monotonicity) and
+  Noto Sans Arabic (`init`/`medi`/`fina` joining-form substitution +
+  `mark` mark-to-base attachment with non-zero anchor offsets); 10 new
+  integration tests in `tests/shape.rs`.
 - `SVG ` table (ISO/IEC 14496-22:2019/Amd.1:2020 §5.5.1) — the fourth
   colour-glyph mechanism, carrying per-glyph-range SVG 1.1 vector
   documents. `SvgTable::parse` decodes the 10-byte header (`version`,
