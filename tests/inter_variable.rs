@@ -373,3 +373,85 @@ fn iup_moves_majority_on_light_side() {
          {moved}/{total}"
     );
 }
+
+// ----- Ergonomic instance API ---------------------------------------
+
+#[test]
+fn set_axis_value_by_tag_updates_only_that_axis() {
+    let mut font = Font::from_bytes(FONT).unwrap();
+    let before: Vec<f32> = font.variation_coords().to_vec();
+    // Set wght by tag and confirm it took (and is clamped to range).
+    assert!(font.set_axis_value(b"wght", 700.0));
+    assert_eq!(font.axis_value(b"wght"), Some(700.0));
+    // Other axes (if any) are unchanged.
+    let wi = font.axis_index(b"wght").unwrap();
+    for (i, &v) in before.iter().enumerate() {
+        if i != wi {
+            assert_eq!(font.variation_coords()[i], v, "axis {i} must be untouched");
+        }
+    }
+    // Out-of-range clamps to the axis max rather than overshooting.
+    let max = font.variation_axes()[wi].max;
+    assert!(font.set_axis_value(b"wght", 100000.0));
+    assert_eq!(font.axis_value(b"wght"), Some(max));
+    // Unknown tag is a no-op returning false.
+    assert!(!font.set_axis_value(b"zzzz", 1.0));
+    assert_eq!(font.axis_value(b"zzzz"), None);
+}
+
+#[test]
+fn set_axis_value_by_tag_drives_outline() {
+    // Driving wght by tag must produce the same outline as driving it by
+    // index through set_variation_coords.
+    let gid;
+    let by_tag = {
+        let mut font = Font::from_bytes(FONT).unwrap();
+        gid = font.glyph_index('A').unwrap();
+        assert!(font.set_axis_value(b"wght", 900.0));
+        font.glyph_outline(gid).unwrap()
+    };
+    let by_index = outline_at_wght('A', 900.0);
+    assert_eq!(by_tag.contours.len(), by_index.contours.len());
+    for (a, b) in by_tag.contours.iter().zip(by_index.contours.iter()) {
+        assert_eq!(a.points.len(), b.points.len());
+        for (pa, pb) in a.points.iter().zip(b.points.iter()) {
+            assert_eq!((pa.x, pa.y), (pb.x, pb.y));
+        }
+    }
+}
+
+#[test]
+fn apply_named_instance_sets_coords() {
+    let mut font = Font::from_bytes(FONT).unwrap();
+    let n = font.named_instances().len();
+    assert!(n > 0, "Inter ships named instances");
+    // Apply the last named instance and confirm the coords now equal its
+    // stored (clamped) coordinate vector.
+    let last = n - 1;
+    let expected: Vec<f32> = {
+        let inst = &font.named_instances()[last];
+        let axes = font.variation_axes();
+        inst.coords
+            .iter()
+            .enumerate()
+            .map(|(i, &v)| v.clamp(axes[i].min, axes[i].max))
+            .collect()
+    };
+    assert!(font.apply_named_instance(last));
+    assert_eq!(font.variation_coords(), expected.as_slice());
+    // Out-of-range index is a no-op returning false.
+    let snapshot: Vec<f32> = font.variation_coords().to_vec();
+    assert!(!font.apply_named_instance(n + 100));
+    assert_eq!(font.variation_coords(), snapshot.as_slice());
+}
+
+#[test]
+fn axis_helpers_are_noops_on_static_font() {
+    // DejaVuSans is static — every variable helper must report absence.
+    const STATIC: &[u8] = include_bytes!("fixtures/DejaVuSans.ttf");
+    let mut font = Font::from_bytes(STATIC).unwrap();
+    assert_eq!(font.axis_index(b"wght"), None);
+    assert_eq!(font.axis_value(b"wght"), None);
+    assert!(!font.set_axis_value(b"wght", 700.0));
+    assert!(!font.apply_named_instance(0));
+}

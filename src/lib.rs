@@ -2403,6 +2403,68 @@ impl<'a> Font<'a> {
         }
     }
 
+    /// Index of the axis carrying the four-byte `tag` (e.g. `*b"wght"`),
+    /// or `None` when the font has no such axis (or is static).
+    pub fn axis_index(&self, tag: &[u8; 4]) -> Option<usize> {
+        self.variation_axes().iter().position(|a| &a.tag == tag)
+    }
+
+    /// Current user-space value of the axis with the four-byte `tag`,
+    /// or `None` when the font has no such axis.
+    pub fn axis_value(&self, tag: &[u8; 4]) -> Option<f32> {
+        let i = self.axis_index(tag)?;
+        self.var_coords.get(i).copied()
+    }
+
+    /// Set a single variation axis (identified by its four-byte `tag`,
+    /// e.g. `*b"wght"` / `*b"wdth"` / `*b"slnt"` / `*b"opsz"` / `*b"ital"`)
+    /// to a user-space `value`, leaving every other axis at its current
+    /// value. The value is clamped to the axis's `[min, max]` range, like
+    /// [`Self::set_variation_coords`].
+    ///
+    /// Returns `true` when the axis was found and updated, `false` for a
+    /// static font or an unknown tag (in which case nothing changes).
+    pub fn set_axis_value(&mut self, tag: &[u8; 4], value: f32) -> bool {
+        let axes = match self.fvar.as_ref() {
+            Some(f) => f.axes(),
+            None => return false,
+        };
+        let i = match axes.iter().position(|a| &a.tag == tag) {
+            Some(i) => i,
+            None => return false,
+        };
+        if i >= self.var_coords.len() {
+            return false;
+        }
+        let a = &axes[i];
+        self.var_coords[i] = value.clamp(a.min, a.max);
+        true
+    }
+
+    /// Set the variation coordinates to the named instance at `index`
+    /// (its position in [`Self::named_instances`]). After this call the
+    /// font renders/shapes as that designer-chosen design variant (e.g.
+    /// "Bold", "Condensed Light").
+    ///
+    /// Each named-instance coordinate is clamped to its axis range, like
+    /// [`Self::set_variation_coords`]. Instances whose stored coordinate
+    /// vector is shorter than the axis count leave the trailing axes at
+    /// their current value; longer vectors are truncated.
+    ///
+    /// Returns `true` when the instance existed and was applied, `false`
+    /// for a static font or an out-of-range `index`.
+    pub fn apply_named_instance(&mut self, index: usize) -> bool {
+        let coords = match self.fvar.as_ref() {
+            Some(f) => match f.instances().get(index) {
+                Some(inst) => inst.coords.clone(),
+                None => return false,
+            },
+            None => return false,
+        };
+        self.set_variation_coords(&coords);
+        true
+    }
+
     /// Compute the normalised coordinate vector (each entry in
     /// `[-1, +1]`) by mapping each user-space value through the
     /// `fvar` axis triple, then through the `avar` per-axis remap.

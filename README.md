@@ -843,13 +843,16 @@ if vfont.is_variable() {
     for inst in vfont.named_instances() {
         // inst.subfamily_name_id + inst.coords
     }
-    let mut coords = vfont.variation_coords().to_vec();
-    if let Some(i) = vfont.variation_axes().iter().position(|a| &a.tag == b"wght") {
-        coords[i] = 700.0;
-    }
+    // Set one axis by its tag (clamped to range), or snap to a named
+    // instance — no manual index bookkeeping needed.
+    vfont.set_axis_value(b"wght", 700.0);
+    let _ = vfont.axis_value(b"wght"); // -> Some(700.0)
+    vfont.apply_named_instance(0); // e.g. the first designer variant
+    // (or set the whole vector at once:)
+    let coords = vfont.variation_coords().to_vec();
     vfont.set_variation_coords(&coords);
     let bold = vfont.glyph_outline(vfont.glyph_index('A').unwrap())?;
-    let _ = bold;
+    let _ = bold; // gvar-deltad + IUP-completed outline at this instance
 }
 ```
 

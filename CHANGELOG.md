@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Ergonomic variation-instance API.** Selecting a design variant no
+  longer requires the caller to find an axis index by hand. New
+  `Font::axis_index(tag)` / `Font::axis_value(tag)` look an axis up by
+  its four-byte tag (`*b"wght"`, `*b"wdth"`, …); `Font::set_axis_value(
+  tag, value)` sets one axis (clamped to its range) leaving the others
+  untouched, returning `false` for a static font or unknown tag; and
+  `Font::apply_named_instance(index)` snaps the coordinates to a `fvar`
+  named instance ("Bold", "Condensed Light", …). Four InterVariable.ttf
+  integration tests (single-axis update + clamp + unknown-tag no-op,
+  by-tag outline equals by-index outline, named-instance application +
+  out-of-range no-op, static-font no-ops on DejaVu Sans).
 - **`gvar` inferred-delta (IUP) interpolation for simple glyphs**
   (ISO/IEC 14496-22:2019 §7.3.4.4 "Inferred deltas for un-referenced
   point numbers"). Real variable fonts encode each `gvar` tuple with a
