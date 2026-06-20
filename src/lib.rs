@@ -826,6 +826,33 @@ impl<'a> Font<'a> {
         }
     }
 
+    /// Reverse lookup: the glyph id named `name` by the `post` table,
+    /// inverting [`Font::glyph_name`].
+    ///
+    /// Resolves over every named glyph the table publishes — v2.0
+    /// custom Pascal strings and standard-Macintosh names alike (from
+    /// v1.0, v2.0 with `glyphNameIndex < 258`, or v2.5). The comparison
+    /// is exact byte equality (PostScript glyph names are ASCII).
+    ///
+    /// Returns the **lowest** glyph id carrying that name, or `None`
+    /// when the font has no `post` table, the table is v3.0, or no glyph
+    /// is named `name`.
+    pub fn gid_for_glyph_name(&self, name: &str) -> Option<u16> {
+        self.post.as_ref()?.gid_for_name(name)
+    }
+
+    /// Iterate every `(glyph_id, post-table name)` pair the font
+    /// publishes, in ascending glyph-id order.
+    ///
+    /// Standard-Macintosh references are resolved to their canonical
+    /// names; v2.0 custom strings are returned directly. Glyph ids the
+    /// `post` table names with an unsatisfiable reference are skipped.
+    /// The iterator is empty when the font has no `post` table or the
+    /// table is v3.0 (no names at all).
+    pub fn iter_glyph_names(&self) -> impl Iterator<Item = (u16, &str)> + '_ {
+        self.post.iter().flat_map(|p| p.iter_glyph_names())
+    }
+
     // ---- glyph lookup ------------------------------------------------------
 
     /// Map a Unicode codepoint to its glyph id.

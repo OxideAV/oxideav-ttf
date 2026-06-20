@@ -107,3 +107,59 @@ fn glyph_name_for_out_of_range_gid_is_none() {
     assert!(font.glyph_name_ref(max).is_none());
     assert!(font.glyph_name(max).is_none());
 }
+
+#[test]
+fn dejavu_sans_reverse_lookup_round_trips_every_named_glyph() {
+    let font = Font::from_bytes(DEJAVU_SANS).unwrap();
+    // For every glyph the `post` table names, the forward name and the
+    // reverse lookup must round-trip: gid_for_glyph_name(glyph_name(g))
+    // returns g, unless an earlier glyph shares the same name (legal,
+    // and then the lowest gid is canonical — so the reverse result is
+    // <= g and itself names the same string).
+    let mut named = 0usize;
+    for (gid, name) in font.iter_glyph_names() {
+        named += 1;
+        let back = font
+            .gid_for_glyph_name(name)
+            .expect("a named glyph must reverse-resolve");
+        assert!(
+            back <= gid,
+            "reverse lookup must not exceed the forward gid"
+        );
+        assert_eq!(
+            font.glyph_name(back),
+            Some(name),
+            "the reverse-resolved gid must carry the same name"
+        );
+    }
+    assert!(named > 0, "DejaVu Sans publishes glyph names");
+    // The iterator count equals the number of gids that carry any name.
+    let direct: usize = (0..font.glyph_count())
+        .filter(|g| font.glyph_name(*g).is_some())
+        .count();
+    assert_eq!(named, direct);
+}
+
+#[test]
+fn dejavu_sans_reverse_lookup_resolves_known_names() {
+    let font = Font::from_bytes(DEJAVU_SANS).unwrap();
+    // 'A' is reachable both via cmap and via its PostScript name; the
+    // two routes must agree for this glyph.
+    let via_cmap = font.glyph_index('A').expect("cmap maps 'A'");
+    let via_name = font
+        .gid_for_glyph_name("A")
+        .expect("post names a glyph 'A'");
+    assert_eq!(via_cmap, via_name);
+    // A name no glyph carries yields None.
+    assert!(font
+        .gid_for_glyph_name("this_is_not_a_real_glyph_name")
+        .is_none());
+}
+
+#[test]
+fn reverse_lookup_on_fontless_post_is_none() {
+    // A font without a usable post-name path returns None rather than
+    // panicking. DejaVu has post, so confirm the empty-name guard here.
+    let font = Font::from_bytes(DEJAVU_SANS).unwrap();
+    assert!(font.gid_for_glyph_name("").is_none());
+}

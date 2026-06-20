@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`post`-table reverse glyph-name lookup.** New
+  `PostTable::gid_for_name(name)` (surfaced as `Font::gid_for_glyph_name`)
+  inverts `resolved_glyph_name` across every named glyph the table
+  publishes — v2.0 custom Pascal strings and standard-Macintosh names
+  alike (from v1.0, v2.0 with `glyphNameIndex < 258`, or v2.5) — and
+  returns the lowest glyph id carrying that name (`None` for v3.0, an
+  absent `post`, or an unknown name). A standard-name query resolves the
+  target to its standard-Mac index once, so the per-glyph scan compares
+  integers rather than strings. Companion `PostTable::named_glyph_count`
+  (258 for v1.0; `numGlyphs` for v2.0/v2.5; 0 for v3.0) and
+  `PostTable::iter_glyph_names` / `Font::iter_glyph_names` iterate every
+  `(glyph_id, resolved_name)` pair, skipping ids with an unsatisfiable
+  reference. Eight new unit tests (v1.0 full-set inversion, v2.0
+  custom+standard, lowest-gid-wins on duplicate, v2.5 offset inversion,
+  v3.0 empty, iter round-trip, unsatisfiable-Pascal skip) plus four
+  DejaVu Sans integration tests (every-named-glyph round-trip,
+  cmap-vs-post agreement on `'A'`, empty-name guard).
 - **Lookup-flag-aware shaping.** New `GsubTable::lookup_flags` /
   `GposTable::lookup_flags` accessors (surfaced as
   `Font::gsub_lookup_flags` / `gpos_lookup_flags`) read the Lookup

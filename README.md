@@ -47,7 +47,11 @@ kerning, and mark attachment.
   `docs/text/opentype/post-standard-mac-glyph-names.md`, transcribed
   verbatim into `STANDARD_MAC_GLYPH_NAMES: [&str; 258]` and exposed
   alongside the `standard_mac_glyph_name(index)` helper and
-  `PostTable::resolved_glyph_name(gid)`)),
+  `PostTable::resolved_glyph_name(gid)`. Reverse mapping closes the
+  loop: `Font::gid_for_glyph_name(name)` (over `PostTable::gid_for_name`)
+  inverts the resolved name across all versions — custom and
+  standard-Mac alike — returning the lowest glyph id carrying that
+  name, and `Font::iter_glyph_names()` walks every `(gid, name)` pair),
   `VORG` (vertical origin table, ISO/IEC 14496-22:2019 §5.4.4 — header
   fields `defaultVertOriginY` + the optional sorted
   `vertOriginYMetrics` array of per-glyph overrides, with the §5.4.4

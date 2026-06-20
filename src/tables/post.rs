@@ -629,6 +629,79 @@ impl PostTable {
             GlyphNameRef::StandardMac { index } => standard_mac_glyph_name(index),
         }
     }
+
+    /// The number of glyphs whose names this table spans, when the count
+    /// is encoded inside `post` itself.
+    ///
+    /// - v2.0 / v2.5 carry an explicit `numGlyphs`, returned here.
+    /// - v1.0 does **not** encode a count: it asserts the font is the
+    ///   258-glyph standard Macintosh layout, so [`STANDARD_MAC_GLYPH_COUNT`]
+    ///   (258) is returned as the implied span.
+    /// - v3.0 publishes no names, so `0` is returned.
+    pub fn named_glyph_count(&self) -> u16 {
+        match &self.format {
+            PostFormat::Version10 => STANDARD_MAC_GLYPH_COUNT,
+            PostFormat::Version20(v) => v.num_glyphs,
+            PostFormat::Version25(v) => v.num_glyphs,
+            PostFormat::Version30 => 0,
+        }
+    }
+
+    /// Reverse lookup: the **first** glyph id whose resolved PostScript
+    /// name equals `name`, scanning glyph ids in ascending order.
+    ///
+    /// This inverts [`PostTable::resolved_glyph_name`] over every named
+    /// glyph the table publishes: a v2.0 custom Pascal string, a
+    /// standard-Macintosh name (from v1.0, v2.0 `glyphNameIndex < 258`,
+    /// or v2.5), are all matched. `name` is compared by exact byte
+    /// equality (PostScript glyph names are ASCII per §5.2.10.2).
+    ///
+    /// The search bound is [`PostTable::named_glyph_count`]: for v1.0
+    /// the whole 258-name standard set is searched; for v2.0 / v2.5 the
+    /// table's own `numGlyphs`. v3.0 always returns `None`.
+    ///
+    /// Returns the lowest matching glyph id, or `None` when no glyph in
+    /// range carries that name. When several glyphs share a name (legal
+    /// but unusual), the lowest id wins — matching the convention that a
+    /// font's first occurrence of a name is its canonical owner.
+    pub fn gid_for_name(&self, name: &str) -> Option<u16> {
+        if matches!(self.format, PostFormat::Version30) {
+            return None;
+        }
+        let count = self.named_glyph_count();
+        // A fast path for v2.0 standard-name queries: resolve the target
+        // name to a standard-Mac index once, then the per-glyph compare
+        // is an integer match rather than a string compare. Custom names
+        // still fall through to the string path below.
+        let std_target = STANDARD_MAC_GLYPH_NAMES
+            .iter()
+            .position(|n| *n == name)
+            .map(|i| i as u16);
+        for gid in 0..count {
+            match self.glyph_name_ref(gid) {
+                Some(GlyphNameRef::StandardMac { index }) if Some(index) == std_target => {
+                    return Some(gid);
+                }
+                Some(GlyphNameRef::Custom(s)) if s == name => {
+                    return Some(gid);
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// Iterate every `(glyph_id, resolved_name)` pair the table
+    /// publishes, in ascending glyph-id order.
+    ///
+    /// Glyph ids whose entry resolves to no name (e.g. a v2.0
+    /// `glyphNameIndex` pointing past the Pascal pool, or a v2.5 offset
+    /// landing outside the standard set) are skipped. v3.0 yields an
+    /// empty iterator. The bound is [`PostTable::named_glyph_count`].
+    pub fn iter_glyph_names(&self) -> impl Iterator<Item = (u16, &str)> + '_ {
+        let count = self.named_glyph_count();
+        (0..count).filter_map(move |gid| self.resolved_glyph_name(gid).map(|n| (gid, n)))
+    }
 }
 
 fn parse_v20(tail: &[u8]) -> Result<PostV20, Error> {
@@ -1024,6 +1097,134 @@ mod tests {
         bytes.extend_from_slice(&tail);
         let p = PostTable::parse(&bytes).unwrap();
         assert!(p.glyph_name_ref(0).is_none());
+    }
+
+    #[test]
+    fn v10_reverse_lookup_spans_full_standard_set() {
+        let b = header(POST_VERSION_10);
+        let p = PostTable::parse(&b).unwrap();
+        assert_eq!(p.named_glyph_count(), 258);
+        // Every standard name resolves back to its index for v1.0.
+        assert_eq!(p.gid_for_name(".notdef"), Some(0));
+        assert_eq!(p.gid_for_name("A"), Some(36));
+        assert_eq!(p.gid_for_name("tilde"), Some(217));
+        assert_eq!(p.gid_for_name("dcroat"), Some(257));
+        // A name not in the standard set has no glyph.
+        assert_eq!(p.gid_for_name("Alpha"), None);
+        assert_eq!(p.gid_for_name(""), None);
+    }
+
+    #[test]
+    fn v20_reverse_lookup_covers_custom_and_standard() {
+        let num_glyphs: u16 = 4;
+        let mut tail = Vec::new();
+        tail.extend_from_slice(&num_glyphs.to_be_bytes());
+        // gid 0 -> standard 0 (.notdef), gid 1 -> standard 36 (A),
+        // gid 2 -> custom "Alpha", gid 3 -> custom "Beta".
+        for idx in [0u16, 36, 258, 259] {
+            tail.extend_from_slice(&idx.to_be_bytes());
+        }
+        for name in ["Alpha", "Beta"] {
+            tail.push(name.len() as u8);
+            tail.extend_from_slice(name.as_bytes());
+        }
+        let mut bytes = header(POST_VERSION_20);
+        bytes.extend_from_slice(&tail);
+        let p = PostTable::parse(&bytes).unwrap();
+        assert_eq!(p.named_glyph_count(), 4);
+        assert_eq!(p.gid_for_name(".notdef"), Some(0));
+        assert_eq!(p.gid_for_name("A"), Some(1));
+        assert_eq!(p.gid_for_name("Alpha"), Some(2));
+        assert_eq!(p.gid_for_name("Beta"), Some(3));
+        assert_eq!(p.gid_for_name("missing"), None);
+    }
+
+    #[test]
+    fn reverse_lookup_returns_lowest_gid_on_duplicate() {
+        // Two glyphs both named "A" (standard index 36).
+        let num_glyphs: u16 = 3;
+        let mut tail = Vec::new();
+        tail.extend_from_slice(&num_glyphs.to_be_bytes());
+        for idx in [0u16, 36, 36] {
+            tail.extend_from_slice(&idx.to_be_bytes());
+        }
+        let mut bytes = header(POST_VERSION_20);
+        bytes.extend_from_slice(&tail);
+        let p = PostTable::parse(&bytes).unwrap();
+        // Lowest matching gid (1) wins over gid 2.
+        assert_eq!(p.gid_for_name("A"), Some(1));
+    }
+
+    #[test]
+    fn v25_reverse_lookup_inverts_offset() {
+        // §5.2.10.3 worked example: gids 0,1,2 -> standard 36,37,38.
+        let num_glyphs: u16 = 3;
+        let mut tail = Vec::new();
+        tail.extend_from_slice(&num_glyphs.to_be_bytes());
+        for _ in 0..3 {
+            tail.push(36i8 as u8);
+        }
+        let mut bytes = header(POST_VERSION_25);
+        bytes.extend_from_slice(&tail);
+        let p = PostTable::parse(&bytes).unwrap();
+        assert_eq!(p.named_glyph_count(), 3);
+        assert_eq!(p.gid_for_name("A"), Some(0));
+        assert_eq!(p.gid_for_name("B"), Some(1));
+        assert_eq!(p.gid_for_name("C"), Some(2));
+        // "D" is standard index 39 but no glyph maps to it here.
+        assert_eq!(p.gid_for_name("D"), None);
+    }
+
+    #[test]
+    fn v30_reverse_lookup_and_iter_are_empty() {
+        let b = header(POST_VERSION_30);
+        let p = PostTable::parse(&b).unwrap();
+        assert_eq!(p.named_glyph_count(), 0);
+        assert_eq!(p.gid_for_name(".notdef"), None);
+        assert_eq!(p.iter_glyph_names().count(), 0);
+    }
+
+    #[test]
+    fn iter_glyph_names_round_trips_through_reverse_lookup() {
+        let num_glyphs: u16 = 4;
+        let mut tail = Vec::new();
+        tail.extend_from_slice(&num_glyphs.to_be_bytes());
+        for idx in [0u16, 36, 258, 259] {
+            tail.extend_from_slice(&idx.to_be_bytes());
+        }
+        for name in ["Alpha", "Beta"] {
+            tail.push(name.len() as u8);
+            tail.extend_from_slice(name.as_bytes());
+        }
+        let mut bytes = header(POST_VERSION_20);
+        bytes.extend_from_slice(&tail);
+        let p = PostTable::parse(&bytes).unwrap();
+        let pairs: Vec<(u16, &str)> = p.iter_glyph_names().collect();
+        assert_eq!(
+            pairs,
+            vec![(0, ".notdef"), (1, "A"), (2, "Alpha"), (3, "Beta")]
+        );
+        // Each iterated name reverse-resolves to its own gid (these are
+        // all unique names, so the lowest-gid rule is exact here).
+        for (gid, name) in pairs {
+            assert_eq!(p.gid_for_name(name), Some(gid));
+        }
+    }
+
+    #[test]
+    fn v20_iter_skips_unsatisfiable_pascal_reference() {
+        // gid 0 names .notdef; gid 1 references a Pascal string that the
+        // empty pool cannot satisfy -> skipped by iter, no reverse hit.
+        let num_glyphs: u16 = 2;
+        let mut tail = Vec::new();
+        tail.extend_from_slice(&num_glyphs.to_be_bytes());
+        tail.extend_from_slice(&0u16.to_be_bytes());
+        tail.extend_from_slice(&258u16.to_be_bytes());
+        let mut bytes = header(POST_VERSION_20);
+        bytes.extend_from_slice(&tail);
+        let p = PostTable::parse(&bytes).unwrap();
+        let pairs: Vec<(u16, &str)> = p.iter_glyph_names().collect();
+        assert_eq!(pairs, vec![(0, ".notdef")]);
     }
 
     #[test]
