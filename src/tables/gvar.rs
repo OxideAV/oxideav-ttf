@@ -220,6 +220,16 @@ impl<'a> GvarTable<'a> {
     ///
     /// Returns `Ok(vec![(0,0); num_points])` for a glyph with no
     /// variation data (or for an all-zero coord request).
+    ///
+    /// This convenience entry point performs **no** inferred-delta
+    /// (IUP) interpolation: tuples that reference only a subset of the
+    /// glyph's points leave the un-referenced points unmoved. That is
+    /// correct only for fonts whose every tuple lists all points. For
+    /// the general case (partial point sets, which most real variable
+    /// fonts use), call [`Self::glyph_deltas_iup`] with the glyph's
+    /// contour structure and default coordinates so un-referenced
+    /// points get inferred per ISO/IEC 14496-22:2019 §7.3.4.4
+    /// ("Inferred deltas for un-referenced point numbers").
     pub fn glyph_deltas(
         &self,
         glyph_id: u16,
@@ -231,7 +241,47 @@ impl<'a> GvarTable<'a> {
         // phantom points: lsb, rsb, tsb, bsb). We decode the full set
         // and hand the caller back only the `np` outline points.
         let total = np.checked_add(4).ok_or(Error::BadOffset)?;
-        let mut full = self.decode_deltas(glyph_id, total, coords)?;
+        let mut full = self.decode_deltas(glyph_id, total, coords, None)?;
+        full.truncate(np);
+        Ok(full)
+    }
+
+    /// Decode the per-point `(dx, dy)` delta vectors for a **simple**
+    /// `glyph_id`, performing inferred-delta (IUP) interpolation for
+    /// any outline points a tuple omits from its packed point-number
+    /// set (ISO/IEC 14496-22:2019 §7.3.4.4).
+    ///
+    /// `outline` describes the static glyph's contour structure
+    /// (the per-contour last-point indices) and the default grid
+    /// coordinates of every outline point — both are required because
+    /// the inference of an un-referenced point's delta is computed
+    /// from the *unscaled* region deltas of its nearest referenced
+    /// contour neighbours and the **default** coordinates of all three
+    /// points. Phantom points (the trailing four lsb/rsb/tsb/bsb
+    /// pseudo-points) are never inferred — they are handled as plain
+    /// referenced/un-referenced points and contribute zero when a
+    /// tuple omits them.
+    ///
+    /// The returned vector has length `outline.points.len()` (outline
+    /// points only — the four phantom-point deltas are dropped, like
+    /// [`Self::glyph_deltas`]).
+    ///
+    /// Inference is done **per region** on each tuple's unscaled
+    /// deltas, then the tuple scalar is applied and the result
+    /// accumulated, exactly as the spec prescribes: "calculation of
+    /// inferred variation deltas is based on the default positions of
+    /// points and the unscaled delta values for a given region … the
+    /// inferred deltas can be pre-computed before any processing for a
+    /// specific instance is done."
+    pub fn glyph_deltas_iup(
+        &self,
+        glyph_id: u16,
+        outline: &SimpleOutlineInfo,
+        coords: &[f32],
+    ) -> Result<Vec<(i32, i32)>, Error> {
+        let np = outline.points.len();
+        let total = np.checked_add(4).ok_or(Error::BadOffset)?;
+        let mut full = self.decode_deltas(glyph_id, total, coords, Some(outline))?;
         full.truncate(np);
         Ok(full)
     }
@@ -268,7 +318,7 @@ impl<'a> GvarTable<'a> {
     ) -> Result<Vec<(i32, i32)>, Error> {
         let nc = num_components as usize;
         let total = nc.checked_add(4).ok_or(Error::BadOffset)?;
-        let mut full = self.decode_deltas(glyph_id, total, coords)?;
+        let mut full = self.decode_deltas(glyph_id, total, coords, None)?;
         full.truncate(nc);
         Ok(full)
     }
@@ -277,15 +327,21 @@ impl<'a> GvarTable<'a> {
     /// pseudo-point count the gvar stream for this glyph addresses
     /// (outline points + 4 for simple glyphs; component count + 4 for
     /// composites). Returns a `(dx, dy)` vector of length
-    /// `total_points`. No IUP inference is performed here — the simple-
-    /// glyph inference path is applied by the caller in
-    /// [`Self::glyph_deltas`]'s consumer where contour structure is
-    /// known; composite processing never infers (§7.3.4.4 NOTE).
+    /// `total_points`.
+    ///
+    /// When `outline` is `Some`, per-region inferred-delta (IUP)
+    /// interpolation is performed for outline points a tuple omits
+    /// (§7.3.4.4): each region's unscaled deltas are completed across
+    /// every contour before the tuple scalar is applied. When `outline`
+    /// is `None`, un-referenced points keep a zero region delta (the
+    /// legacy [`Self::glyph_deltas`] / composite behaviour). The four
+    /// trailing phantom points are never inferred regardless.
     fn decode_deltas(
         &self,
         glyph_id: u16,
         total_points: usize,
         coords: &[f32],
+        outline: Option<&SimpleOutlineInfo>,
     ) -> Result<Vec<(i32, i32)>, Error> {
         if total_points > MAX_POINTS_PER_GLYPH {
             return Err(Error::BadStructure("gvar point count exceeds cap"));
@@ -428,21 +484,262 @@ impl<'a> GvarTable<'a> {
             let dxs = decode_packed_deltas(tuple_data, &mut td_off, n_pts)?;
             let dys = decode_packed_deltas(tuple_data, &mut td_off, n_pts)?;
 
-            // Apply scaled deltas to `out`. Out-of-range point indices
-            // (a corrupt point set addressing past the declared
-            // pseudo-point count) are dropped.
-            for (i, &p_idx) in points.iter().enumerate() {
-                let pi = p_idx as usize;
-                if pi >= total_points {
-                    continue;
+            // Whether this tuple references *all* of the glyph's
+            // points (the "all points" sentinel, or an explicit set
+            // covering every point). When it does, no inference is
+            // needed regardless of `outline`.
+            let all_points = n_pts == total_points;
+
+            if let (Some(info), false) = (outline, all_points) {
+                // §7.3.4.4 inferred-delta path. Build the full unscaled
+                // (dx, dy) vector for every point in `total_points`,
+                // inferring outline points the tuple omits on a
+                // per-contour basis from the *default* coordinates, then
+                // scale and accumulate.
+                let region = infer_region_deltas(info, total_points, &points, &dxs, &dys);
+                for (pi, (rdx, rdy)) in region.into_iter().enumerate() {
+                    if rdx == 0.0 && rdy == 0.0 {
+                        continue;
+                    }
+                    out[pi].0 += (rdx * scalar as f64).round() as i32;
+                    out[pi].1 += (rdy * scalar as f64).round() as i32;
                 }
-                let dx = (dxs[i] as f32 * scalar).round() as i32;
-                let dy = (dys[i] as f32 * scalar).round() as i32;
-                out[pi].0 += dx;
-                out[pi].1 += dy;
+            } else {
+                // Legacy / composite / all-points path: apply scaled
+                // deltas only to referenced points. Out-of-range point
+                // indices (a corrupt point set addressing past the
+                // declared pseudo-point count) are dropped.
+                for (i, &p_idx) in points.iter().enumerate() {
+                    let pi = p_idx as usize;
+                    if pi >= total_points {
+                        continue;
+                    }
+                    let dx = (dxs[i] as f32 * scalar).round() as i32;
+                    let dy = (dys[i] as f32 * scalar).round() as i32;
+                    out[pi].0 += dx;
+                    out[pi].1 += dy;
+                }
             }
         }
         Ok(out)
+    }
+}
+
+/// Static contour structure of a **simple** glyph, used to drive
+/// inferred-delta (IUP) interpolation in [`GvarTable::glyph_deltas_iup`].
+///
+/// `points` carries the default grid coordinates `(x, y)` of every
+/// outline point of the glyph **in gvar point-number order** (which is
+/// the contour-concatenated order: contour 0's points, then contour 1's,
+/// …). `contour_ends` carries the *last* point index (inclusive) of
+/// each contour, i.e. the `endPtsOfContours[]` values from the `glyf`
+/// simple-glyph header. The phantom points are **not** included here —
+/// the gvar layer appends the four trailing pseudo-points itself and
+/// never infers them.
+#[derive(Debug, Clone)]
+pub struct SimpleOutlineInfo {
+    /// Default `(x, y)` of each outline point, in point-number order.
+    pub points: Vec<(i32, i32)>,
+    /// Inclusive last-point index of each contour (`endPtsOfContours`).
+    pub contour_ends: Vec<u16>,
+}
+
+impl SimpleOutlineInfo {
+    /// Build outline info from per-contour point coordinate lists, the
+    /// shape [`crate::tables::glyf`] produces. Each inner `Vec` is one
+    /// contour's points (in order); the concatenation is the gvar
+    /// point-number order and the running lengths give `contour_ends`.
+    pub fn from_contours(contours: &[Vec<(i32, i32)>]) -> Self {
+        let mut points = Vec::new();
+        let mut contour_ends = Vec::with_capacity(contours.len());
+        for c in contours {
+            points.extend_from_slice(c);
+            // endPtsOfContours is the *last* index, so length-1 after
+            // appending. Empty contours are skipped (no valid end).
+            if !points.is_empty() {
+                contour_ends.push((points.len() - 1) as u16);
+            }
+        }
+        Self {
+            points,
+            contour_ends,
+        }
+    }
+}
+
+/// Build the full unscaled `(dx, dy)` region delta vector of length
+/// `total_points` (outline points + 4 phantom points) for one tuple
+/// region, inferring outline points the tuple omits per §7.3.4.4.
+///
+/// `referenced` is the ascending point-number set the tuple supplied;
+/// `dxs` / `dys` are its parallel unscaled deltas. Phantom points
+/// (indices `>= info.points.len()`) are filled in directly from the
+/// referenced set and never inferred.
+fn infer_region_deltas(
+    info: &SimpleOutlineInfo,
+    total_points: usize,
+    referenced: &[u16],
+    dxs: &[i32],
+    dys: &[i32],
+) -> Vec<(f64, f64)> {
+    let np = info.points.len();
+    let mut delta = vec![(0f64, 0f64); total_points];
+    // `has` marks whether a point carries an explicit (referenced) delta.
+    let mut has = vec![false; total_points];
+    for (i, &p) in referenced.iter().enumerate() {
+        let pi = p as usize;
+        if pi < total_points {
+            delta[pi] = (dxs[i] as f64, dys[i] as f64);
+            has[pi] = true;
+        }
+    }
+
+    // Inference is contour-by-contour over outline points only.
+    let mut contour_start = 0usize;
+    for &end in &info.contour_ends {
+        let end = end as usize;
+        if end >= np || contour_start > end {
+            // Defensive: malformed contour bounds — skip.
+            contour_start = end + 1;
+            continue;
+        }
+        infer_contour(&mut delta, &has, &info.points, contour_start, end);
+        contour_start = end + 1;
+    }
+    delta
+}
+
+/// Infer un-referenced points within one contour spanning the inclusive
+/// index range `[start, end]`, following ISO/IEC 14496-22:2019 §7.3.4.4.
+fn infer_contour(
+    delta: &mut [(f64, f64)],
+    has: &[bool],
+    points: &[(i32, i32)],
+    start: usize,
+    end: usize,
+) {
+    let n = end - start + 1;
+    // Collect contour-local indices that are referenced (in ascending
+    // point-number order, which equals ascending contour order).
+    let referenced: Vec<usize> = (start..=end).filter(|&i| has[i]).collect();
+
+    if referenced.is_empty() {
+        // No point in this contour is referenced — nothing to infer
+        // (the whole contour keeps a zero region delta).
+        return;
+    }
+    if referenced.len() == n {
+        // Every point already has an explicit delta — nothing to infer.
+        return;
+    }
+    if referenced.len() == 1 {
+        // §7.3.4.4 NOTE: a single referenced point makes every other
+        // point in the contour adopt that point's delta verbatim.
+        let r = referenced[0];
+        let (dx, dy) = delta[r];
+        for i in start..=end {
+            if !has[i] {
+                delta[i] = (dx, dy);
+            }
+        }
+        return;
+    }
+
+    // General case: for each un-referenced point find the nearest
+    // referenced points before and after it *in contour order*,
+    // wrapping around the contour, then infer X and Y independently.
+    let m = referenced.len();
+    for ri in 0..m {
+        let cur = referenced[ri];
+        let nxt = referenced[(ri + 1) % m];
+        // Walk the gap of un-referenced points strictly between `cur`
+        // and `nxt`, wrapping past `end` back to `start` when needed.
+        let mut t = next_in_contour(cur, start, end);
+        while t != nxt {
+            // `t` is un-referenced (it lies strictly between two
+            // adjacent referenced points). Infer X then Y.
+            let dx = infer_axis(
+                points[t].0,
+                points[cur].0,
+                points[nxt].0,
+                delta[cur].0,
+                delta[nxt].0,
+            );
+            let dy = infer_axis(
+                points[t].1,
+                points[cur].1,
+                points[nxt].1,
+                delta[cur].1,
+                delta[nxt].1,
+            );
+            delta[t] = (dx, dy);
+            t = next_in_contour(t, start, end);
+        }
+    }
+}
+
+/// Next index within a contour `[start, end]`, wrapping `end → start`.
+#[inline]
+fn next_in_contour(i: usize, start: usize, end: usize) -> usize {
+    if i >= end {
+        start
+    } else {
+        i + 1
+    }
+}
+
+/// Infer one axis's delta for a target point lying (in contour order)
+/// between two referenced points `prec` (preceding) and `foll`
+/// (following), given their default grid coordinates and unscaled
+/// region deltas. Implements the §7.3.4.4 pseudo-code.
+fn infer_axis(
+    target_coord: i32,
+    prec_coord: i32,
+    foll_coord: i32,
+    prec_delta: f64,
+    foll_delta: f64,
+) -> f64 {
+    if prec_coord == foll_coord {
+        // Same default coordinate: identical deltas propagate, differing
+        // deltas yield zero.
+        if prec_delta == foll_delta {
+            prec_delta
+        } else {
+            0.0
+        }
+    } else {
+        let (min_c, max_c) = if prec_coord < foll_coord {
+            (prec_coord, foll_coord)
+        } else {
+            (foll_coord, prec_coord)
+        };
+        if target_coord <= min_c {
+            // At/below the lower coordinate → take the delta of whichever
+            // adjacent point has the lower coordinate.
+            if prec_coord < foll_coord {
+                prec_delta
+            } else {
+                foll_delta
+            }
+        } else if target_coord >= max_c {
+            // At/above the higher coordinate → take the delta of whichever
+            // adjacent point has the higher coordinate.
+            if prec_coord > foll_coord {
+                prec_delta
+            } else {
+                foll_delta
+            }
+        } else {
+            // Strictly between: linear interpolation of the deltas by the
+            // target's proportional position between the two coordinates.
+            // proportion = (target - ref) / (comp - ref); deltaTarget =
+            // deltaRef + proportion * (deltaComp - deltaRef). Reference =
+            // preceding point, comparison = following point. The
+            // fractional result is preserved (rounded only once at final
+            // accumulation), matching the spec worked example's +10.5.
+            let proportion = (target_coord - prec_coord) as f64 / (foll_coord - prec_coord) as f64;
+            prec_delta + proportion * (foll_delta - prec_delta)
+        }
     }
 }
 
@@ -810,5 +1107,235 @@ mod tests {
         // Default position → no deltas.
         let comp0 = g.glyph_component_deltas(0, 2, &[0.0]).expect("comp deltas");
         assert_eq!(comp0, vec![(0, 0), (0, 0)]);
+    }
+
+    // ----- Inferred-delta (IUP) tests, §7.3.4.4 -----------------------
+
+    #[test]
+    fn infer_axis_same_coord_same_delta_propagates() {
+        // precCoord == follCoord, equal deltas → that delta.
+        assert_eq!(infer_axis(50, 10, 10, 7.0, 7.0), 7.0);
+        // Equal coords, differing deltas → 0.
+        assert_eq!(infer_axis(50, 10, 10, 7.0, -3.0), 0.0);
+    }
+
+    #[test]
+    fn infer_axis_outside_takes_nearer_in_direction() {
+        // prec.coord=20, foll.coord=80 (prec < foll).
+        // target below min → delta of lower-coord point (prec).
+        assert_eq!(infer_axis(5, 20, 80, 11.0, 99.0), 11.0);
+        // target above max → delta of higher-coord point (foll).
+        assert_eq!(infer_axis(200, 20, 80, 11.0, 99.0), 99.0);
+        // Reversed ordering: prec.coord=80, foll.coord=20 (foll < prec).
+        // target below min → lower-coord point is foll.
+        assert_eq!(infer_axis(5, 80, 20, 11.0, 99.0), 99.0);
+        // target above max → higher-coord point is prec.
+        assert_eq!(infer_axis(200, 80, 20, 11.0, 99.0), 11.0);
+    }
+
+    #[test]
+    fn infer_axis_between_linear_interpolates_spec_example() {
+        // ISO/IEC 14496-22:2019 §7.3.4.4 worked example: P1 (ref) and
+        // P3 (comp) referenced, P2 inferred. The X-direction proportion
+        // is 0.25 with deltas +28 (P1) and -42 (P3) → +10.5.
+        let dx = infer_axis(
+            /*target*/ 0, /*prec=P1*/ 0, /*foll=P3*/ 4, 28.0, -42.0,
+        );
+        // proportion = (0-0)/(4-0)=0 → 28 here; pick a target giving 0.25.
+        assert_eq!(dx, 28.0);
+        // Now place the target a quarter of the way: prec.coord=0,
+        // foll.coord=4, target.coord=1 → proportion 0.25 → 28 +
+        // 0.25*(-42-28) = 28 - 17.5 = 10.5.
+        let dx = infer_axis(1, 0, 4, 28.0, -42.0);
+        assert!((dx - 10.5).abs() < 1e-9, "got {dx}");
+    }
+
+    #[test]
+    fn simple_outline_info_from_contours_builds_ends() {
+        // Two contours: 3 points then 2 points → ends [2, 4].
+        let contours = vec![vec![(0, 0), (10, 0), (10, 10)], vec![(20, 20), (30, 20)]];
+        let info = SimpleOutlineInfo::from_contours(&contours);
+        assert_eq!(info.points.len(), 5);
+        assert_eq!(info.contour_ends, vec![2, 4]);
+    }
+
+    #[test]
+    fn infer_region_single_referenced_propagates_to_contour() {
+        // One contour of 4 points; only point 1 is referenced with delta
+        // (5, -9). Every other point in the contour adopts it; the four
+        // phantom points (indices 4..7) stay zero.
+        let info = SimpleOutlineInfo {
+            points: vec![(0, 0), (10, 0), (10, 10), (0, 10)],
+            contour_ends: vec![3],
+        };
+        let region = infer_region_deltas(&info, 8, &[1], &[5], &[-9]);
+        for (i, d) in region.iter().enumerate().take(4) {
+            assert_eq!(*d, (5.0, -9.0), "point {i}");
+        }
+        for d in region.iter().skip(4) {
+            assert_eq!(*d, (0.0, 0.0));
+        }
+    }
+
+    #[test]
+    fn infer_region_unreferenced_contour_stays_zero() {
+        // Two contours; only contour 1's point is referenced. Contour 0
+        // has no referenced point → all its points stay zero.
+        let info = SimpleOutlineInfo {
+            points: vec![(0, 0), (10, 0), (50, 50), (60, 60)],
+            contour_ends: vec![1, 3],
+        };
+        // Reference point index 2 (in contour 1) with delta (4, 4).
+        let region = infer_region_deltas(&info, 8, &[2], &[4], &[4]);
+        assert_eq!(region[0], (0.0, 0.0));
+        assert_eq!(region[1], (0.0, 0.0));
+        // Contour 1's single referenced point propagates to its neighbour.
+        assert_eq!(region[2], (4.0, 4.0));
+        assert_eq!(region[3], (4.0, 4.0));
+    }
+
+    #[test]
+    fn infer_region_between_two_referenced_interpolates() {
+        // One contour, 3 points P0,P1,P2. P0 and P2 referenced; P1
+        // inferred. X: P0.x=0 (d=+28), P2.x=4 (d=-42), P1.x=1 →
+        // proportion .25 → 10.5. Y: P0.y=0 (d=-62), P2.y=8 (d=-57),
+        // P1.y=10 → above max → nearer (higher-coord = P2) delta -57.
+        let info = SimpleOutlineInfo {
+            points: vec![(0, 0), (1, 10), (4, 8)],
+            contour_ends: vec![2],
+        };
+        // referenced = P0 (idx0) and P2 (idx2).
+        let region = infer_region_deltas(&info, 7, &[0, 2], &[28, -42], &[-62, -57]);
+        assert_eq!(region[0], (28.0, -62.0));
+        assert_eq!(region[2], (-42.0, -57.0));
+        // P1 inferred:
+        assert!((region[1].0 - 10.5).abs() < 1e-9, "x {}", region[1].0);
+        assert_eq!(region[1].1, -57.0);
+    }
+
+    /// Build a single-glyph gvar holding one tuple with an embedded peak
+    /// at +1.0 and a **private** (partial) point-number set. `pts` is the
+    /// ascending referenced point list; `dxs`/`dys` the matching word
+    /// deltas (same length as `pts`). `total` pseudo-points are addressed.
+    fn build_partial_points_glyph(pts: &[u16], dxs: &[i16], dys: &[i16]) -> Vec<u8> {
+        assert_eq!(pts.len(), dxs.len());
+        assert_eq!(pts.len(), dys.len());
+        let n = pts.len();
+
+        // Tuple data begins with a PRIVATE point-number set, then dx[],
+        // then dy[]. Packed point set: count byte (n < 128), then a
+        // single run with byte deltas (ascending diffs).
+        let mut tuple_data = Vec::new();
+        tuple_data.push(n as u8); // count (<128)
+        tuple_data.push((n - 1) as u8); // run control: byte deltas, run=n
+        let mut last = 0u16;
+        for &p in pts {
+            tuple_data.push((p - last) as u8);
+            last = p;
+        }
+        // dx[] word run, dy[] word run.
+        tuple_data.push(0x40 | ((n - 1) as u8));
+        for &d in dxs {
+            tuple_data.extend_from_slice(&d.to_be_bytes());
+        }
+        tuple_data.push(0x40 | ((n - 1) as u8));
+        for &d in dys {
+            tuple_data.extend_from_slice(&d.to_be_bytes());
+        }
+        let var_data_size = tuple_data.len() as u16;
+
+        // Data area: an EMPTY shared point set (single 0x00 = all-points)
+        // precedes the per-tuple area, but since our tuple uses PRIVATE
+        // points the shared set is unused. We still emit it because the
+        // decoder always decodes the shared set first.
+        let mut data_area = vec![0x00u8];
+        data_area.extend_from_slice(&tuple_data);
+
+        // GlyphVariationData header.
+        let tuple_header_len = 4 + 2; // size + index(+EMBEDDED_PEAK | PRIVATE) + peak
+        let data_offset = (4 + tuple_header_len) as u16;
+        let mut block = Vec::new();
+        block.extend_from_slice(&1u16.to_be_bytes()); // tupleVariationCount
+        block.extend_from_slice(&data_offset.to_be_bytes());
+        block.extend_from_slice(&var_data_size.to_be_bytes());
+        block.extend_from_slice(&(TI_EMBEDDED_PEAK | TI_PRIVATE_POINTS).to_be_bytes());
+        block.extend_from_slice(&0x4000i16.to_be_bytes()); // peak +1.0
+        block.extend_from_slice(&data_area);
+
+        let mut b = vec![0u8; 20];
+        b[0..2].copy_from_slice(&1u16.to_be_bytes());
+        b[4..6].copy_from_slice(&1u16.to_be_bytes());
+        b[12..14].copy_from_slice(&1u16.to_be_bytes());
+        let data_array_off = 24u32;
+        b[16..20].copy_from_slice(&data_array_off.to_be_bytes());
+        if block.len() % 2 != 0 {
+            block.push(0);
+        }
+        let end_half = (block.len() / 2) as u16;
+        b.extend_from_slice(&0u16.to_be_bytes());
+        b.extend_from_slice(&end_half.to_be_bytes());
+        b.extend_from_slice(&block);
+        b
+    }
+
+    #[test]
+    fn glyph_deltas_iup_end_to_end_partial_set() {
+        // 3 outline points (one contour), only P0 and P2 referenced.
+        // P1 should be inferred. Same numbers as the unit test above.
+        let raw = build_partial_points_glyph(&[0, 2], &[28, -42], &[-62, -57]);
+        let g = GvarTable::parse(&raw).expect("parse");
+        let info = SimpleOutlineInfo {
+            points: vec![(0, 0), (1, 10), (4, 8)],
+            contour_ends: vec![2],
+        };
+        // At peak (+1.0) the scalar is 1 → region deltas pass through,
+        // rounded once at accumulation. P1.x = 10.5 → 11 (half away).
+        let out = g.glyph_deltas_iup(0, &info, &[1.0]).expect("iup deltas");
+        assert_eq!(out.len(), 3);
+        assert_eq!(out[0], (28, -62));
+        assert_eq!(out[2], (-42, -57));
+        assert_eq!(out[1], (11, -57)); // 10.5 → 11
+    }
+
+    #[test]
+    fn glyph_deltas_iup_matches_legacy_when_all_points_referenced() {
+        // When every point is referenced, IUP is a no-op and the result
+        // equals the legacy glyph_deltas path.
+        let dxs = [10, 20, 30, 0, 0, 0, 0];
+        let dys = [-1, -2, -3, 0, 0, 0, 0];
+        let raw = build_one_tuple_glyph(&dxs, &dys);
+        let g = GvarTable::parse(&raw).expect("parse");
+        let info = SimpleOutlineInfo {
+            points: vec![(0, 0), (100, 0), (50, 100)],
+            contour_ends: vec![2],
+        };
+        let legacy = g.glyph_deltas(0, 3, &[0.5]).expect("legacy");
+        let iup = g.glyph_deltas_iup(0, &info, &[0.5]).expect("iup");
+        assert_eq!(legacy, iup);
+    }
+
+    #[test]
+    fn glyph_deltas_iup_scales_inferred_deltas() {
+        // Inferred deltas must be scaled by the tuple scalar, like
+        // explicit ones. At coord +0.5 the scalar is 0.5.
+        let raw = build_partial_points_glyph(&[0, 2], &[28, -42], &[-62, -57]);
+        let g = GvarTable::parse(&raw).expect("parse");
+        let info = SimpleOutlineInfo {
+            points: vec![(0, 0), (1, 10), (4, 8)],
+            contour_ends: vec![2],
+        };
+        let out = g.glyph_deltas_iup(0, &info, &[0.5]).expect("iup");
+        // P1.x = 10.5 * 0.5 = 5.25 → 5; P1.y = -57 * 0.5 = -28.5 → -28
+        // (round half to even? no — f32 round() rounds half away from
+        // zero → -29). round() in Rust rounds half away from zero.
+        assert_eq!(
+            out[0],
+            (
+                (28.0 * 0.5f64).round() as i32,
+                (-62.0 * 0.5f64).round() as i32
+            )
+        );
+        assert_eq!(out[1].0, (10.5 * 0.5f64).round() as i32);
+        assert_eq!(out[1].1, (-57.0 * 0.5f64).round() as i32);
     }
 }

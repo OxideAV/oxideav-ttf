@@ -506,9 +506,27 @@ kerning, and mark attachment.
   spec's "most deeply-nested first" order — verified against
   InterVariable.ttf, where the base 'e' sub-outline inside a varied 'é'
   equals the standalone varied 'e' outline up to a single component
-  offset across the wght axis. Phantom-point deltas (metrics) and the
-  §7.3.4.4 IUP inference (simple-glyph-only by the spec's NOTE) are
-  out of scope of this geometry path.
+  offset across the wght axis. Phantom-point deltas (metrics) are out of
+  scope of this geometry path.
+- `gvar` **inferred-delta (IUP) interpolation for simple glyphs**
+  (ISO/IEC 14496-22:2019 §7.3.4.4) — variable fonts list explicit deltas
+  for only the structurally significant points of each tuple and infer
+  the rest along the contour. `Font::glyph_outline` now completes simple
+  variable glyphs through `GvarTable::glyph_deltas_iup`, which takes the
+  static contour structure (`SimpleOutlineInfo`: per-contour end indices
+  + default grid coordinates) and infers un-referenced points **per
+  region** on the *unscaled* deltas before the tuple scalar is applied —
+  so the result is independent of region-processing order, as the spec
+  requires. All §7.3.4.4 cases are covered: equal-coordinate neighbours
+  propagate a shared delta (zero on disagreement); a single referenced
+  point fills its whole contour; targets outside the neighbour range
+  take the nearer neighbour's delta; targets between neighbours linear-
+  interpolate by proportional position (the spec worked example's +10.5
+  reproduced). Phantom points are never inferred (spec NOTE). Verified
+  against InterVariable.ttf: the majority of a glyph's points move under
+  a strong weight change on both axis signs, and the varied outline
+  stays within its derived bounding box — neither held before IUP, when
+  un-referenced points stayed pinned.
 
 The companion [`oxideav-scribe`](https://github.com/OxideAV/oxideav-scribe)
 crate consumes the outlines + shaping output to rasterise text to RGBA

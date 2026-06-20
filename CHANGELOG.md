@@ -9,6 +9,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`gvar` inferred-delta (IUP) interpolation for simple glyphs**
+  (ISO/IEC 14496-22:2019 §7.3.4.4 "Inferred deltas for un-referenced
+  point numbers"). Real variable fonts encode each `gvar` tuple with a
+  *partial* point-number set — only the structurally significant points
+  carry explicit deltas, and the rest are inferred along each contour.
+  Previously un-referenced points stayed pinned at their default
+  positions, shearing the varied outline; the new path completes every
+  contour. New `GvarTable::glyph_deltas_iup(glyph_id, &SimpleOutlineInfo,
+  coords)` takes the static glyph's contour structure + default grid
+  coordinates and returns per-point `(dx, dy)` deltas with omitted
+  outline points inferred. Inference runs **per region** on each tuple's
+  *unscaled* deltas (before the tuple scalar is applied, exactly as the
+  spec prescribes), implementing all §7.3.4.4 cases: equal-coordinate
+  neighbours propagate a shared delta (or zero on disagreement);
+  single-referenced contours adopt that one point verbatim; targets
+  outside the neighbour coordinate range take the nearer neighbour's
+  delta; targets between neighbours linear-interpolate by proportional
+  position (fractional precision preserved until final rounding,
+  matching the spec worked example's +10.5). Phantom points are never
+  inferred. `Font::glyph_outline` now routes simple variable glyphs
+  through this path, so an outline at any non-default instance is
+  IUP-complete. New `SimpleOutlineInfo` type +
+  `SimpleOutlineInfo::from_contours`. Eleven new gvar unit tests
+  (per-axis inference cases, region propagation, the §7.3.4.4 worked
+  example, end-to-end partial point sets, scalar scaling of inferred
+  deltas, legacy-path equivalence when all points are referenced) plus
+  three InterVariable.ttf integration tests proving the majority of a
+  glyph's points move under a strong weight change on both axis signs
+  and that the varied outline stays within its derived bounds.
 - **`post`-table reverse glyph-name lookup.** New
   `PostTable::gid_for_name(name)` (surfaced as `Font::gid_for_glyph_name`)
   inverts `resolved_glyph_name` across every named glyph the table

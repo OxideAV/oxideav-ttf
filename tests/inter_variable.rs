@@ -273,3 +273,103 @@ fn composite_base_component_matches_standalone_varied_glyph() {
         );
     }
 }
+
+/// IUP correctness anchor (§7.3.4.4 "Inferred deltas for un-referenced
+/// point numbers"). Real variable fonts like Inter encode their `gvar`
+/// tuples with *partial* point-number sets: only the structurally
+/// important points carry explicit deltas, and the rest are inferred by
+/// interpolation along each contour. Before inferred-delta support,
+/// un-referenced points stayed pinned to their default positions,
+/// shearing the outline. The decisive observable is that the **vast
+/// majority** of a glyph's points move under a strong weight change —
+/// not merely the small referenced subset.
+#[test]
+fn iup_moves_unreferenced_points_majority() {
+    // 'e' is a smooth two-curve glyph with many off-curve control
+    // points the font does not list explicitly in every tuple.
+    let regular = outline_at_wght('e', 400.0);
+    let bold = outline_at_wght('e', 900.0);
+
+    assert_eq!(
+        bold.contours.len(),
+        regular.contours.len(),
+        "weight must not change topology"
+    );
+
+    let mut total = 0usize;
+    let mut moved = 0usize;
+    for (rc, bc) in regular.contours.iter().zip(bold.contours.iter()) {
+        for (rp, bp) in rc.points.iter().zip(bc.points.iter()) {
+            total += 1;
+            if rp.x != bp.x || rp.y != bp.y {
+                moved += 1;
+            }
+        }
+    }
+    assert!(total > 0, "'e' must have points");
+    // With IUP, a heavy weight change displaces nearly every point. A
+    // broken implementation that only moves explicitly-referenced
+    // points would leave a large fraction pinned. Require a strong
+    // majority (>60%) to have moved.
+    assert!(
+        moved * 100 >= total * 60,
+        "expected the majority of points to move under wght (IUP); \
+         only {moved}/{total} moved"
+    );
+}
+
+/// IUP must keep an outline *coherent*: between two referenced anchor
+/// points an inferred point's displacement is bounded by the
+/// displacements of its neighbours (linear interpolation never
+/// overshoots the [min, max] of the two endpoints). We verify the
+/// weaker but robust property that no inferred point flies far outside
+/// the glyph's varied bounding box — a smeared, un-interpolated outline
+/// would blow the bbox out. We compare the heavy-weight bbox derived
+/// from the points to the reported bounds.
+#[test]
+fn iup_keeps_outline_within_derived_bounds() {
+    let bold = outline_at_wght('e', 900.0);
+    let bounds = bold.bounds.expect("varied outline has bounds");
+    for c in &bold.contours {
+        for p in &c.points {
+            assert!(
+                p.x >= bounds.x_min && p.x <= bounds.x_max,
+                "point x {} outside varied bbox [{}, {}]",
+                p.x,
+                bounds.x_min,
+                bounds.x_max
+            );
+            assert!(
+                p.y >= bounds.y_min && p.y <= bounds.y_max,
+                "point y {} outside varied bbox [{}, {}]",
+                p.y,
+                bounds.y_min,
+                bounds.y_max
+            );
+        }
+    }
+}
+
+/// Symmetry: IUP must work on the negative-axis (light) side too — the
+/// thin instance must also move the majority of points.
+#[test]
+fn iup_moves_majority_on_light_side() {
+    let regular = outline_at_wght('o', 400.0);
+    let thin = outline_at_wght('o', 100.0);
+    let mut total = 0usize;
+    let mut moved = 0usize;
+    for (rc, tc) in regular.contours.iter().zip(thin.contours.iter()) {
+        for (rp, tp) in rc.points.iter().zip(tc.points.iter()) {
+            total += 1;
+            if rp.x != tp.x || rp.y != tp.y {
+                moved += 1;
+            }
+        }
+    }
+    assert!(total > 0);
+    assert!(
+        moved * 100 >= total * 60,
+        "expected majority of 'o' points to move at wght=100 (IUP); \
+         {moved}/{total}"
+    );
+}

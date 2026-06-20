@@ -976,7 +976,20 @@ impl<'a> Font<'a> {
             let gvar = self.gvar.as_ref().unwrap();
             let n_pts: usize = out.contours.iter().map(|c| c.points.len()).sum();
             if n_pts > 0 && n_pts <= u16::MAX as usize {
-                if let Ok(deltas) = gvar.glyph_deltas(glyph_id, n_pts as u16, normalised) {
+                // Build the static contour structure + default grid
+                // coordinates so the gvar layer can infer deltas for
+                // points a tuple omits (IUP, ISO/IEC 14496-22:2019
+                // §7.3.4.4). The default coordinates must be the
+                // pre-delta outline points, in gvar point-number order
+                // (= contour-concatenated order), which is exactly the
+                // order `out.contours` flattens to here.
+                let contours: Vec<Vec<(i32, i32)>> = out
+                    .contours
+                    .iter()
+                    .map(|c| c.points.iter().map(|p| (p.x as i32, p.y as i32)).collect())
+                    .collect();
+                let info = tables::gvar::SimpleOutlineInfo::from_contours(&contours);
+                if let Ok(deltas) = gvar.glyph_deltas_iup(glyph_id, &info, normalised) {
                     let mut idx = 0usize;
                     for c in out.contours.iter_mut() {
                         for p in c.points.iter_mut() {
