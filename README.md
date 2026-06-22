@@ -475,7 +475,9 @@ kerning, and mark attachment.
   entry, 1..16 inner-index bits) with the §7.3.5.2 "glyph IDs beyond
   mapCount-1 use the last entry" clamp; when `advanceWidthMappingOffset`
   is zero, the §7.3.5.3 implicit form (outer = 0, inner = glyph ID) is
-  used instead.
+  used instead. For callers that want the per-instance metric directly,
+  `Font::glyph_advance_varied(gid)` / `Font::glyph_lsb_varied(gid)` fuse
+  the static `hmtx` value with the HVAR delta (rounded + clamped).
 - `VVAR` (per-glyph vertical-metrics variations, ISO/IEC 14496-22:2019
   §7.3.8) reusing the same `ItemVariationStore` + `DeltaSetIndexMap`
   substructures as HVAR. `Font::advance_height_variation_delta(gid)`
@@ -488,6 +490,8 @@ kerning, and mark attachment.
   outlines"). The implicit "outer=0, inner=gid" form applies to
   advance heights when `advanceHeightMappingOffset` is zero, matching
   the §7.3.8.2 cross-reference back to §7.3.5.3.
+  `Font::glyph_advance_height_varied(gid)` fuses the static `vmtx`
+  advance height with the VVAR delta for the current instance.
 - `STAT` (style attributes table, ISO/IEC 14496-22:2019 §7.3.7) — v1.0
   / v1.1 / v1.2 headers (the v1.0 deprecated form is parsed and its
   missing `elidedFallbackNameID` defaulted to the conventional name ID

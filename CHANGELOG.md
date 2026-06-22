@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Fused varied-metric accessors.** `Font::glyph_advance_varied(gid)`
+  and `Font::glyph_lsb_varied(gid)` add the current instance's `HVAR`
+  delta (§7.3.5.2/§7.3.5.3) to the static `hmtx` advance / LSB, rounded
+  and clamped, so callers get the per-instance horizontal metric in one
+  call; `Font::glyph_advance_height_varied(gid)` does the same for the
+  `vmtx` advance height via `VVAR` (§7.3.8.2). All degrade to the static
+  value for static fonts, fonts without the relevant variation table, or
+  the default instance. Two InterVariable / DejaVu integration tests
+  (HVAR varies an advance at wght=900 but not at the default; static
+  font mirrors the un-varied metrics and reports no vertical height).
+
 - **`cvar` CVT-variations table + `cvt ` Control Value Table access**
   (ISO/IEC 14496-22:2019 §7.3.2 / §5.3.2). `cvar` is parsed as a single
   tuple variation store (§7.2.2), reusing `gvar`'s packed-point /

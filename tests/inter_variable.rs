@@ -455,3 +455,60 @@ fn axis_helpers_are_noops_on_static_font() {
     assert!(!font.set_axis_value(b"wght", 700.0));
     assert!(!font.apply_named_instance(0));
 }
+
+#[test]
+fn hvar_varies_advance_width_under_weight() {
+    // Inter ships an HVAR table; bumping wght to its max should change
+    // at least one glyph's varied advance width relative to the static
+    // hmtx advance. We scan a handful of common Latin glyphs and assert
+    // the fused accessor diverges for at least one of them.
+    let mut font = Font::from_bytes(FONT).unwrap();
+    let wght_index = font
+        .variation_axes()
+        .iter()
+        .position(|a| &a.tag == b"wght")
+        .unwrap();
+
+    // At the default instance, varied == static for every glyph.
+    for ch in "HOanmwgij".chars() {
+        if let Some(gid) = font.glyph_index(ch) {
+            assert_eq!(
+                font.glyph_advance_varied(gid),
+                font.glyph_advance(gid),
+                "default instance must not vary advance for {ch}"
+            );
+        }
+    }
+
+    let mut nc = font.variation_coords().to_vec();
+    nc[wght_index] = 900.0;
+    font.set_variation_coords(&nc);
+
+    let mut any_diff = false;
+    for ch in "HOanmwgij".chars() {
+        if let Some(gid) = font.glyph_index(ch) {
+            // The HVAR delta accessor must resolve (Inter maps every gid).
+            assert!(font.advance_width_variation_delta(gid).is_some());
+            if font.glyph_advance_varied(gid) != font.glyph_advance(gid) {
+                any_diff = true;
+            }
+        }
+    }
+    assert!(
+        any_diff,
+        "expected HVAR to vary at least one advance width at wght=900"
+    );
+}
+
+#[test]
+fn varied_advance_equals_static_on_font_without_hvar() {
+    // DejaVuSans is static (no HVAR): glyph_advance_varied must mirror
+    // glyph_advance exactly, and glyph_lsb_varied must mirror glyph_lsb.
+    const STATIC: &[u8] = include_bytes!("fixtures/DejaVuSans.ttf");
+    let font = Font::from_bytes(STATIC).unwrap();
+    let gid = font.glyph_index('A').expect("A glyph");
+    assert_eq!(font.glyph_advance_varied(gid), font.glyph_advance(gid));
+    assert_eq!(font.glyph_lsb_varied(gid), font.glyph_lsb(gid));
+    // No vertical metrics → varied height is None.
+    assert_eq!(font.glyph_advance_height_varied(gid), None);
+}

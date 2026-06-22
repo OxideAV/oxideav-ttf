@@ -2679,6 +2679,35 @@ impl<'a> Font<'a> {
         h.rsb_delta(glyph_id, &coords)
     }
 
+    /// Per-glyph advance width **at the current variation instance**:
+    /// the static `hmtx` advance (see [`Self::glyph_advance`]) plus the
+    /// `HVAR` delta (§7.3.5.3), rounded to the nearest font unit. For a
+    /// static font, a font without `HVAR`, or the default instance this
+    /// equals [`Self::glyph_advance`]. The result is clamped to the
+    /// `i32` range only in pathological inputs; advances are unsigned in
+    /// `hmtx` but the fused value is returned signed for symmetry with
+    /// [`Self::glyph_advance`].
+    pub fn glyph_advance_varied(&self, glyph_id: u16) -> i16 {
+        let base = self.hmtx.advance(glyph_id) as f32;
+        let delta = self.advance_width_variation_delta(glyph_id).unwrap_or(0.0);
+        (base + delta)
+            .round()
+            .clamp(i16::MIN as f32, i16::MAX as f32) as i16
+    }
+
+    /// Per-glyph left-side bearing **at the current variation
+    /// instance**: the static `hmtx` LSB (see [`Self::glyph_lsb`]) plus
+    /// the `HVAR` LSB delta (§7.3.5.2), rounded to the nearest font
+    /// unit. Equals [`Self::glyph_lsb`] for a static font, a font
+    /// without an `HVAR` LSB mapping, or the default instance.
+    pub fn glyph_lsb_varied(&self, glyph_id: u16) -> i16 {
+        let base = self.hmtx.lsb(glyph_id) as f32;
+        let delta = self.lsb_variation_delta(glyph_id).unwrap_or(0.0);
+        (base + delta)
+            .round()
+            .clamp(i16::MIN as f32, i16::MAX as f32) as i16
+    }
+
     /// Borrow the parsed `VVAR` table, when present.
     pub fn vvar_table(&self) -> Option<&VvarTable> {
         self.vvar.as_ref()
@@ -2722,6 +2751,19 @@ impl<'a> Font<'a> {
         let v = self.vvar.as_ref()?;
         let coords = self.normalised_coords();
         v.bsb_delta(glyph_id, &coords)
+    }
+
+    /// Per-glyph advance height **at the current variation instance**:
+    /// the static `vmtx` advance height (see
+    /// [`Self::glyph_advance_height`]) plus the `VVAR` advance-height
+    /// delta (§7.3.8.2), rounded to the nearest font unit. Returns
+    /// `None` when the font lacks `vhea`/`vmtx`. Equals
+    /// [`Self::glyph_advance_height`] for a font without `VVAR` or at
+    /// the default instance.
+    pub fn glyph_advance_height_varied(&self, glyph_id: u16) -> Option<u16> {
+        let base = self.vmtx.as_ref()?.advance_height(glyph_id) as f32;
+        let delta = self.advance_height_variation_delta(glyph_id).unwrap_or(0.0);
+        Some((base + delta).round().clamp(0.0, u16::MAX as f32) as u16)
     }
 
     /// Interpolated `VVAR` adjustment to the vertical-origin Y of
