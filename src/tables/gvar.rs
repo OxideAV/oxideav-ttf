@@ -744,7 +744,7 @@ fn infer_axis(
 }
 
 #[inline]
-fn f2dot14(raw: i16) -> f32 {
+pub(crate) fn f2dot14(raw: i16) -> f32 {
     raw as f32 / 16384.0
 }
 
@@ -753,7 +753,12 @@ fn f2dot14(raw: i16) -> f32 {
 /// intermediate region is present the linear ramp goes (start → peak)
 /// then (peak → end), else the ramp is (0 → peak) clamped at peak's
 /// sign.
-fn tuple_scalar(coords: &[f32], peak: &[f32], start: Option<&[f32]>, end: Option<&[f32]>) -> f32 {
+pub(crate) fn tuple_scalar(
+    coords: &[f32],
+    peak: &[f32],
+    start: Option<&[f32]>,
+    end: Option<&[f32]>,
+) -> f32 {
     let mut s = 1.0f32;
     for (ai, &c) in coords.iter().enumerate() {
         let p = peak.get(ai).copied().unwrap_or(0.0);

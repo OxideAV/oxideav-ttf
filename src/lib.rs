@@ -62,13 +62,13 @@ pub use shape::ShapedGlyph;
 use crate::parser::TableDirectory;
 use crate::tables::{
     avar::AvarTable, base::BaseTable, cbdt::CbdtTable, cblc::CblcTable, cmap::CmapTable,
-    colr::ColrTable, cpal::CpalTable, ebdt::EbdtTable, ebsc::EbscTable, fvar::FvarTable,
-    gasp::GaspTable, gdef::GdefTable, glyf::GlyfTable, gpos::GposTable, gsub::GsubTable,
-    gvar::GvarTable, hdmx::HdmxTable, head::HeadTable, hhea::HheaTable, hmtx::HmtxTable,
-    hvar::HvarTable, kern::KernTable, loca::LocaTable, ltsh::LtshTable, maxp::MaxpTable,
-    meta::MetaTable, mvar::MvarTable, name::NameTable, os2::Os2Table, pclt::PcltTable,
-    post::PostTable, sbix::SbixTable, stat::StatTable, svg::SvgTable, vdmx::VdmxTable,
-    vhea::VheaTable, vmtx::VmtxTable, vorg::VorgTable, vvar::VvarTable,
+    colr::ColrTable, cpal::CpalTable, cvar::CvarTable, ebdt::EbdtTable, ebsc::EbscTable,
+    fvar::FvarTable, gasp::GaspTable, gdef::GdefTable, glyf::GlyfTable, gpos::GposTable,
+    gsub::GsubTable, gvar::GvarTable, hdmx::HdmxTable, head::HeadTable, hhea::HheaTable,
+    hmtx::HmtxTable, hvar::HvarTable, kern::KernTable, loca::LocaTable, ltsh::LtshTable,
+    maxp::MaxpTable, meta::MetaTable, mvar::MvarTable, name::NameTable, os2::Os2Table,
+    pclt::PcltTable, post::PostTable, sbix::SbixTable, stat::StatTable, svg::SvgTable,
+    vdmx::VdmxTable, vhea::VheaTable, vmtx::VmtxTable, vorg::VorgTable, vvar::VvarTable,
 };
 
 pub use outline::{BBox, Contour, Point, TtOutline};
@@ -264,8 +264,16 @@ pub struct Font<'a> {
     avar: Option<AvarTable>,
     /// Per-glyph TupleVariationStore (`gvar`). Required when `fvar`
     /// is present and the outline kind is TrueType; not populated for
-    /// CFF2 (which uses `cvar` instead — out of scope here).
+    /// CFF2 (which interleaves its deltas inside the `CFF2` table).
     gvar: Option<GvarTable<'a>>,
+    /// CVT-variations table (`cvar`, ISO/IEC 14496-22:2019 §7.3.2).
+    /// Present in TrueType-hinted variable fonts; supplies per-instance
+    /// deltas for the `cvt ` Control Value Table entries.
+    cvar: Option<CvarTable<'a>>,
+    /// Raw `cvt ` Control Value Table bytes (an array of big-endian
+    /// `int16` FWORDs). Held so [`Font::cvt_value`] / [`Font::cvt_count`]
+    /// can resolve entries, optionally with `cvar` deltas applied.
+    cvt_bytes: Option<&'a [u8]>,
     /// Font-wide metrics-variation table (`MVAR`). Present in many
     /// variable fonts; carries per-instance adjustments for `OS/2`,
     /// `hhea`, `vhea`, `post`, `gasp` metric fields keyed by the
@@ -489,6 +497,9 @@ impl<'a> Font<'a> {
         let fvar = dir.find(b"fvar", bytes).map(FvarTable::parse).transpose()?;
         let avar = dir.find(b"avar", bytes).map(AvarTable::parse).transpose()?;
         let gvar = dir.find(b"gvar", bytes).map(GvarTable::parse).transpose()?;
+        let cvar = dir.find(b"cvar", bytes).map(CvarTable::parse).transpose()?;
+        // `cvt ` is a plain `int16[]` Control Value Table; held raw.
+        let cvt_bytes = dir.find(b"cvt ", bytes);
         let mvar = dir.find(b"MVAR", bytes).map(MvarTable::parse).transpose()?;
         let hvar = dir.find(b"HVAR", bytes).map(HvarTable::parse).transpose()?;
         let vvar = dir.find(b"VVAR", bytes).map(VvarTable::parse).transpose()?;
@@ -573,6 +584,8 @@ impl<'a> Font<'a> {
             fvar,
             avar,
             gvar,
+            cvar,
+            cvt_bytes,
             mvar,
             hvar,
             vvar,
@@ -2518,6 +2531,78 @@ impl<'a> Font<'a> {
             out.push(n);
         }
         out
+    }
+
+    // ---- Control Value Table (cvt) + CVT variations (cvar) ---------------
+
+    /// Number of entries in the `cvt ` Control Value Table, or `0` when
+    /// the font has no `cvt ` table. Each entry is an `int16` FWORD
+    /// (ISO/IEC 14496-22:2019 §5.3.2); the count is the table length
+    /// divided by two (a trailing odd byte, if any, is ignored).
+    pub fn cvt_count(&self) -> u16 {
+        match self.cvt_bytes {
+            Some(b) => (b.len() / 2).min(u16::MAX as usize) as u16,
+            None => 0,
+        }
+    }
+
+    /// The static (un-varied) value of `cvt ` entry `index`, or `None`
+    /// when the font has no `cvt ` table or `index` is out of range.
+    /// This is the raw FWORD as authored, before any `cvar` instance
+    /// delta is applied — see [`Self::cvt_value_varied`].
+    pub fn cvt_value(&self, index: u16) -> Option<i16> {
+        let b = self.cvt_bytes?;
+        let off = index as usize * 2;
+        crate::parser::read_i16(b, off).ok()
+    }
+
+    /// `true` if the font ships a `cvar` CVT-variations table.
+    pub fn has_cvar(&self) -> bool {
+        self.cvar.is_some()
+    }
+
+    /// Borrow the parsed `cvar` table, when present.
+    pub fn cvar_table(&self) -> Option<&CvarTable<'a>> {
+        self.cvar.as_ref()
+    }
+
+    /// Per-`cvt`-entry deltas for the current variation instance,
+    /// computed against the `avar`-bent normalised coordinate vector
+    /// (ISO/IEC 14496-22:2019 §7.3.2). Returns a `Vec<i32>` of length
+    /// [`Self::cvt_count`]; every entry is `0` for a static font, a
+    /// font without `cvar`, or the default instance. Index `i` is the
+    /// delta to add to `cvt ` entry `i`.
+    pub fn cvt_deltas(&self) -> Vec<i32> {
+        let n = self.cvt_count();
+        let cvar = match self.cvar.as_ref() {
+            Some(c) => c,
+            None => return vec![0; n as usize],
+        };
+        let axis_count = self.fvar.as_ref().map(|f| f.axes().len()).unwrap_or(0) as u16;
+        let coords = self.normalised_coords();
+        cvar.cvt_deltas(axis_count, n, &coords)
+            .unwrap_or_else(|_| vec![0; n as usize])
+    }
+
+    /// The `cvt ` entry `index` with the current instance's `cvar`
+    /// delta applied (saturating to the `i16` FWORD range), or `None`
+    /// when the font has no `cvt ` table or `index` is out of range.
+    /// For a static font or the default instance this equals
+    /// [`Self::cvt_value`].
+    pub fn cvt_value_varied(&self, index: u16) -> Option<i16> {
+        let base = self.cvt_value(index)? as i32;
+        let delta = match self.cvar.as_ref() {
+            Some(cvar) => {
+                let axis_count = self.fvar.as_ref().map(|f| f.axes().len()).unwrap_or(0) as u16;
+                let coords = self.normalised_coords();
+                cvar.cvt_deltas(axis_count, self.cvt_count(), &coords)
+                    .ok()
+                    .and_then(|d| d.get(index as usize).copied())
+                    .unwrap_or(0)
+            }
+            None => 0,
+        };
+        Some((base + delta).clamp(i16::MIN as i32, i16::MAX as i32) as i16)
     }
 
     /// Borrow the parsed `MVAR` table, when present. Static fonts and

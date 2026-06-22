@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`cvar` CVT-variations table + `cvt ` Control Value Table access**
+  (ISO/IEC 14496-22:2019 §7.3.2 / §5.3.2). `cvar` is parsed as a single
+  tuple variation store (§7.2.2), reusing `gvar`'s packed-point /
+  packed-delta / tuple-scalar machinery; embedded peak tuples,
+  intermediate regions, shared and private point sets are all honoured,
+  with "point numbers" interpreted as CVT indices and no IUP inference
+  (per the §7.2.2.4 NOTE). New `CvarTable::cvt_deltas(axis_count,
+  cvt_count, coords)` returns per-CVT deltas for an instance. On `Font`:
+  `cvt_count` / `cvt_value(i)` expose the raw `cvt ` FWORD array;
+  `has_cvar` / `cvar_table`; `cvt_deltas()` computes the current
+  instance's deltas against the `avar`-bent normalised coords; and
+  `cvt_value_varied(i)` returns the saturated varied CVT value. Seven
+  `cvar` unit tests (header parse / version + EOF rejection / full +
+  half + zero scalar interpolation / cvt-count padding) plus three
+  integration tests against DejaVu Sans (real `cvt ` of 255 entries, no
+  `cvar`) and InterVariable (no `cvt `).
+
 - **CPAL v1 label arrays** (ISO/IEC 14496-22:2019 §5.7.11). The v1
   trailer's `paletteLabelArray` and `paletteEntryLabelArray` are now
   parsed alongside the previously-supported `paletteTypeArray`. New

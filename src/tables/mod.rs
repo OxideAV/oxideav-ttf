@@ -12,6 +12,7 @@ pub mod cblc;
 pub mod cmap;
 pub mod colr;
 pub mod cpal;
+pub mod cvar;
 pub mod ebdt;
 pub mod ebsc;
 pub mod feature_variations;

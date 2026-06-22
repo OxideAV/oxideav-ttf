@@ -543,6 +543,20 @@ kerning, and mark attachment.
   a strong weight change on both axis signs, and the varied outline
   stays within its derived bounding box — neither held before IUP, when
   un-referenced points stayed pinned.
+- `cvar` **CVT variations** + `cvt ` **Control Value Table**
+  (ISO/IEC 14496-22:2019 §7.3.2 / §5.3.2). The `cvt ` table is exposed
+  as a raw `int16` FWORD array (`Font::cvt_count` / `Font::cvt_value`).
+  `cvar` is decoded as a single tuple variation store (§7.2.2),
+  reusing the `gvar` packed-point / packed-delta / tuple-scalar
+  machinery — embedded peaks, intermediate regions, and shared /
+  private point sets are all handled, with "point numbers" read as CVT
+  indices and **no** IUP inference (per the §7.2.2.4 NOTE; omitted CVTs
+  simply take no adjustment). `Font::cvt_deltas()` interpolates the
+  per-CVT deltas for the current instance against the `avar`-bent
+  normalised coordinates, and `Font::cvt_value_varied(i)` returns the
+  saturated varied entry. (CVTs feed TrueType bytecode hinting, which
+  this crate does not execute; the varied values are surfaced for a
+  downstream interpreter.)
 
 The companion [`oxideav-scribe`](https://github.com/OxideAV/oxideav-scribe)
 crate consumes the outlines + shaping output to rasterise text to RGBA
