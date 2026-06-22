@@ -8,11 +8,14 @@
 //! index. The reserved colour index `0xFFFF` (handled in `colr.rs`,
 //! never appears in this table) means "use foreground colour".
 //!
-//! Spec: Microsoft OpenType §"CPAL — Color Palette Table". This crate
-//! implements the v0 walker (palette + colour record array) and the v1
-//! sidecar field offsets (palette types / labels / entry labels) so
-//! consumers that care can read `palette_type(i)` for
-//! light/dark-background hints. Variable-CPAL deltas are out of scope.
+//! Spec: ISO/IEC 14496-22:2019 §5.7.11 (Microsoft OpenType §"CPAL —
+//! Color Palette Table"). This crate implements the v0 walker (palette
+//! plus colour record array) and the full v1 sidecar: palette types,
+//! palette labels, and palette-entry labels. Consumers that care can
+//! read the palette type for light/dark-background hints, the palette
+//! label for the per-palette UI name-table ID, and the palette-entry
+//! label for the per-entry UI name-table ID such as Outline or Fill.
+//! Variable-CPAL deltas are out of scope.
 //!
 //! ## Header layout (v0, fixed 12 bytes + 2*numPalettes index array)
 //!
@@ -67,7 +70,19 @@ pub struct CpalTable<'a> {
     color_record_indices_offset: usize,
     /// v1 `paletteTypesArrayOffset` (0 or table-relative).
     palette_types_array_offset: u32,
+    /// v1 `paletteLabelsArrayOffset` (0 or table-relative). Each entry
+    /// is a `uint16` name-table ID (or `0xFFFF` = no label).
+    palette_labels_array_offset: u32,
+    /// v1 `paletteEntryLabelsArrayOffset` (0 or table-relative). Each
+    /// entry is a `uint16` name-table ID (or `0xFFFF` = no label).
+    palette_entry_labels_array_offset: u32,
 }
+
+/// Sentinel `uint16` value meaning "no name-table ID was provided for
+/// this palette / palette entry" in the CPAL v1 label arrays.
+/// (ISO/IEC 14496-22:2019 §5.7.11 — "Use 0xFFFF if no name ID is
+/// provided".)
+pub const NO_NAME_ID: u16 = 0xFFFF;
 
 impl<'a> CpalTable<'a> {
     /// Parse the v0/v1 header and validate index arrays + colour records
@@ -102,19 +117,24 @@ impl<'a> CpalTable<'a> {
         }
 
         // v1: three trailing Offset32 fields immediately after
-        // colorRecordIndices.
-        let palette_types_array_offset = if version >= 1 {
+        // colorRecordIndices — offsetPaletteTypeArray,
+        // offsetPaletteLabelArray, offsetPaletteEntryLabelArray.
+        // Some real-world fonts ship a v1 header that we truncate
+        // gracefully — a missing trailer is treated as "no extras"
+        // (all three offsets 0).
+        let (
+            palette_types_array_offset,
+            palette_labels_array_offset,
+            palette_entry_labels_array_offset,
+        ) = if version >= 1 && bytes.len() >= indices_end + 12 {
             let trailer = indices_end;
-            if bytes.len() < trailer + 12 {
-                // Some real-world fonts ship a v1 header that we
-                // truncate gracefully — fall back to "no extras" by
-                // treating the missing trailer as 0.
-                0
-            } else {
-                read_u32(bytes, trailer)?
-            }
+            (
+                read_u32(bytes, trailer)?,
+                read_u32(bytes, trailer + 4)?,
+                read_u32(bytes, trailer + 8)?,
+            )
         } else {
-            0
+            (0, 0, 0)
         };
 
         Ok(Self {
@@ -126,6 +146,8 @@ impl<'a> CpalTable<'a> {
             color_records_array_offset,
             color_record_indices_offset: indices_off,
             palette_types_array_offset,
+            palette_labels_array_offset,
+            palette_entry_labels_array_offset,
         })
     }
 
@@ -208,6 +230,59 @@ impl<'a> CpalTable<'a> {
             return 0;
         }
         read_u32(self.bytes, off).unwrap_or(0)
+    }
+
+    /// v1 palette **label** for palette `palette_index`: the `name`
+    /// table ID of a user-interface string describing this palette
+    /// (e.g. "Regular", "High Contrast"). Returns `None` when the table
+    /// is v0, the `paletteLabelArray` is absent, `palette_index` is out
+    /// of range, or the slot holds the `0xFFFF` "no label" sentinel.
+    ///
+    /// Per ISO/IEC 14496-22:2019 §5.7.11 the label array has one
+    /// `uint16` name ID per palette (`paletteLabels[numPalettes]`).
+    pub fn palette_label(&self, palette_index: u16) -> Option<u16> {
+        if palette_index >= self.num_palettes
+            || self.palette_labels_array_offset == 0
+            || self.version < 1
+        {
+            return None;
+        }
+        let off = self.palette_labels_array_offset as usize + palette_index as usize * 2;
+        if off + 2 > self.bytes.len() {
+            return None;
+        }
+        match read_u16(self.bytes, off).ok()? {
+            NO_NAME_ID => None,
+            id => Some(id),
+        }
+    }
+
+    /// v1 palette **entry** label for entry `entry_index`: the `name`
+    /// table ID of a user-interface string describing this palette
+    /// entry across *all* palettes (e.g. "Outline", "Fill"). Returns
+    /// `None` when the table is v0, the `paletteEntryLabelArray` is
+    /// absent, `entry_index` is out of range, or the slot holds the
+    /// `0xFFFF` "no label" sentinel.
+    ///
+    /// Per ISO/IEC 14496-22:2019 §5.7.11 the entry-label array has one
+    /// `uint16` name ID per palette **entry**
+    /// (`paletteEntryLabels[numPaletteEntries]`) and applies uniformly
+    /// to every palette in the font.
+    pub fn palette_entry_label(&self, entry_index: u16) -> Option<u16> {
+        if entry_index >= self.num_palette_entries
+            || self.palette_entry_labels_array_offset == 0
+            || self.version < 1
+        {
+            return None;
+        }
+        let off = self.palette_entry_labels_array_offset as usize + entry_index as usize * 2;
+        if off + 2 > self.bytes.len() {
+            return None;
+        }
+        match read_u16(self.bytes, off).ok()? {
+            NO_NAME_ID => None,
+            id => Some(id),
+        }
     }
 }
 
@@ -332,6 +407,48 @@ mod tests {
         bytes
     }
 
+    /// Synthesise a fully-populated v1 header: 2 palettes of 3 entries,
+    /// with paletteTypes + paletteLabels + paletteEntryLabels arrays all
+    /// present. Palette labels: [256, 0xFFFF]; entry labels: [300, 0xFFFF,
+    /// 302].
+    fn synth_cpal_v1_full() -> Vec<u8> {
+        let header_fixed = 12;
+        let indices = 4; // 2 palettes * uint16
+        let trailer = 12; // 3 * Offset32
+        let records_off = header_fixed + indices + trailer;
+        let records_len = 6 * 4; // 6 records
+        let types_off = records_off + records_len;
+        let types_len = 2 * 4; // 2 palettes * uint32
+        let labels_off = types_off + types_len;
+        let labels_len = 2 * 2; // 2 palettes * uint16
+        let entry_labels_off = labels_off + labels_len;
+        let entry_labels_len = 3 * 2; // 3 entries * uint16
+        let total = entry_labels_off + entry_labels_len;
+
+        let mut bytes = vec![0u8; total];
+        bytes[0..2].copy_from_slice(&1u16.to_be_bytes()); // version 1
+        bytes[2..4].copy_from_slice(&3u16.to_be_bytes()); // numPaletteEntries
+        bytes[4..6].copy_from_slice(&2u16.to_be_bytes()); // numPalettes
+        bytes[6..8].copy_from_slice(&6u16.to_be_bytes()); // numColorRecords
+        bytes[8..12].copy_from_slice(&(records_off as u32).to_be_bytes());
+        bytes[12..14].copy_from_slice(&0u16.to_be_bytes()); // palette 0 base
+        bytes[14..16].copy_from_slice(&3u16.to_be_bytes()); // palette 1 base
+        bytes[16..20].copy_from_slice(&(types_off as u32).to_be_bytes());
+        bytes[20..24].copy_from_slice(&(labels_off as u32).to_be_bytes());
+        bytes[24..28].copy_from_slice(&(entry_labels_off as u32).to_be_bytes());
+        // paletteTypes
+        bytes[types_off..types_off + 4].copy_from_slice(&0x0001u32.to_be_bytes());
+        bytes[types_off + 4..types_off + 8].copy_from_slice(&0x0002u32.to_be_bytes());
+        // paletteLabels: [256, 0xFFFF]
+        bytes[labels_off..labels_off + 2].copy_from_slice(&256u16.to_be_bytes());
+        bytes[labels_off + 2..labels_off + 4].copy_from_slice(&0xFFFFu16.to_be_bytes());
+        // paletteEntryLabels: [300, 0xFFFF, 302]
+        bytes[entry_labels_off..entry_labels_off + 2].copy_from_slice(&300u16.to_be_bytes());
+        bytes[entry_labels_off + 2..entry_labels_off + 4].copy_from_slice(&0xFFFFu16.to_be_bytes());
+        bytes[entry_labels_off + 4..entry_labels_off + 6].copy_from_slice(&302u16.to_be_bytes());
+        bytes
+    }
+
     #[test]
     fn v1_palette_types() {
         let bytes = synth_cpal_v1_with_types();
@@ -340,6 +457,42 @@ mod tests {
         assert_eq!(cpal.palette_type(0), 0x0001);
         assert_eq!(cpal.palette_type(1), 0x0002);
         assert_eq!(cpal.palette_type(2), 0); // out of range
+    }
+
+    #[test]
+    fn v1_types_only_has_no_labels() {
+        // The types-only fixture sets label offsets to 0 → no labels.
+        let bytes = synth_cpal_v1_with_types();
+        let cpal = CpalTable::parse(&bytes).expect("parse");
+        assert_eq!(cpal.palette_label(0), None);
+        assert_eq!(cpal.palette_entry_label(0), None);
+    }
+
+    #[test]
+    fn v1_palette_labels() {
+        let bytes = synth_cpal_v1_full();
+        let cpal = CpalTable::parse(&bytes).expect("parse");
+        assert_eq!(cpal.palette_label(0), Some(256));
+        assert_eq!(cpal.palette_label(1), None); // 0xFFFF sentinel
+        assert_eq!(cpal.palette_label(2), None); // out of range
+    }
+
+    #[test]
+    fn v1_palette_entry_labels() {
+        let bytes = synth_cpal_v1_full();
+        let cpal = CpalTable::parse(&bytes).expect("parse");
+        assert_eq!(cpal.palette_entry_label(0), Some(300));
+        assert_eq!(cpal.palette_entry_label(1), None); // 0xFFFF sentinel
+        assert_eq!(cpal.palette_entry_label(2), Some(302));
+        assert_eq!(cpal.palette_entry_label(3), None); // out of range
+    }
+
+    #[test]
+    fn v0_has_no_labels() {
+        let bytes = synth_cpal_v0_two_palettes();
+        let cpal = CpalTable::parse(&bytes).expect("parse");
+        assert_eq!(cpal.palette_label(0), None);
+        assert_eq!(cpal.palette_entry_label(0), None);
     }
 
     #[test]

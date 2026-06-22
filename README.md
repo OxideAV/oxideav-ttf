@@ -402,6 +402,22 @@ kerning, and mark attachment.
   quality (§5.6.4 leaves the actual scaling to the rasteriser). The
   reported `width` / `height` are the scaled dimensions the resampled
   grid should target.
+- `COLR` / `CPAL` tables — the palette-indexed colour-glyph mechanism.
+  `COLR` **v0** maps a base glyph to a flat back-to-front layer stack
+  (`Font::color_layers(gid)`), each layer tagged with a `CPAL`
+  palette-entry index (`0xFFFF` = renderer foreground). `CPAL` **v0**
+  resolves `(palette, entry)` to sRGB RGBA (`Font::cpal_color`,
+  `Font::cpal_palette`); **v1** adds the full sidecar (ISO/IEC
+  14496-22:2019 §5.7.11): per-palette type flags
+  (`USABLE_WITH_LIGHT_BACKGROUND` / `USABLE_WITH_DARK_BACKGROUND` via
+  `Font::cpal_palette_type`), per-palette UI labels
+  (`Font::cpal_palette_label` → a `name`-table ID, e.g. "High
+  Contrast"), and per-entry UI labels applied across all palettes
+  (`Font::cpal_palette_entry_label` → a `name`-table ID, e.g. "Outline"
+  / "Fill"); both label accessors map the `0xFFFF` "no label" sentinel
+  to `None`. COLR **v1** paint graphs (gradients / transforms /
+  composites) remain out of scope (docs gap — the paint-graph spec is
+  not in the docs tree).
 - `SVG ` table (ISO/IEC 14496-22:2019/Amd.1:2020 §5.5.1) — the fourth
   colour-glyph mechanism, carrying per-glyph-range SVG 1.1 vector
   documents (an alternative to `COLR`/`CPAL`, `CBDT`/`CBLC`, and `sbix`).

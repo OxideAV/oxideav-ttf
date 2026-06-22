@@ -2300,6 +2300,27 @@ impl<'a> Font<'a> {
             .unwrap_or(0)
     }
 
+    /// CPAL v1 palette **label**: the `name` table ID of a UI string
+    /// naming palette `palette_index` (e.g. "Regular", "High Contrast").
+    /// Returns `None` when the font has no CPAL table, the table is v0,
+    /// the `paletteLabelArray` is absent, the palette index is out of
+    /// range, or the slot holds the `0xFFFF` "no label" sentinel. Pass
+    /// the returned ID to a `name`-table lookup to fetch the localized
+    /// string.
+    pub fn cpal_palette_label(&self, palette_index: u16) -> Option<u16> {
+        self.cpal.as_ref()?.palette_label(palette_index)
+    }
+
+    /// CPAL v1 palette-**entry** label: the `name` table ID of a UI
+    /// string naming palette entry `entry_index` (e.g. "Outline",
+    /// "Fill"). The label applies uniformly across every palette in the
+    /// font. Returns `None` when the font has no CPAL table, the table
+    /// is v0, the `paletteEntryLabelArray` is absent, the entry index is
+    /// out of range, or the slot holds the `0xFFFF` "no label" sentinel.
+    pub fn cpal_palette_entry_label(&self, entry_index: u16) -> Option<u16> {
+        self.cpal.as_ref()?.palette_entry_label(entry_index)
+    }
+
     // ---- sbix bitmap glyphs (Apple Color Emoji format) -------------------
 
     /// `true` if this font ships an `sbix` table — Apple's PNG/JPEG/

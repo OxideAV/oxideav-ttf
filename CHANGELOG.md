@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **CPAL v1 label arrays** (ISO/IEC 14496-22:2019 §5.7.11). The v1
+  trailer's `paletteLabelArray` and `paletteEntryLabelArray` are now
+  parsed alongside the previously-supported `paletteTypeArray`. New
+  `CpalTable::palette_label(i)` returns the per-palette `name`-table ID
+  (e.g. "Regular", "High Contrast") and
+  `CpalTable::palette_entry_label(j)` the per-entry ID applied across
+  all palettes (e.g. "Outline", "Fill"); both surface the `0xFFFF`
+  "no label" sentinel as `None` (exported as `cpal::NO_NAME_ID`).
+  Exposed on `Font` as `cpal_palette_label` / `cpal_palette_entry_label`.
+  Four new unit tests cover present/sentinel/out-of-range labels and the
+  v0 + types-only-no-labels degradations.
+
 - **Ergonomic variation-instance API.** Selecting a design variant no
   longer requires the caller to find an axis index by hand. New
   `Font::axis_index(tag)` / `Font::axis_value(tag)` look an axis up by
