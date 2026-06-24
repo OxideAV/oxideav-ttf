@@ -65,11 +65,11 @@ use crate::tables::{
     cmap::CmapTable, colr::ColrTable, cpal::CpalTable, cvar::CvarTable, ebdt::EbdtTable,
     ebsc::EbscTable, fvar::FvarTable, gasp::GaspTable, gdef::GdefTable, glyf::GlyfTable,
     gpos::GposTable, gsub::GsubTable, gvar::GvarTable, hdmx::HdmxTable, head::HeadTable,
-    hhea::HheaTable, hmtx::HmtxTable, hvar::HvarTable, kern::KernTable, loca::LocaTable,
-    ltsh::LtshTable, math::MathTable, maxp::MaxpTable, meta::MetaTable, mvar::MvarTable,
-    name::NameTable, os2::Os2Table, pclt::PcltTable, post::PostTable, sbix::SbixTable,
-    stat::StatTable, svg::SvgTable, vdmx::VdmxTable, vhea::VheaTable, vmtx::VmtxTable,
-    vorg::VorgTable, vvar::VvarTable,
+    hhea::HheaTable, hmtx::HmtxTable, hvar::HvarTable, jstf::JstfTable, kern::KernTable,
+    loca::LocaTable, ltsh::LtshTable, math::MathTable, maxp::MaxpTable, meta::MetaTable,
+    mvar::MvarTable, name::NameTable, os2::Os2Table, pclt::PcltTable, post::PostTable,
+    sbix::SbixTable, stat::StatTable, svg::SvgTable, vdmx::VdmxTable, vhea::VheaTable,
+    vmtx::VmtxTable, vorg::VorgTable, vvar::VvarTable,
 };
 
 pub use outline::{BBox, Contour, Point, TtOutline};
@@ -374,6 +374,10 @@ pub struct Font<'a> {
     /// MathConstants / MathGlyphInfo / MathVariants sub-tables that a
     /// math-layout engine consumes. Borrows from the on-wire slice.
     math: Option<MathTable<'a>>,
+    /// Justification table (`JSTF`, ISO/IEC 14496-22:2019 §6.3.5).
+    /// Optional; carries per-script/language justification suggestions
+    /// (GSUB/GPOS lookup enable/disable lists + extender glyphs).
+    jstf: Option<JstfTable<'a>>,
     /// Current user-space coordinate vector, one per axis (defaults
     /// to each axis's `default` value when `fvar` is present, empty
     /// vec otherwise). `set_variation_coords` updates this; the
@@ -564,6 +568,9 @@ impl<'a> Font<'a> {
         // §6.3.6 MATH table — math-layout parameters. Borrows from the
         // on-wire slice.
         let math = dir.find(b"MATH", bytes).map(MathTable::parse).transpose()?;
+        // §6.3.5 JSTF table — justification suggestions. Borrows from the
+        // on-wire slice.
+        let jstf = dir.find(b"JSTF", bytes).map(JstfTable::parse).transpose()?;
         let var_coords = match fvar.as_ref() {
             Some(f) => f.axes().iter().map(|a| a.default).collect(),
             None => Vec::new(),
@@ -615,6 +622,7 @@ impl<'a> Font<'a> {
             pclt,
             svg,
             math,
+            jstf,
             var_coords,
         })
     }
@@ -828,6 +836,17 @@ impl<'a> Font<'a> {
     /// (ISO/IEC 14496-22:2019 §6.3.6).
     pub fn math_table(&self) -> Option<&MathTable<'a>> {
         self.math.as_ref()
+    }
+
+    /// `true` when the font ships a `JSTF` table (justification data).
+    pub fn has_jstf(&self) -> bool {
+        self.jstf.is_some()
+    }
+
+    /// Borrow the parsed `JSTF` table, when the font publishes one
+    /// (ISO/IEC 14496-22:2019 §6.3.5).
+    pub fn jstf_table(&self) -> Option<&JstfTable<'a>> {
+        self.jstf.as_ref()
     }
 
     /// Borrow the parsed `post` table. `None` when the font does not

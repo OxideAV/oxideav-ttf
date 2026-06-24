@@ -488,6 +488,15 @@ kerning, and mark attachment.
   glyph-assembly parts with the extender flag, for both vertical and
   horizontal growth). Coverage lookups reuse the shared common-layout
   Coverage parser. `Font::has_math` / `Font::math_table` expose it.
+- `JSTF` table — justification suggestions (ISO/IEC 14496-22:2019
+  §6.3.5). `tables::jstf` decodes the GSUB/GPOS-shaped navigation:
+  `JstfTable` (script-record list), `JstfScript` (extender glyphs —
+  e.g. Arabic kashidas — default + per-language `JstfLangSys`),
+  `JstfLangSys` (priority-ordered suggestions), and `JstfPriority`
+  exposing all ten slots via the `JstfMod` enum — the eight
+  enable/disable slots resolve to GSUB/GPOS lookup-index lists
+  (`mod_list`), the two `JstfMax` slots to an inline lookup count.
+  `Font::has_jstf` / `Font::jstf_table` expose it.
 - Adobe Glyph List (AGL) glyph-name → Unicode resolution
   (`glyph_name_to_codepoints` / `glyph_name_to_char`). Direct table
   lookup against the embedded AGL 2.0 data: a PostScript glyph name

@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`JSTF` table — justification suggestions (ISO/IEC 14496-22:2019
+  §6.3.5).** New `tables::jstf` module decodes the GSUB/GPOS-shaped
+  navigation: `JstfTable` (header + script-record list, `script_tags` /
+  `script(tag)`), `JstfScript` (`extender_glyphs` — e.g. Arabic
+  kashidas, `default_lang_sys`, `lang_sys(tag)` / `lang_sys_tags`),
+  `JstfLangSys` (priority-ordered `priority(index)`), and `JstfPriority`
+  exposing all ten slots through the `JstfMod` enum — `mod_list(slot)`
+  returns the GSUB/GPOS lookup-list indices in the
+  `Jstf{GSUB,GPOS}ModList` for the eight enable/disable slots, and
+  `jstf_max_lookup_count` reports the inline JstfMax lookup count for the
+  two JstfMax slots. `Font::has_jstf` / `Font::jstf_table` expose it.
+  Validated locally, as a black-box check, against system fonts that
+  carry an `arab`-script JSTF table — fixtures not committed.
+
 - **`MATH` table — mathematical typesetting parameters (ISO/IEC
   14496-22:2019 §6.3.6).** New `tables::math` module structurally
   decodes the whole MATH table and exposes typed accessors. `MathTable`
