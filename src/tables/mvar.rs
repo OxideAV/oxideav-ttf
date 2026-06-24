@@ -322,6 +322,26 @@ impl ItemVariationStore {
         self.subtables.get(index).map(|s| s.region_indexes.len())
     }
 
+    /// The region scalars for subtable `index` at `normalised_coords`,
+    /// one per region referenced by that `ItemVariationData` (in
+    /// `region_indexes` order). This is exactly the set of `k` scalars a
+    /// CFF2 `blend` operator multiplies its per-region deltas by. Empty
+    /// when the subtable index is out of range.
+    pub fn region_scalars(&self, index: usize, normalised_coords: &[f32]) -> Vec<f32> {
+        let Some(sub) = self.subtables.get(index) else {
+            return Vec::new();
+        };
+        sub.region_indexes
+            .iter()
+            .map(|&ri| {
+                self.regions
+                    .get(ri as usize)
+                    .map(|r| region_scalar(r, normalised_coords))
+                    .unwrap_or(0.0)
+            })
+            .collect()
+    }
+
     /// Interpolated delta for `(outer, inner)` against
     /// `normalised_coords`. `None` when either index is out of range.
     pub fn delta(&self, outer: u16, inner: u16, normalised_coords: &[f32]) -> Option<f32> {

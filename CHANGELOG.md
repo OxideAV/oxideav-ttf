@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **CFF2 per-instance variation — `blend` now interpolates at non-default
+  coordinates.** The CFF2 charstring interpreter's `blend` (16) operator
+  computes the full variation sum `default + Σ scalarᵣ · deltaᵣ` rather
+  than only collapsing to defaults, with the per-`vsindex` region scalars
+  computed from the VariationStore at the target instance via the new
+  `mvar::ItemVariationStore::region_scalars(index, coords)`.
+  `Cff2Table::glyph_outline_at(gid, normalised_coords)` renders a glyph
+  at any instance (`glyph_outline` stays the default-instance shortcut),
+  and `Font::glyph_outline` now feeds the avar-bent normalised coordinate
+  vector into the CFF2 path when the caller has set non-default axis
+  coordinates — so a variable CFF2 font's outlines retarget with
+  `Font::set_variation_coords` just like the TrueType `gvar` path. New
+  `Cff2Table::vsindex_count` / `region_count` accessors. Verified against
+  a system variable CFF2 font (setting the weight axis to its extreme
+  retargets ~all glyph outlines) — fixture not committed.
+
 - **`CFF2` table — variable PostScript outlines (OpenType CFF2).** New
   `tables::cff2` module walks the CFF2 container (fixed 5-byte header +
   `topDictSize`, Top DICT, Global Subr INDEX, CharStrings INDEX,

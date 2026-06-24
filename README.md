@@ -482,15 +482,19 @@ kerning, and mark attachment.
   `topDictSize`, Top DICT, Global Subr INDEX, CharStrings INDEX,
   VariationStore, the always-present FDArray + optional FDSelect formats
   0/3, per-Font-DICT Private DICT + local subrs + default `vsindex`) and
-  renders the **default-instance** outline of each glyph. CFF2 INDEXes
-  carry a 32-bit count (`Index::parse_wide`); the shared Type 2
+  renders the outline of each glyph **at any variation instance**. CFF2
+  INDEXes carry a 32-bit count (`Index::parse_wide`); the shared Type 2
   interpreter has a CFF2 mode that suppresses the width prefix, ends at
   the charstring's data boundary, and implements `vsindex` / `blend` —
-  `blend` collapses each blended operand to its default value (deltas
-  dropped via the per-`vsindex` region count from the VariationStore).
-  `Font::glyph_outline` falls back to CFF2 when `glyf`/`CFF ` are
-  absent; `Font::has_cff2_outlines` / `cff2_table` expose it. Per-instance
-  CFF2 variation (blend at non-default coordinates) is future work.
+  `blend` computes `default + Σ scalarᵣ · deltaᵣ` using the per-`vsindex`
+  region scalars read from the VariationStore at the target instance
+  (`mvar::ItemVariationStore::region_scalars`), collapsing to the default
+  shape when coordinates are unset. `Cff2Table::glyph_outline_at(gid,
+  coords)` renders any instance; `Font::glyph_outline` feeds the
+  avar-bent normalised coordinates into the CFF2 path, so a variable CFF2
+  font retargets with `Font::set_variation_coords` just like the `gvar`
+  path. `Font::glyph_outline` falls back to CFF2 when `glyf`/`CFF ` are
+  absent; `Font::has_cff2_outlines` / `cff2_table` expose it.
 - `MATH` table — mathematical typesetting parameters (ISO/IEC
   14496-22:2019 §6.3.6). `tables::math` decodes the full table:
   `MathConstants` (the four scalar fields, all 51 `MathValueRecord`

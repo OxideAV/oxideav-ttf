@@ -74,14 +74,15 @@ pub struct Interp<'a> {
     /// no `endchar`; the `blend` (16) and `vsindex` (15) variation
     /// operators are recognised. In CFF (non-CFF2) mode they are absent.
     cff2: bool,
-    /// `(region_counts_by_vsindex)` — for CFF2 `blend`, the number of
-    /// variation regions `k` selected by the current `vsindex`. We render
-    /// the **default instance**, so `blend` keeps only the default values
-    /// and discards `n * k + 1` operands. `vsindex` updates the active
-    /// region count from this table.
-    vs_region_counts: Vec<usize>,
-    /// Active region count `k` for the current `vsindex` (default 0).
-    active_k: usize,
+    /// Per-`vsindex` region scalars for the current variation instance.
+    /// `vs_region_scalars[i]` holds the `k` scalars (one per region) the
+    /// CFF2 `blend` operator multiplies its deltas by when `vsindex == i`.
+    /// For the **default instance** every scalar is zero, so `blend`
+    /// keeps only the default values; at a non-default instance the
+    /// blended value is `default + Σ scalar_r · delta_r`.
+    vs_region_scalars: Vec<Vec<f32>>,
+    /// Active scalars `k` for the current `vsindex` (default index 0).
+    active_scalars: Vec<f32>,
 }
 
 impl<'a> Interp<'a> {
@@ -103,21 +104,24 @@ impl<'a> Interp<'a> {
             open: false,
             transient: Vec::new(),
             cff2: false,
-            vs_region_counts: Vec::new(),
-            active_k: 0,
+            vs_region_scalars: Vec::new(),
+            active_scalars: Vec::new(),
         }
     }
 
-    /// Create a CFF2 interpreter for the **default instance**. `vsindex`
-    /// 0 is active initially; `vs_region_counts[i]` gives the region
-    /// count `k` for `vsindex == i` (from the font's VariationStore). The
-    /// width prefix is suppressed (CFF2 charstrings carry no width).
+    /// Create a CFF2 interpreter. `vsindex` 0 is active initially;
+    /// `vs_region_scalars[i]` holds the region scalars for `vsindex == i`
+    /// at the target variation instance (from the font's VariationStore).
+    /// For the **default instance** pass all-zero scalar vectors (or
+    /// vectors of the correct length filled with zeros) and `blend`
+    /// collapses to the default values. The width prefix is suppressed
+    /// (CFF2 charstrings carry no width).
     pub fn new_cff2(
         global_subrs: Index<'a>,
         local_subrs: Index<'a>,
-        vs_region_counts: Vec<usize>,
+        vs_region_scalars: Vec<Vec<f32>>,
     ) -> Self {
-        let active_k = vs_region_counts.first().copied().unwrap_or(0);
+        let active_scalars = vs_region_scalars.first().cloned().unwrap_or_default();
         Self {
             global_subrs,
             local_subrs,
@@ -135,8 +139,8 @@ impl<'a> Interp<'a> {
             open: false,
             transient: Vec::new(),
             cff2: true,
-            vs_region_counts,
-            active_k,
+            vs_region_scalars,
+            active_scalars,
         }
     }
 
@@ -231,26 +235,38 @@ impl<'a> Interp<'a> {
             15 if self.cff2 => {
                 if let Some(idx) = self.stack.pop() {
                     let i = idx.max(0.0) as usize;
-                    self.active_k = self.vs_region_counts.get(i).copied().unwrap_or(0);
+                    self.active_scalars =
+                        self.vs_region_scalars.get(i).cloned().unwrap_or_default();
                 }
                 self.stack.clear();
             }
-            // CFF2 blend (16): collapse blended operands to their default
-            // values. Stack: [... n default values, n*k deltas, n]. We
-            // render the default instance, so keep the n defaults in place
-            // and drop the n*k deltas (the trailing operands above them).
+            // CFF2 blend (16): interpolate blended operands at the active
+            // variation instance. Stack: [... n default values, n*k
+            // deltas, n], where the n*k deltas are grouped as n runs of k
+            // (one delta per region). Each default value becomes
+            // `default + Σ scalar_r · delta_r`; the deltas are consumed,
+            // leaving the n blended values in place. At the default
+            // instance every scalar is zero, so the defaults pass through.
             16 if self.cff2 => {
                 if let Some(n_f) = self.stack.pop() {
                     let n = n_f.max(0.0) as usize;
-                    let k = self.active_k;
+                    let k = self.active_scalars.len();
                     let drop = n * k;
                     let len = self.stack.len();
                     if drop <= len && n <= len - drop {
-                        // The deltas are the top `drop` operands, sitting
-                        // above the `n` default values. Remove them and
-                        // leave the defaults on the stack for the next op.
                         let defaults_start = len - drop - n;
-                        // Truncate off the deltas; defaults already precede.
+                        // Apply each region's delta to its default value.
+                        for j in 0..n {
+                            let mut acc = self.stack[defaults_start + j];
+                            for (r, &scalar) in self.active_scalars.iter().enumerate() {
+                                if scalar != 0.0 {
+                                    let delta = self.stack[defaults_start + n + j * k + r];
+                                    acc += scalar as f64 * delta;
+                                }
+                            }
+                            self.stack[defaults_start + j] = acc;
+                        }
+                        // Drop the deltas; the blended defaults remain.
                         self.stack.truncate(defaults_start + n);
                     }
                 }
@@ -809,5 +825,69 @@ fn clamp_i16(v: f64) -> i16 {
         i16::MAX
     } else {
         r as i16
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tables::cff::Index;
+
+    /// Encode a small signed integer as a one-byte Type 2 operand
+    /// (range -107..=107: byte = v + 139).
+    fn op1(v: i32) -> u8 {
+        (v + 139) as u8
+    }
+
+    /// CFF2 blend at the default instance (all scalars 0) keeps the
+    /// default values: `100 40 1 blend` leaves `100`.
+    #[test]
+    fn cff2_blend_default_instance() {
+        let empty = Index::empty_pub();
+        // vsindex 0 has one region; default-instance scalar is 0.0.
+        let mut interp = Interp::new_cff2(empty, empty, vec![vec![0.0f32]]);
+        // Charstring: 1 0 rmoveto, then 100 40 1 blend 0 rlineto.
+        let cs = vec![
+            op1(1),
+            op1(0),
+            21, // rmoveto (1,0)
+            op1(100),
+            op1(40),
+            op1(1),
+            16,     // blend -> leaves 100
+            op1(0), // dy
+            5,      // rlineto: dx=100 (blended) dy=0
+        ];
+        interp.run(&cs).unwrap();
+        let out = interp.into_outline();
+        // Start at (1,0); rlineto +100,0 -> (101,0).
+        let pts = &out.contours[0].points;
+        assert_eq!((pts[0].x, pts[0].y), (1, 0));
+        assert_eq!((pts[1].x, pts[1].y), (101, 0));
+    }
+
+    /// CFF2 blend at a non-default instance: scalar 0.5 on one region
+    /// makes `100 40 1 blend` evaluate to 100 + 40*0.5 = 120.
+    #[test]
+    fn cff2_blend_scaled_instance() {
+        let empty = Index::empty_pub();
+        let mut interp = Interp::new_cff2(empty, empty, vec![vec![0.5f32]]);
+        let cs = vec![
+            op1(1),
+            op1(0),
+            21, // rmoveto (1,0)
+            op1(100),
+            op1(40),
+            op1(1),
+            16,     // blend -> 100 + 40*0.5 = 120
+            op1(0), // dy
+            5,      // rlineto
+        ];
+        interp.run(&cs).unwrap();
+        let out = interp.into_outline();
+        let pts = &out.contours[0].points;
+        assert_eq!((pts[0].x, pts[0].y), (1, 0));
+        // 1 + 120 = 121.
+        assert_eq!((pts[1].x, pts[1].y), (121, 0));
     }
 }

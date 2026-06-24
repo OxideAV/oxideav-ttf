@@ -1015,9 +1015,21 @@ impl<'a> Font<'a> {
                 return Ok(cff.glyph_outline(glyph_id).unwrap_or_default());
             }
             if let Some(cff2) = self.cff2.as_ref() {
-                // CFF2 default-instance outline. Per-instance variation
-                // (blend at non-default coords) is future work.
-                return Ok(cff2.glyph_outline(glyph_id).unwrap_or_default());
+                // CFF2 outline at the current variation instance. When the
+                // caller has set non-default axis coordinates, the
+                // avar-bent normalised vector drives the `blend` operator;
+                // otherwise the default instance is rendered.
+                let cff2_variable = self.fvar.is_some()
+                    && !self.var_coords.is_empty()
+                    && self.coords_differ_from_default();
+                let normalised = if cff2_variable {
+                    self.normalised_coords()
+                } else {
+                    Vec::new()
+                };
+                return Ok(cff2
+                    .glyph_outline_at(glyph_id, &normalised)
+                    .unwrap_or_default());
             }
         }
         let variable =

@@ -62,9 +62,13 @@ pub struct Cff2Table<'a> {
     fd_vsindex: Vec<u16>,
     /// GID → Font DICT index (None ⇒ all glyphs use FD 0).
     fd_select: Option<FdSelect>,
-    /// Region count `k` per `vsindex` (= per VariationStore subtable).
-    /// Empty when the font has no VariationStore.
-    vs_region_counts: Vec<usize>,
+    /// The embedded VariationStore, when the font carries variations. Used
+    /// to compute per-`vsindex` region scalars for the `blend` operator
+    /// at a target instance. `None` for a non-variable CFF2.
+    ivs: Option<ItemVariationStore>,
+    /// Number of `vsindex` slots (= VariationStore subtable count), cached
+    /// so callers can size their per-vsindex scalar vectors.
+    vsindex_count: usize,
 }
 
 impl<'a> Cff2Table<'a> {
@@ -100,21 +104,20 @@ impl<'a> Cff2Table<'a> {
         let char_strings = Index::parse_wide(data, &mut cs_pos)?;
         let n_glyphs = char_strings.count();
 
-        // --- VariationStore (region counts per vsindex) --------------
-        let vs_region_counts = match top.first_int(op::VSTORE) {
+        // --- VariationStore ------------------------------------------
+        let ivs = match top.first_int(op::VSTORE) {
             Some(off) if off > 0 => {
                 let off = off as usize;
                 // The vstore is a uint16 length prefix followed by the
                 // ItemVariationStore. Skip the length word.
                 let ivs_at = off + 2;
-                let ivs =
-                    ItemVariationStore::parse(data.get(ivs_at..).ok_or(Error::UnexpectedEof)?)?;
-                (0..ivs.subtable_count())
-                    .map(|i| ivs.region_index_count(i).unwrap_or(0))
-                    .collect()
+                Some(ItemVariationStore::parse(
+                    data.get(ivs_at..).ok_or(Error::UnexpectedEof)?,
+                )?)
             }
-            _ => Vec::new(),
+            _ => None,
         };
+        let vsindex_count = ivs.as_ref().map(|s| s.subtable_count()).unwrap_or(0);
 
         // --- FDArray (always present in CFF2) ------------------------
         let fd_array_off =
@@ -151,7 +154,8 @@ impl<'a> Cff2Table<'a> {
             fd_locals,
             fd_vsindex,
             fd_select,
-            vs_region_counts,
+            ivs,
+            vsindex_count,
         })
     }
 
@@ -165,15 +169,32 @@ impl<'a> Cff2Table<'a> {
         self.data
     }
 
-    /// Number of variation regions per `vsindex` (empty for a
-    /// non-variable CFF2). Mostly useful for diagnostics / tests.
-    pub fn region_counts(&self) -> &[usize] {
-        &self.vs_region_counts
+    /// Number of `vsindex` slots (= VariationStore subtable count); 0 for
+    /// a non-variable CFF2. Mostly useful for diagnostics / tests.
+    pub fn vsindex_count(&self) -> usize {
+        self.vsindex_count
+    }
+
+    /// Number of regions referenced by `vsindex`, or 0 when out of range.
+    pub fn region_count(&self, vsindex: usize) -> usize {
+        self.ivs
+            .as_ref()
+            .and_then(|s| s.region_index_count(vsindex))
+            .unwrap_or(0)
     }
 
     /// Reconstruct the **default-instance** outline of glyph `gid`.
     /// `None` when `gid` is out of range.
     pub fn glyph_outline(&self, gid: u16) -> Option<TtOutline> {
+        self.glyph_outline_at(gid, &[])
+    }
+
+    /// Reconstruct the outline of glyph `gid` at the variation instance
+    /// given by `normalised_coords` (one normalised value per font axis,
+    /// already avar-bent). Passing an empty slice — or a font with no
+    /// VariationStore — yields the default-instance outline. `None` when
+    /// `gid` is out of range.
+    pub fn glyph_outline_at(&self, gid: u16, normalised_coords: &[f32]) -> Option<TtOutline> {
         let cs = self.char_strings.get(gid as usize)?;
         let fd = self.fd_for_gid(gid);
         let locals = self
@@ -181,18 +202,21 @@ impl<'a> Cff2Table<'a> {
             .get(fd)
             .copied()
             .unwrap_or_else(Index::empty_pub);
-        // Re-order region counts so index 0 is the FontDICT's default
-        // vsindex (the interpreter starts with active vsindex 0). We keep
-        // the full table but bias the interpreter's starting `active_k`
-        // by passing the region counts and letting an explicit `vsindex`
-        // in the charstring override; the default vsindex is folded by
-        // putting its count first.
-        let mut region_counts = self.vs_region_counts.clone();
+        // Per-vsindex region scalars at this instance. The interpreter
+        // starts at vsindex 0; the FontDICT's default vsindex is folded
+        // into slot 0 so a charstring that never issues an explicit
+        // `vsindex` still uses the right region set.
+        let mut scalars: Vec<Vec<f32>> = (0..self.vsindex_count)
+            .map(|i| match &self.ivs {
+                Some(s) => s.region_scalars(i, normalised_coords),
+                None => Vec::new(),
+            })
+            .collect();
         let default_vs = *self.fd_vsindex.get(fd).unwrap_or(&0) as usize;
-        if default_vs != 0 && default_vs < region_counts.len() {
-            region_counts.swap(0, default_vs);
+        if default_vs != 0 && default_vs < scalars.len() {
+            scalars.swap(0, default_vs);
         }
-        let mut interp = Interp::new_cff2(self.global_subrs, locals, region_counts);
+        let mut interp = Interp::new_cff2(self.global_subrs, locals, scalars);
         interp.run(cs).ok()?;
         Some(interp.into_outline())
     }
@@ -396,7 +420,7 @@ mod tests {
         let data = build_minimal_cff2();
         let cff2 = Cff2Table::parse(&data).expect("parse cff2");
         assert_eq!(cff2.glyph_count(), 2);
-        assert!(cff2.region_counts().is_empty());
+        assert_eq!(cff2.vsindex_count(), 0);
 
         let g0 = cff2.glyph_outline(0).expect("gid0");
         assert!(g0.is_empty());
