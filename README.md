@@ -476,7 +476,12 @@ kerning, and mark attachment.
   FDSelect formats 0/3 select per-glyph Font-DICT local subrs and
   `nominalWidthX`). `Font::glyph_outline` transparently falls back to
   CFF when `glyf` is absent; `Font::has_cff_outlines` / `cff_table` /
-  `is_cid_keyed` gate and expose it.
+  `is_cid_keyed` gate and expose it. Glyph names resolve through the
+  charset: the walker keeps the String INDEX and the 391 CFF standard
+  strings (Adobe TN #5176 Appendix A), so `CffTable::string_for_sid` /
+  `CffTable::glyph_name(gid)` map a glyph to its PostScript name, and
+  `Font::glyph_name` falls back to the CFF charset when the `post` table
+  has no names (the common OTTO `post` v3.0 case).
 - `CFF2` table — variable PostScript outlines (OpenType CFF2). The
   `tables::cff2` module walks the CFF2 container (fixed 5-byte header +
   `topDictSize`, Top DICT, Global Subr INDEX, CharStrings INDEX,

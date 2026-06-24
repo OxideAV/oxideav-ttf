@@ -46,6 +46,7 @@ use crate::parser::{read_u16, read_u8};
 use crate::Error;
 
 pub mod charstring;
+pub mod strings;
 
 /// Parsed `CFF ` table: the container walk plus everything needed to
 /// reconstruct a glyph outline by GID.
@@ -76,6 +77,9 @@ pub struct CffTable<'a> {
     /// Whether the charstrings are Type 2 (`CharstringType` default 2).
     /// Type 1 charstrings are out of scope; we still parse the container.
     charstring_type: i32,
+    /// String INDEX — custom strings beyond the 391 standard strings.
+    /// SID `s >= N_STD_STRINGS` resolves to `strings.get(s - N_STD_STRINGS)`.
+    strings: Index<'a>,
 }
 
 /// CIDFont-specific decode state.
@@ -106,8 +110,8 @@ impl<'a> CffTable<'a> {
         let _name = Index::parse(data, &mut pos)?;
         // --- Top DICT INDEX ------------------------------------------
         let top_dicts = Index::parse(data, &mut pos)?;
-        // --- String INDEX (skipped for outline rendering) ------------
-        let _strings = Index::parse(data, &mut pos)?;
+        // --- String INDEX (custom strings beyond the standard set) ---
+        let strings = Index::parse(data, &mut pos)?;
         // --- Global Subr INDEX ---------------------------------------
         let global_subrs = Index::parse(data, &mut pos)?;
 
@@ -153,7 +157,43 @@ impl<'a> CffTable<'a> {
             charset,
             cid,
             charstring_type,
+            strings,
         })
+    }
+
+    /// Resolve a CFF string identifier (SID) to its string. SIDs below
+    /// `strings::N_STD_STRINGS` index the predefined standard-strings
+    /// table; higher SIDs index the font's String INDEX. `None` when the
+    /// SID is out of range or the String-INDEX entry is not valid UTF-8.
+    pub fn string_for_sid(&self, sid: u16) -> Option<&str> {
+        if sid < strings::N_STD_STRINGS {
+            strings::STANDARD_STRINGS.get(sid as usize).copied()
+        } else {
+            let i = (sid - strings::N_STD_STRINGS) as usize;
+            std::str::from_utf8(self.strings.get(i)?).ok()
+        }
+    }
+
+    /// The PostScript glyph name for `gid`, resolved through the charset
+    /// (GID → SID) and [`Self::string_for_sid`]. `None` for CID-keyed
+    /// fonts (whose charset names glyphs by CID, not by string), for the
+    /// predefined-charset case, or when the SID is unresolvable.
+    pub fn glyph_name(&self, gid: u16) -> Option<&str> {
+        if self.cid.is_some() {
+            return None;
+        }
+        // The charset is empty for a predefined charset; we can only
+        // resolve names when the font ships an explicit charset.
+        if self.charset.is_empty() {
+            // GID 0 is always `.notdef`.
+            return if gid == 0 {
+                strings::STANDARD_STRINGS.first().copied()
+            } else {
+                None
+            };
+        }
+        let sid = *self.charset.get(gid as usize)?;
+        self.string_for_sid(sid)
     }
 
     /// Number of glyphs (the CharStrings INDEX count).
@@ -954,5 +994,30 @@ mod tests {
         assert_eq!((pts[3].x, pts[3].y), (100, 600));
         let b = g1.bounds.expect("bounds");
         assert_eq!((b.x_min, b.y_min, b.x_max, b.y_max), (100, 100, 600, 600));
+    }
+
+    #[test]
+    fn standard_strings_resolve() {
+        // SID 0/1/3 are predefined standard strings; spot-check a few.
+        assert_eq!(strings::STANDARD_STRINGS[0], ".notdef");
+        assert_eq!(strings::STANDARD_STRINGS[1], "space");
+        assert_eq!(strings::STANDARD_STRINGS[3], "quotedbl");
+        assert_eq!(strings::STANDARD_STRINGS[34], "A");
+        assert_eq!(strings::N_STD_STRINGS, 391);
+        assert_eq!(strings::STANDARD_STRINGS.len(), 391);
+    }
+
+    #[test]
+    fn string_for_sid_standard_and_custom() {
+        let data = build_minimal_cff();
+        let cff = CffTable::parse(&data).expect("parse cff");
+        // Standard SID.
+        assert_eq!(cff.string_for_sid(1), Some("space"));
+        assert_eq!(cff.string_for_sid(34), Some("A"));
+        // The minimal font has an empty String INDEX, so a custom SID
+        // (>= 391) is unresolvable.
+        assert_eq!(cff.string_for_sid(391), None);
+        // Out-of-range standard SID.
+        assert_eq!(cff.string_for_sid(390), Some("Semibold"));
     }
 }

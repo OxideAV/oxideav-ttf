@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **CFF glyph-name resolution — charset SID → PostScript name.** The
+  `CFF ` walker now retains the String INDEX and ships the 391 CFF
+  standard strings (Adobe TN #5176 Appendix A, in `cff::strings`).
+  `CffTable::string_for_sid(sid)` resolves any SID (standard-strings
+  table below 391, font String INDEX above), and
+  `CffTable::glyph_name(gid)` maps a glyph through the charset
+  (GID → SID → name). `Font::glyph_name` now falls back to the CFF
+  charset when the `post` table has no names — the common OTTO `post`
+  v3.0 case, where the CFF charset is the only glyph-name source.
+  Verified against a system CFF OTF (every glyph name in the first 2000
+  GIDs resolved; `'A' → "A"`, `'0' → "zero"`, `' ' → "space"`).
+
 - **CFF2 per-instance variation — `blend` now interpolates at non-default
   coordinates.** The CFF2 charstring interpreter's `blend` (16) operator
   computes the full variation sum `default + Σ scalarᵣ · deltaᵣ` rather

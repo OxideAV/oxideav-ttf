@@ -911,10 +911,15 @@ impl<'a> Font<'a> {
     /// [`Font::glyph_name_ref`] to distinguish the custom and
     /// standard-Mac branches when that matters.
     pub fn glyph_name(&self, gid: u16) -> Option<&str> {
-        match self.glyph_name_ref(gid)? {
-            GlyphNameRef::Custom(s) => Some(s),
-            GlyphNameRef::StandardMac { index } => {
+        match self.glyph_name_ref(gid) {
+            Some(GlyphNameRef::Custom(s)) => Some(s),
+            Some(GlyphNameRef::StandardMac { index }) => {
                 crate::tables::post::standard_mac_glyph_name(index)
+            }
+            None => {
+                // OTTO/CFF fonts commonly ship a `post` v3.0 (no names);
+                // the `CFF ` charset is then the only name source.
+                self.cff.as_ref().and_then(|c| c.glyph_name(gid))
             }
         }
     }
