@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`CFF2` table — variable PostScript outlines (OpenType CFF2).** New
+  `tables::cff2` module walks the CFF2 container (fixed 5-byte header +
+  `topDictSize`, Top DICT, Global Subr INDEX, CharStrings INDEX,
+  VariationStore, the always-present FDArray + optional FDSelect formats
+  0/3, per-Font-DICT Private DICT with local subrs and default
+  `vsindex`) and renders the **default-instance** outline of each glyph.
+  CFF2 INDEXes use a 32-bit count — the shared CFF INDEX reader gained an
+  `Index::parse_wide` variant for this, and the DICT operator range was
+  widened to admit CFF2's `blend` (23) / `vstore` (24) DICT operators.
+  The shared Type 2 interpreter gained a CFF2 mode (`Interp::new_cff2`)
+  that suppresses the width prefix, allows charstrings to end at their
+  data boundary (no `endchar`), and implements the `vsindex` (15) /
+  `blend` (16) charstring operators — `blend` collapses each blended
+  operand to its default value (deltas dropped via the per-`vsindex`
+  region count read from the VariationStore), so the rendered outline
+  matches the font at its default variation coordinates.
+  `Font::glyph_outline` falls back to CFF2 when `glyf`/`CFF ` are
+  absent; `Font::has_cff2_outlines` / `cff2_table` expose it. Validated
+  locally, as a black-box check, against a system variable CFF2 font
+  (hundreds of glyphs decoded, 5-region VariationStore) — not committed.
+
 - **`JSTF` table — justification suggestions (ISO/IEC 14496-22:2019
   §6.3.5).** New `tables::jstf` module decodes the GSUB/GPOS-shaped
   navigation: `JstfTable` (header + script-record list, `script_tags` /

@@ -69,6 +69,19 @@ pub struct Interp<'a> {
 
     /// Transient array for `put`/`get` (TN #5177 §4.5). Sized lazily.
     transient: Vec<f64>,
+
+    /// CFF2 mode (OpenType CFF2 §): charstrings carry no width prefix and
+    /// no `endchar`; the `blend` (16) and `vsindex` (15) variation
+    /// operators are recognised. In CFF (non-CFF2) mode they are absent.
+    cff2: bool,
+    /// `(region_counts_by_vsindex)` — for CFF2 `blend`, the number of
+    /// variation regions `k` selected by the current `vsindex`. We render
+    /// the **default instance**, so `blend` keeps only the default values
+    /// and discards `n * k + 1` operands. `vsindex` updates the active
+    /// region count from this table.
+    vs_region_counts: Vec<usize>,
+    /// Active region count `k` for the current `vsindex` (default 0).
+    active_k: usize,
 }
 
 impl<'a> Interp<'a> {
@@ -89,6 +102,41 @@ impl<'a> Interp<'a> {
             contours: Vec::new(),
             open: false,
             transient: Vec::new(),
+            cff2: false,
+            vs_region_counts: Vec::new(),
+            active_k: 0,
+        }
+    }
+
+    /// Create a CFF2 interpreter for the **default instance**. `vsindex`
+    /// 0 is active initially; `vs_region_counts[i]` gives the region
+    /// count `k` for `vsindex == i` (from the font's VariationStore). The
+    /// width prefix is suppressed (CFF2 charstrings carry no width).
+    pub fn new_cff2(
+        global_subrs: Index<'a>,
+        local_subrs: Index<'a>,
+        vs_region_counts: Vec<usize>,
+    ) -> Self {
+        let active_k = vs_region_counts.first().copied().unwrap_or(0);
+        Self {
+            global_subrs,
+            local_subrs,
+            nominal_width: 0.0,
+            stack: Vec::with_capacity(48),
+            n_stems: 0,
+            width: None,
+            // CFF2 has no width prefix: mark it already consumed so the
+            // moveto/stem handlers never strip a "width" operand.
+            width_parsed: true,
+            x: 0.0,
+            y: 0.0,
+            cur: Vec::new(),
+            contours: Vec::new(),
+            open: false,
+            transient: Vec::new(),
+            cff2: true,
+            vs_region_counts,
+            active_k,
         }
     }
 
@@ -179,6 +227,34 @@ impl<'a> Interp<'a> {
         depth: usize,
     ) -> Result<bool, CharstringError> {
         match b0 {
+            // CFF2 vsindex (15): select the active variation-region set.
+            15 if self.cff2 => {
+                if let Some(idx) = self.stack.pop() {
+                    let i = idx.max(0.0) as usize;
+                    self.active_k = self.vs_region_counts.get(i).copied().unwrap_or(0);
+                }
+                self.stack.clear();
+            }
+            // CFF2 blend (16): collapse blended operands to their default
+            // values. Stack: [... n default values, n*k deltas, n]. We
+            // render the default instance, so keep the n defaults in place
+            // and drop the n*k deltas (the trailing operands above them).
+            16 if self.cff2 => {
+                if let Some(n_f) = self.stack.pop() {
+                    let n = n_f.max(0.0) as usize;
+                    let k = self.active_k;
+                    let drop = n * k;
+                    let len = self.stack.len();
+                    if drop <= len && n <= len - drop {
+                        // The deltas are the top `drop` operands, sitting
+                        // above the `n` default values. Remove them and
+                        // leave the defaults on the stack for the next op.
+                        let defaults_start = len - drop - n;
+                        // Truncate off the deltas; defaults already precede.
+                        self.stack.truncate(defaults_start + n);
+                    }
+                }
+            }
             // hstem / vstem / hstemhm / vstemhm
             1 | 3 | 18 | 23 => {
                 self.count_stems();

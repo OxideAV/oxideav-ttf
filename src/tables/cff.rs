@@ -272,28 +272,50 @@ impl<'a> Index<'a> {
         }
     }
 
-    /// Parse an INDEX at `*pos` within `data`, advancing `*pos` to the
-    /// first byte past the INDEX (TN #5176 §5 Note 2: the end is the
-    /// offset given by the last offset-array element).
-    fn parse(data: &'a [u8], pos: &mut usize) -> Result<Self, Error> {
+    /// `pub(crate)` alias of [`Self::empty`] so the CFF2 walker (a sibling
+    /// module) can build empty subr INDEXes.
+    pub(crate) fn empty_pub() -> Self {
+        Self::empty()
+    }
+
+    /// Parse a CFF (Card16-count) INDEX at `*pos` within `data`,
+    /// advancing `*pos` to the first byte past the INDEX (TN #5176 §5
+    /// Note 2: the end is the offset given by the last offset-array
+    /// element). `pub(crate)` so the CFF2 container walker can reuse it.
+    pub(crate) fn parse(data: &'a [u8], pos: &mut usize) -> Result<Self, Error> {
+        Self::parse_impl(data, pos, false)
+    }
+
+    /// Parse a CFF2 (Card32-count) INDEX. CFF2 INDEXes are identical to
+    /// CFF INDEXes except the leading `count` is a 32-bit value.
+    pub(crate) fn parse_wide(data: &'a [u8], pos: &mut usize) -> Result<Self, Error> {
+        Self::parse_impl(data, pos, true)
+    }
+
+    fn parse_impl(data: &'a [u8], pos: &mut usize, wide_count: bool) -> Result<Self, Error> {
         let start = *pos;
-        let count = read_u16(data, start)? as usize;
+        // CFF: Card16 count; CFF2: Card32 count.
+        let (count, after_count) = if wide_count {
+            (crate::parser::read_u32(data, start)? as usize, start + 4)
+        } else {
+            (read_u16(data, start)? as usize, start + 2)
+        };
         if count == 0 {
-            // Empty INDEX is just the 2-byte count.
-            *pos = start + 2;
+            // Empty INDEX is just the count field.
+            *pos = after_count;
             return Ok(Self {
                 data,
                 count: 0,
                 off_size: 1,
-                offsets_at: start + 2,
-                data_base: start + 2,
+                offsets_at: after_count,
+                data_base: after_count,
             });
         }
-        let off_size = read_u8(data, start + 2)? as usize;
+        let off_size = read_u8(data, after_count)? as usize;
         if !(1..=4).contains(&off_size) {
             return Err(Error::BadStructure("CFF INDEX offSize out of range"));
         }
-        let offsets_at = start + 3;
+        let offsets_at = after_count + 1;
         // count + 1 offsets, each off_size bytes.
         let off_array_len = (count + 1) * off_size;
         let data_base = offsets_at + off_array_len - 1;
@@ -372,8 +394,11 @@ impl Dict {
         while i < bytes.len() {
             let b0 = bytes[i];
             match b0 {
-                // Operators: 0..=21 (12 is a two-byte escape).
-                0..=21 => {
+                // Operators: 0..=21 in CFF (12 is a two-byte escape);
+                // CFF2 extends the DICT operator space with `blend` (23)
+                // and `vstore` (24), so accept 0..=24. Bytes 25..=27, 31,
+                // 255 remain reserved operand bytes.
+                0..=24 => {
                     let key = if b0 == 12 {
                         let b1 = *bytes.get(i + 1).ok_or(Error::UnexpectedEof)?;
                         i += 2;

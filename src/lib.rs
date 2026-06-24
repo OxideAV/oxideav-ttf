@@ -62,14 +62,14 @@ pub use shape::ShapedGlyph;
 use crate::parser::TableDirectory;
 use crate::tables::{
     avar::AvarTable, base::BaseTable, cbdt::CbdtTable, cblc::CblcTable, cff::CffTable,
-    cmap::CmapTable, colr::ColrTable, cpal::CpalTable, cvar::CvarTable, ebdt::EbdtTable,
-    ebsc::EbscTable, fvar::FvarTable, gasp::GaspTable, gdef::GdefTable, glyf::GlyfTable,
-    gpos::GposTable, gsub::GsubTable, gvar::GvarTable, hdmx::HdmxTable, head::HeadTable,
-    hhea::HheaTable, hmtx::HmtxTable, hvar::HvarTable, jstf::JstfTable, kern::KernTable,
-    loca::LocaTable, ltsh::LtshTable, math::MathTable, maxp::MaxpTable, meta::MetaTable,
-    mvar::MvarTable, name::NameTable, os2::Os2Table, pclt::PcltTable, post::PostTable,
-    sbix::SbixTable, stat::StatTable, svg::SvgTable, vdmx::VdmxTable, vhea::VheaTable,
-    vmtx::VmtxTable, vorg::VorgTable, vvar::VvarTable,
+    cff2::Cff2Table, cmap::CmapTable, colr::ColrTable, cpal::CpalTable, cvar::CvarTable,
+    ebdt::EbdtTable, ebsc::EbscTable, fvar::FvarTable, gasp::GaspTable, gdef::GdefTable,
+    glyf::GlyfTable, gpos::GposTable, gsub::GsubTable, gvar::GvarTable, hdmx::HdmxTable,
+    head::HeadTable, hhea::HheaTable, hmtx::HmtxTable, hvar::HvarTable, jstf::JstfTable,
+    kern::KernTable, loca::LocaTable, ltsh::LtshTable, math::MathTable, maxp::MaxpTable,
+    meta::MetaTable, mvar::MvarTable, name::NameTable, os2::Os2Table, pclt::PcltTable,
+    post::PostTable, sbix::SbixTable, stat::StatTable, svg::SvgTable, vdmx::VdmxTable,
+    vhea::VheaTable, vmtx::VmtxTable, vorg::VorgTable, vvar::VvarTable,
 };
 
 pub use outline::{BBox, Contour, Point, TtOutline};
@@ -231,6 +231,9 @@ pub struct Font<'a> {
     /// `CFF ` outlines (PostScript / Type 2 charstrings). Present in
     /// OTTO-flavoured fonts; mutually exclusive with `glyf` in practice.
     cff: Option<CffTable<'a>>,
+    /// `CFF2` outlines (variable PostScript charstrings). Present in
+    /// CFF2-flavoured variable fonts; we render the default instance.
+    cff2: Option<Cff2Table<'a>>,
     post: Option<PostTable>,
     kern: Option<KernTable<'a>>,
     gsub: Option<GsubTable<'a>>,
@@ -486,6 +489,9 @@ impl<'a> Font<'a> {
         // `CFF ` carries PostScript outlines (OTTO fonts). The tag has a
         // trailing space.
         let cff = dir.find(b"CFF ", bytes).map(CffTable::parse).transpose()?;
+        // `CFF2` carries variable PostScript outlines; we render the
+        // default instance.
+        let cff2 = dir.find(b"CFF2", bytes).map(Cff2Table::parse).transpose()?;
 
         let os2 = dir.find(b"OS/2", bytes).map(Os2Table::parse).transpose()?;
         let post = dir.find(b"post", bytes).map(PostTable::parse).transpose()?;
@@ -591,6 +597,7 @@ impl<'a> Font<'a> {
             loca,
             glyf,
             cff,
+            cff2,
             post,
             kern,
             gsub,
@@ -822,6 +829,16 @@ impl<'a> Font<'a> {
         self.cff.as_ref()
     }
 
+    /// `true` when the font carries variable PostScript (`CFF2`) outlines.
+    pub fn has_cff2_outlines(&self) -> bool {
+        self.cff2.is_some()
+    }
+
+    /// Borrow the parsed `CFF2` table, when the font ships one.
+    pub fn cff2_table(&self) -> Option<&Cff2Table<'a>> {
+        self.cff2.as_ref()
+    }
+
     /// `true` when the `CFF ` table is CID-keyed (Adobe TN #5176 §18).
     pub fn is_cid_keyed(&self) -> bool {
         self.cff.as_ref().is_some_and(|c| c.is_cid())
@@ -996,6 +1013,11 @@ impl<'a> Font<'a> {
         if self.glyf.is_none() {
             if let Some(cff) = self.cff.as_ref() {
                 return Ok(cff.glyph_outline(glyph_id).unwrap_or_default());
+            }
+            if let Some(cff2) = self.cff2.as_ref() {
+                // CFF2 default-instance outline. Per-instance variation
+                // (blend at non-default coords) is future work.
+                return Ok(cff2.glyph_outline(glyph_id).unwrap_or_default());
             }
         }
         let variable =

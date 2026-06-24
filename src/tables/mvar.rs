@@ -314,6 +314,14 @@ impl ItemVariationStore {
         self.subtables.len()
     }
 
+    /// Number of variation regions referenced by subtable `index` (its
+    /// `regionIndexCount`). This is the `k` a CFF2 `blend` operator uses
+    /// for the `vsindex`-selected ItemVariationData. `None` when the
+    /// subtable index is out of range.
+    pub fn region_index_count(&self, index: usize) -> Option<usize> {
+        self.subtables.get(index).map(|s| s.region_indexes.len())
+    }
+
     /// Interpolated delta for `(outer, inner)` against
     /// `normalised_coords`. `None` when either index is out of range.
     pub fn delta(&self, outer: u16, inner: u16, normalised_coords: &[f32]) -> Option<f32> {

@@ -477,6 +477,20 @@ kerning, and mark attachment.
   `nominalWidthX`). `Font::glyph_outline` transparently falls back to
   CFF when `glyf` is absent; `Font::has_cff_outlines` / `cff_table` /
   `is_cid_keyed` gate and expose it.
+- `CFF2` table — variable PostScript outlines (OpenType CFF2). The
+  `tables::cff2` module walks the CFF2 container (fixed 5-byte header +
+  `topDictSize`, Top DICT, Global Subr INDEX, CharStrings INDEX,
+  VariationStore, the always-present FDArray + optional FDSelect formats
+  0/3, per-Font-DICT Private DICT + local subrs + default `vsindex`) and
+  renders the **default-instance** outline of each glyph. CFF2 INDEXes
+  carry a 32-bit count (`Index::parse_wide`); the shared Type 2
+  interpreter has a CFF2 mode that suppresses the width prefix, ends at
+  the charstring's data boundary, and implements `vsindex` / `blend` —
+  `blend` collapses each blended operand to its default value (deltas
+  dropped via the per-`vsindex` region count from the VariationStore).
+  `Font::glyph_outline` falls back to CFF2 when `glyf`/`CFF ` are
+  absent; `Font::has_cff2_outlines` / `cff2_table` expose it. Per-instance
+  CFF2 variation (blend at non-default coordinates) is future work.
 - `MATH` table — mathematical typesetting parameters (ISO/IEC
   14496-22:2019 §6.3.6). `tables::math` decodes the full table:
   `MathConstants` (the four scalar fields, all 51 `MathValueRecord`
