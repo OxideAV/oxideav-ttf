@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Shaper honours the full lookupFlag skip filter on multi-glyph
+  match paths.** `Font::shape` now routes GSUB ligature matching and
+  GPOS pair-adjustment (kerning) + cursive attachment through the new
+  `Font::lookup_skips_glyph` predicate rather than an IGNORE_MARKS-only
+  check. A kern pair (or cursive entry/exit pair) separated by an
+  ignored combining mark now pairs the current glyph with the next
+  *non-skipped* glyph, the canonical IGNORE_MARKS-on-kern case, and
+  IGNORE_LIGATURES / MARK_ATTACHMENT_CLASS_FILTER / USE_MARK_FILTERING_SET
+  narrow the ligature match the same way. The interleaved mark's own
+  advance is left untouched.
+
 ### Added
 
 - **Unified lookupFlag skip predicate (§2 Common Table Formats).**

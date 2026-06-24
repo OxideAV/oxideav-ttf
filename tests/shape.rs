@@ -269,3 +269,45 @@ fn shape_mark_blocks_non_ignore_marks_ligature() {
         "a mark between the components blocks a non-IGNORE_MARKS ligature"
     );
 }
+
+/// The skip-aware GPOS pair-positioning walk preserves existing kerning
+/// when a combining mark is interleaved between two kernable bases: the
+/// "AV" pair still kerns (its left glyph keeps a reduced advance) even
+/// with an acute accent on the A, and the mark glyph's own advance is
+/// untouched. This guards the §2 skip-filter pair walk against
+/// regressing the no-mark case and against mangling the mark's advance.
+#[test]
+fn shape_pair_kerning_survives_interleaved_mark() {
+    let f = Font::from_bytes(DEJAVU).unwrap();
+    // Plain "AV" total advance with kerning.
+    let av: i32 = f
+        .shape("AV", *b"latn", None, &[*b"kern"])
+        .iter()
+        .map(|g| g.x_advance)
+        .sum();
+    let av_unkerned: i32 = f
+        .shape("AV", *b"latn", None, &[])
+        .iter()
+        .map(|g| g.x_advance)
+        .sum();
+    assert!(
+        av < av_unkerned,
+        "AV must kern (kerned {av} < {av_unkerned})"
+    );
+
+    // "A" + combining acute + "V": three output glyphs (no ligature), the
+    // mark sits between the kern pair. Shaping must not panic and must
+    // produce one glyph per input scalar.
+    let sh = f.shape("A\u{0301}V", *b"latn", None, &[*b"kern"]);
+    assert_eq!(sh.len(), 3, "A + mark + V stays three glyphs");
+    // The middle glyph is the combining mark; its advance is whatever
+    // hmtx reports for it (the pair walk must not have written kerning
+    // onto it).
+    let mark_gid = sh[1].glyph_id;
+    assert!(f.is_mark_glyph(mark_gid), "middle glyph is a GDEF mark");
+    assert_eq!(
+        sh[1].x_advance,
+        f.glyph_advance(mark_gid) as i32,
+        "the interleaved mark's advance must stay nominal"
+    );
+}

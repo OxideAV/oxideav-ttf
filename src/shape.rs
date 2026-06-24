@@ -245,14 +245,18 @@ impl<'a> Font<'a> {
             4 => {
                 // Ligature substitution: N → 1, consuming a prefix from
                 // each position. The ligature inherits the cluster of its
-                // first component. When IGNORE_MARKS is set we match the
-                // ligature over the *non-mark* glyphs and remove only the
-                // consumed non-mark components, leaving interspersed marks
-                // in place (they re-anchor to the ligature during GPOS).
-                let ignore_marks = (flags & 0x0008) != 0;
+                // first component. The lookup's skip filter (§2) decides
+                // which glyphs are invisible to the match: a lookup with
+                // IGNORE_MARKS matches over the *non-mark* glyphs and
+                // removes only the consumed visible components, leaving
+                // interspersed marks in place (they re-anchor to the
+                // ligature during GPOS); IGNORE_LIGATURES /
+                // MARK_ATTACHMENT_CLASS_FILTER / USE_MARK_FILTERING_SET
+                // narrow the match the same way.
+                let mfs = self.gsub_lookup_mark_filtering_set(li);
                 let mut i = 0usize;
                 while i < buf.len() {
-                    if ignore_marks && self.is_mark_glyph(buf[i].gid) {
+                    if self.lookup_skips_glyph(flags, mfs, buf[i].gid) {
                         i += 1;
                         continue;
                     }
@@ -261,7 +265,7 @@ impl<'a> Font<'a> {
                     let mut cand_gids: Vec<u16> = Vec::new();
                     let mut cand_idx: Vec<usize> = Vec::new();
                     for (off, w) in buf[i..].iter().enumerate() {
-                        if ignore_marks && self.is_mark_glyph(w.gid) {
+                        if self.lookup_skips_glyph(flags, mfs, w.gid) {
                             continue;
                         }
                         cand_gids.push(w.gid);
@@ -447,12 +451,27 @@ impl<'a> Font<'a> {
             2 => {
                 // Pair adjustment (kerning). The legacy single-value
                 // `lookup_kerning` path extracts the x-advance applied to
-                // the left glyph of each adjacent pair. We apply it to the
-                // first glyph of each consecutive pair.
+                // the left glyph of each pair. The pair members are the
+                // current glyph and the *next non-skipped* glyph per the
+                // lookup's §2 skip filter — so a kern pair separated by an
+                // (ignored) combining mark still kerns, the canonical
+                // IGNORE_MARKS-on-kern case.
                 let gdef = self.gdef.as_ref();
-                for i in 0..out.len().saturating_sub(1) {
+                let flags = self.gpos_lookup_flags(li);
+                let mfs = self.gpos_lookup_mark_filtering_set(li);
+                for i in 0..out.len() {
+                    if self.lookup_skips_glyph(flags, mfs, out[i].glyph_id) {
+                        continue;
+                    }
+                    // Find the next glyph the lookup does not skip.
+                    let right_idx = ((i + 1)..out.len())
+                        .find(|&k| !self.lookup_skips_glyph(flags, mfs, out[k].glyph_id));
+                    let right_idx = match right_idx {
+                        Some(k) => k,
+                        None => break,
+                    };
                     let left = out[i].glyph_id;
-                    let right = out[i + 1].glyph_id;
+                    let right = out[right_idx].glyph_id;
                     let adj = self
                         .gpos
                         .as_ref()
@@ -465,9 +484,17 @@ impl<'a> Font<'a> {
                 // Cursive attachment: glyph N+1's entry anchor lands on
                 // glyph N's exit anchor. The per-glyph delta moves N+1 so
                 // its entry aligns with N's exit (x via offset, the
-                // baseline shift via y_offset).
+                // baseline shift via y_offset). Glyphs the lookup skips
+                // (§2) are invisible to the chain, so the exit of N is
+                // matched against the entry of the next *non-skipped*
+                // glyph.
+                let flags = self.gpos_lookup_flags(li);
+                let mfs = self.gpos_lookup_mark_filtering_set(li);
                 let mut prev_exit: Option<(i16, i16)> = None;
                 for g in out.iter_mut() {
+                    if self.lookup_skips_glyph(flags, mfs, g.glyph_id) {
+                        continue;
+                    }
                     if let Some(att) = self.gpos_apply_lookup_type_3(li, g.glyph_id) {
                         if let (Some((px, py)), Some((ex, ey))) = (prev_exit, att.entry) {
                             g.x_offset += (px - ex) as i32;

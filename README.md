@@ -340,10 +340,20 @@ kerning, and mark attachment.
   deltas. Variation-instance-aware feature resolution is used so a
   variable font shaped after `set_variation_coords` honours its
   FeatureVariations substitutions. Lookup `lookupFlag` bits are honoured
-  via `Font::gsub_lookup_flags` / `gpos_lookup_flags`: a ligature lookup
-  with IGNORE_MARKS (`0x0008`) matches over the non-mark glyphs and keeps
-  interspersed combining marks (to re-anchor in GPOS), while a lookup
-  without the flag stays correctly blocked by an intervening mark.
+  through the shared §2 ("Common Table Formats") skip predicate
+  `Font::lookup_skips_glyph`: IGNORE_BASE_GLYPHS (`0x0002`),
+  IGNORE_LIGATURES (`0x0004`), IGNORE_MARKS (`0x0008`), the high-byte
+  MARK_ATTACHMENT_CLASS_FILTER (`0xFF00`), and USE_MARK_FILTERING_SET
+  (`0x0010`) all resolve against the GDEF GlyphClassDef /
+  MarkAttachClassDef / MarkGlyphSets structures
+  (`Font::{gsub,gpos}_lookup_mark_filtering_set` reads the trailing
+  `markFilteringSet` field at `6 + 2 * subTableCount`). The predicate
+  drives the multi-glyph match paths: a ligature lookup with
+  IGNORE_MARKS matches over the non-mark glyphs and keeps interspersed
+  combining marks (to re-anchor in GPOS) while a lookup without the flag
+  stays correctly blocked by an intervening mark, and GPOS pair-kerning +
+  cursive attachment pair the current glyph with the next *non-skipped*
+  glyph so a kern pair separated by an ignored mark still kerns.
   Validated against DejaVu Sans (Latin
   `kern` advance reduction + `liga` ligation) and Noto Sans Arabic
   (`init`/`medi`/`fina` joining + `mark` mark-to-base attachment).
