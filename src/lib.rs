@@ -61,14 +61,15 @@ pub use shape::ShapedGlyph;
 
 use crate::parser::TableDirectory;
 use crate::tables::{
-    avar::AvarTable, base::BaseTable, cbdt::CbdtTable, cblc::CblcTable, cmap::CmapTable,
-    colr::ColrTable, cpal::CpalTable, cvar::CvarTable, ebdt::EbdtTable, ebsc::EbscTable,
-    fvar::FvarTable, gasp::GaspTable, gdef::GdefTable, glyf::GlyfTable, gpos::GposTable,
-    gsub::GsubTable, gvar::GvarTable, hdmx::HdmxTable, head::HeadTable, hhea::HheaTable,
-    hmtx::HmtxTable, hvar::HvarTable, kern::KernTable, loca::LocaTable, ltsh::LtshTable,
-    maxp::MaxpTable, meta::MetaTable, mvar::MvarTable, name::NameTable, os2::Os2Table,
-    pclt::PcltTable, post::PostTable, sbix::SbixTable, stat::StatTable, svg::SvgTable,
-    vdmx::VdmxTable, vhea::VheaTable, vmtx::VmtxTable, vorg::VorgTable, vvar::VvarTable,
+    avar::AvarTable, base::BaseTable, cbdt::CbdtTable, cblc::CblcTable, cff::CffTable,
+    cmap::CmapTable, colr::ColrTable, cpal::CpalTable, cvar::CvarTable, ebdt::EbdtTable,
+    ebsc::EbscTable, fvar::FvarTable, gasp::GaspTable, gdef::GdefTable, glyf::GlyfTable,
+    gpos::GposTable, gsub::GsubTable, gvar::GvarTable, hdmx::HdmxTable, head::HeadTable,
+    hhea::HheaTable, hmtx::HmtxTable, hvar::HvarTable, kern::KernTable, loca::LocaTable,
+    ltsh::LtshTable, maxp::MaxpTable, meta::MetaTable, mvar::MvarTable, name::NameTable,
+    os2::Os2Table, pclt::PcltTable, post::PostTable, sbix::SbixTable, stat::StatTable,
+    svg::SvgTable, vdmx::VdmxTable, vhea::VheaTable, vmtx::VmtxTable, vorg::VorgTable,
+    vvar::VvarTable,
 };
 
 pub use outline::{BBox, Contour, Point, TtOutline};
@@ -227,6 +228,9 @@ pub struct Font<'a> {
     /// outlines to address.
     loca: Option<LocaTable<'a>>,
     glyf: Option<GlyfTable<'a>>,
+    /// `CFF ` outlines (PostScript / Type 2 charstrings). Present in
+    /// OTTO-flavoured fonts; mutually exclusive with `glyf` in practice.
+    cff: Option<CffTable<'a>>,
     post: Option<PostTable>,
     kern: Option<KernTable<'a>>,
     gsub: Option<GsubTable<'a>>,
@@ -470,6 +474,9 @@ impl<'a> Font<'a> {
             }
         };
         let glyf = dir.find(b"glyf", bytes).map(GlyfTable::new);
+        // `CFF ` carries PostScript outlines (OTTO fonts). The tag has a
+        // trailing space.
+        let cff = dir.find(b"CFF ", bytes).map(CffTable::parse).transpose()?;
 
         let os2 = dir.find(b"OS/2", bytes).map(Os2Table::parse).transpose()?;
         let post = dir.find(b"post", bytes).map(PostTable::parse).transpose()?;
@@ -568,6 +575,7 @@ impl<'a> Font<'a> {
             vorg,
             loca,
             glyf,
+            cff,
             post,
             kern,
             gsub,
@@ -786,6 +794,22 @@ impl<'a> Font<'a> {
         self.post.is_some()
     }
 
+    /// `true` when the font carries PostScript (`CFF `) outlines rather
+    /// than (or in addition to) TrueType `glyf` outlines.
+    pub fn has_cff_outlines(&self) -> bool {
+        self.cff.is_some()
+    }
+
+    /// Borrow the parsed `CFF ` table, when the font ships one.
+    pub fn cff_table(&self) -> Option<&CffTable<'a>> {
+        self.cff.as_ref()
+    }
+
+    /// `true` when the `CFF ` table is CID-keyed (Adobe TN #5176 §18).
+    pub fn is_cid_keyed(&self) -> bool {
+        self.cff.as_ref().is_some_and(|c| c.is_cid())
+    }
+
     /// Borrow the parsed `post` table. `None` when the font does not
     /// publish one.
     pub fn post_table(&self) -> Option<&PostTable> {
@@ -925,6 +949,15 @@ impl<'a> Font<'a> {
     pub fn glyph_outline(&self, glyph_id: u16) -> Result<TtOutline, Error> {
         if glyph_id >= self.maxp.num_glyphs {
             return Err(Error::GlyphOutOfRange(glyph_id));
+        }
+        // OTTO (PostScript-outline) fonts carry no `glyf`; reconstruct the
+        // outline from the `CFF ` Type 2 charstring instead. CFF outlines
+        // are not gvar-variable in this crate (CFF2 is a separate table),
+        // so the variation path below never applies to them.
+        if self.glyf.is_none() {
+            if let Some(cff) = self.cff.as_ref() {
+                return Ok(cff.glyph_outline(glyph_id).unwrap_or_default());
+            }
         }
         let variable =
             self.gvar.is_some() && !self.var_coords.is_empty() && self.coords_differ_from_default();

@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`CFF ` table — PostScript outlines via a Type 2 charstring
+  interpreter (Adobe TN #5176 + #5177).** OTTO-flavoured fonts (no
+  `glyf`) now produce glyph outlines. The new `tables::cff` module walks
+  the CFF container (fixed header + Name / Top DICT / String / Global
+  Subr INDEXes, then the Top-DICT-referenced CharStrings INDEX, charset,
+  Private DICT + local subrs), decodes DICTs (all integer/real operand
+  encodings, one- and two-byte operators), and runs the per-glyph Type 2
+  charstring through a full interpreter: every path operator
+  (`rmoveto`/`hmoveto`/`vmoveto`, `rlineto`/`hlineto`/`vlineto`, the
+  `rrcurveto`/`hhcurveto`/`vvcurveto`/`hvcurveto`/`vhcurveto`/`rcurveline`/`rlinecurve`
+  curves, the `flex`/`hflex`/`hflex1`/`flex1` family), the hint operators
+  (`hstem`/`vstem`/`hstemhm`/`vstemhm` plus `hintmask`/`cntrmask` mask-byte
+  skipping), the arithmetic / storage / conditional escaped operators
+  (`add`…`ifelse`, `put`/`get`, `index`/`roll`/`dup`/`exch`/`drop`), and
+  biased `callsubr`/`callgsubr`/`return`/`endchar` with depth-bounded
+  recursion. Cubic Beziers are flattened to on-curve polylines so CFF and
+  TrueType outlines share one `TtOutline` type. CID-keyed fonts are
+  supported end-to-end: `ROS` triggers the FDArray + FDSelect (formats 0
+  and 3) path so each glyph picks the correct Font-DICT local subrs and
+  `nominalWidthX`. charset formats 0/1/2 are decoded to per-GID SID/CID.
+  `Font::glyph_outline` transparently falls back to CFF when `glyf` is
+  absent; new accessors `Font::has_cff_outlines`, `Font::cff_table`,
+  `Font::is_cid_keyed`, plus `CffTable::glyph_outline`/`glyph_width`/
+  `sid_for_gid`.
+
 ### Changed
 
 - **Shaper honours the full lookupFlag skip filter on multi-glyph

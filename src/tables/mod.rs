@@ -9,6 +9,7 @@ pub mod avar;
 pub mod base;
 pub mod cbdt;
 pub mod cblc;
+pub mod cff;
 pub mod cmap;
 pub mod colr;
 pub mod cpal;
