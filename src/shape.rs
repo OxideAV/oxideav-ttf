@@ -552,12 +552,28 @@ impl<'a> Font<'a> {
     /// nearest preceding attachment glyph (a base for mark-to-base, a
     /// mark for mark-to-mark) that the lookup binds it to, and offset the
     /// mark so its anchor lands on the base's anchor.
+    ///
+    /// The candidate attachment glyph is the nearest preceding glyph the
+    /// lookup's §2 skip filter does *not* ignore: a mark-to-base lookup
+    /// almost always sets IGNORE_MARKS so the scan steps over interspersed
+    /// marks and lands on the base, while a mark-to-mark (`mkmk`) lookup
+    /// leaves marks visible so it pairs with the immediately preceding
+    /// mark. The current mark itself is left unattached when the lookup
+    /// skips it.
     fn apply_mark_attach(&self, out: &mut [ShapedGlyph], li: u16, to_mark: bool) {
+        let flags = self.gpos_lookup_flags(li);
+        let mfs = self.gpos_lookup_mark_filtering_set(li);
         for i in 0..out.len() {
             let mark = out[i].glyph_id;
-            // Scan backwards for the attachment glyph.
+            if self.lookup_skips_glyph(flags, mfs, mark) {
+                continue;
+            }
+            // Scan backwards for the nearest non-skipped attachment glyph.
             for j in (0..i).rev() {
                 let base = out[j].glyph_id;
+                if self.lookup_skips_glyph(flags, mfs, base) {
+                    continue;
+                }
                 let hit = if to_mark {
                     self.gpos
                         .as_ref()
@@ -577,28 +593,33 @@ impl<'a> Font<'a> {
                     let between: i32 = out[j..i].iter().map(|g| g.x_advance).sum();
                     out[i].x_offset += dx as i32 - between;
                     out[i].y_offset += dy as i32;
-                    break;
                 }
-                // For mark-to-base, stop at the first non-mark glyph
-                // (the base) regardless of a hit; for mark-to-mark keep
-                // scanning only across marks.
-                if !to_mark && !self.is_mark_glyph(base) {
-                    break;
-                }
-                if to_mark && !self.is_mark_glyph(base) {
-                    break;
-                }
+                // The first non-skipped predecessor is the only attachment
+                // candidate, whether or not it produced a hit.
+                break;
             }
         }
     }
 
     /// Mark-to-ligature attachment (LookupType 5). Attaches each mark to
-    /// the nearest preceding ligature glyph at component 0.
+    /// the nearest preceding ligature glyph at component 0. The candidate
+    /// ligature is the nearest preceding glyph the lookup's §2 skip filter
+    /// does not ignore (a `mark` / mark-to-ligature lookup typically sets
+    /// IGNORE_MARKS so the scan steps over interspersed marks onto the
+    /// ligature).
     fn apply_mark_to_ligature(&self, out: &mut [ShapedGlyph], li: u16) {
+        let flags = self.gpos_lookup_flags(li);
+        let mfs = self.gpos_lookup_mark_filtering_set(li);
         for i in 0..out.len() {
             let mark = out[i].glyph_id;
+            if self.lookup_skips_glyph(flags, mfs, mark) {
+                continue;
+            }
             for j in (0..i).rev() {
                 let lig = out[j].glyph_id;
+                if self.lookup_skips_glyph(flags, mfs, lig) {
+                    continue;
+                }
                 if let Some((dx, dy)) = self
                     .gpos
                     .as_ref()
@@ -607,11 +628,9 @@ impl<'a> Font<'a> {
                     let between: i32 = out[j..i].iter().map(|g| g.x_advance).sum();
                     out[i].x_offset += dx as i32 - between;
                     out[i].y_offset += dy as i32;
-                    break;
                 }
-                if !self.is_mark_glyph(lig) {
-                    break;
-                }
+                // The first non-skipped predecessor is the only candidate.
+                break;
             }
         }
     }

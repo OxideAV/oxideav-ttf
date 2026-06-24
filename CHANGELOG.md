@@ -18,7 +18,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   *non-skipped* glyph, the canonical IGNORE_MARKS-on-kern case, and
   IGNORE_LIGATURES / MARK_ATTACHMENT_CLASS_FILTER / USE_MARK_FILTERING_SET
   narrow the ligature match the same way. The interleaved mark's own
-  advance is left untouched.
+  advance is left untouched. The GPOS mark-to-base / mark-to-mark /
+  mark-to-ligature attachment scans now locate the nearest *non-skipped*
+  preceding attachment glyph through the same predicate (replacing the
+  hard-coded "stop at first non-mark" heuristic), so a `mkmk` lookup
+  carrying MARK_ATTACHMENT_CLASS_FILTER or USE_MARK_FILTERING_SET binds
+  the mark only to glyphs in the named class / set.
 
 ### Added
 

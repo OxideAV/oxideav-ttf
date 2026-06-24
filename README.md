@@ -353,7 +353,11 @@ kerning, and mark attachment.
   combining marks (to re-anchor in GPOS) while a lookup without the flag
   stays correctly blocked by an intervening mark, and GPOS pair-kerning +
   cursive attachment pair the current glyph with the next *non-skipped*
-  glyph so a kern pair separated by an ignored mark still kerns.
+  glyph so a kern pair separated by an ignored mark still kerns. The
+  mark-to-base / mark-to-mark / mark-to-ligature attachment scans locate
+  the nearest *non-skipped* preceding attachment glyph through the same
+  predicate, so a `mkmk` lookup carrying a mark-attachment class or mark
+  filtering set binds only to glyphs in that class / set.
   Validated against DejaVu Sans (Latin
   `kern` advance reduction + `liga` ligation) and Noto Sans Arabic
   (`init`/`medi`/`fina` joining + `mark` mark-to-base attachment).
