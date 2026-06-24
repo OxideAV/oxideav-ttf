@@ -67,6 +67,41 @@ fn lt1_single_positioning_fires_on_real_arabic_glyphs() {
     );
 }
 
+/// The shared §2 lookupFlag skip predicate behaves per the bit
+/// enumeration on real GDEF-classified glyphs: FATHA (a combining mark)
+/// is skipped under IGNORE_MARKS but not IGNORE_BASE_GLYPHS, and a
+/// base letter is skipped under IGNORE_BASE_GLYPHS but not IGNORE_MARKS.
+/// With no flag bits set nothing is skipped.
+#[test]
+fn lookup_skips_glyph_honours_ignore_bits() {
+    let f = Font::from_bytes(FIXTURE).unwrap();
+    // FATHA U+064E is a combining mark (GDEF class 3).
+    let mark = f.glyph_index('\u{064E}').expect("FATHA glyph");
+    assert!(f.is_mark_glyph(mark), "FATHA should be a GDEF mark");
+    // A base Arabic letter (BEH U+0628) is GDEF class 1 (base).
+    let base = f.glyph_index('\u{0628}').expect("BEH glyph");
+    assert!(!f.is_mark_glyph(base), "BEH should not be a GDEF mark");
+
+    const IGNORE_BASE: u16 = 0x0002;
+    const IGNORE_MARKS: u16 = 0x0008;
+
+    // No flags → never skip.
+    assert!(!f.lookup_skips_glyph(0, None, mark));
+    assert!(!f.lookup_skips_glyph(0, None, base));
+
+    // IGNORE_MARKS skips the mark, leaves the base.
+    assert!(f.lookup_skips_glyph(IGNORE_MARKS, None, mark));
+    assert!(!f.lookup_skips_glyph(IGNORE_MARKS, None, base));
+
+    // IGNORE_BASE_GLYPHS skips the base, leaves the mark.
+    assert!(!f.lookup_skips_glyph(IGNORE_BASE, None, mark));
+    assert!(f.lookup_skips_glyph(IGNORE_BASE, None, base));
+
+    // Both bits together skip both.
+    assert!(f.lookup_skips_glyph(IGNORE_BASE | IGNORE_MARKS, None, mark));
+    assert!(f.lookup_skips_glyph(IGNORE_BASE | IGNORE_MARKS, None, base));
+}
+
 /// Apply GPOS LookupType 5 (mark-to-ligature) to the LAM-ALEF
 /// ligature glyph (U+FEFB) for both components × every Arabic vowel
 /// mark in U+064B..U+0652. Noto Sans Arabic anchors the marks on

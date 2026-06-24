@@ -546,6 +546,22 @@ impl<'a> GposTable<'a> {
             .unwrap_or(0)
     }
 
+    /// Return the `markFilteringSet` index of lookup `lookup_index`, or
+    /// `None` when the lookup does not carry the `USE_MARK_FILTERING_SET`
+    /// (`0x0010`) bit. See [`super::gsub::GsubTable::mark_filtering_set`]
+    /// for the §6.2.2 layout rationale — the field sits at byte offset
+    /// `6 + 2 * subTableCount`, immediately after the subtable-offset
+    /// array, and indexes the GDEF `MarkGlyphSets` structure.
+    pub fn mark_filtering_set(&self, lookup_index: u16) -> Option<u16> {
+        let lookup = lookup_table_slice(self.bytes, self.lookup_list_off, lookup_index)?;
+        let flags = read_u16(lookup, 2).ok()?;
+        if flags & 0x0010 == 0 {
+            return None;
+        }
+        let sub_count = read_u16(lookup, 4).ok()? as usize;
+        read_u16(lookup, 6 + sub_count * 2).ok()
+    }
+
     /// Apply GPOS LookupType 1 (Single Adjustment Positioning) lookup
     /// `lookup_index` to `gid`.
     ///

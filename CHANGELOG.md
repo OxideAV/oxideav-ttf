@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Unified lookupFlag skip predicate (§2 Common Table Formats).**
+  `Font::lookup_skips_glyph(flags, mark_filtering_set, gid)` implements
+  the full LookupFlag bit enumeration that controls which glyphs a
+  GSUB / GPOS lookup ignores while matching its input: `IGNORE_BASE_GLYPHS`
+  (`0x0002`), `IGNORE_LIGATURES` (`0x0004`), `IGNORE_MARKS` (`0x0008`),
+  the high-byte `MARK_ATTACHMENT_CLASS_FILTER` (`0xFF00`), and
+  `USE_MARK_FILTERING_SET` (`0x0010`) — the last two resolved against the
+  GDEF MarkAttachClassDef and MarkGlyphSets structures. The new
+  `Font::gsub_lookup_mark_filtering_set` / `gpos_lookup_mark_filtering_set`
+  accessors (backed by `GsubTable::mark_filtering_set` /
+  `GposTable::mark_filtering_set`) read the trailing `markFilteringSet`
+  field at `6 + 2 * subTableCount` only when the `USE_MARK_FILTERING_SET`
+  bit is set. With no GDEF the predicate never skips, matching the spec's
+  "a GlyphClassDef table must be present" requirement.
+
 - **Fused varied-metric accessors.** `Font::glyph_advance_varied(gid)`
   and `Font::glyph_lsb_varied(gid)` add the current instance's `HVAR`
   delta (§7.3.5.2/§7.3.5.3) to the static `hmtx` advance / LSB, rounded

@@ -190,6 +190,26 @@ impl<'a> GsubTable<'a> {
             .unwrap_or(0)
     }
 
+    /// Return the `markFilteringSet` index of lookup `lookup_index`, or
+    /// `None` when the lookup does not carry the `USE_MARK_FILTERING_SET`
+    /// (`0x0010`) bit.
+    ///
+    /// Per the §6.2.2 Lookup table layout, `markFilteringSet` is the
+    /// trailing `uint16` after the `subtableOffsets[subTableCount]` array
+    /// — i.e. at byte offset `6 + 2 * subTableCount` — and is "only
+    /// present if the USE_MARK_FILTERING_SET lookup flag is set". The
+    /// value indexes the GDEF `MarkGlyphSets` structure; the layout
+    /// engine then skips all mark glyphs *not* in that set.
+    pub fn mark_filtering_set(&self, lookup_index: u16) -> Option<u16> {
+        let lookup = lookup_table_slice(self.bytes, self.lookup_list_off, lookup_index)?;
+        let flags = read_u16(lookup, 2).ok()?;
+        if flags & 0x0010 == 0 {
+            return None;
+        }
+        let sub_count = read_u16(lookup, 4).ok()? as usize;
+        read_u16(lookup, 6 + sub_count * 2).ok()
+    }
+
     /// Return all features active for `script_tag` under `lang_tag`.
     ///
     /// `lang_tag = None` → use the script's `DefaultLangSys`. If
@@ -2961,6 +2981,55 @@ mod tests {
         let other = build_singleton_gsub(LOOKUP_SINGLE_SUBST, &build_alt_subst_sub());
         let g2 = GsubTable::parse(&other).unwrap();
         assert_eq!(g2.apply_lookup_type_3(0, 5, 0), None);
+    }
+
+    // ----- lookupFlag.markFilteringSet (§6.2.2) -----
+
+    /// Hand-build a GSUB whose single lookup carries
+    /// `flags = 0x0210` (MARK_ATTACHMENT_CLASS_FILTER class 2 +
+    /// USE_MARK_FILTERING_SET) and a trailing `markFilteringSet = 3`,
+    /// then confirm the accessor reads the field at
+    /// `6 + 2 * subTableCount` and reports `None` when the flag is clear.
+    #[test]
+    fn mark_filtering_set_reads_trailing_field() {
+        // Lookup with USE_MARK_FILTERING_SET → markFilteringSet present.
+        // Layout: lookupType(1) flag(0x0210) subTableCount(1)
+        //         subtableOffsets[1] markFilteringSet(3) [subtable body].
+        // The subtable body is irrelevant to this accessor; point the
+        // offset past the markFilteringSet field at byte 8.
+        let mut lookup = Vec::new();
+        lookup.extend_from_slice(&1u16.to_be_bytes()); // lookupType
+        lookup.extend_from_slice(&0x0210u16.to_be_bytes()); // lookupFlag
+        lookup.extend_from_slice(&1u16.to_be_bytes()); // subTableCount
+        lookup.extend_from_slice(&10u16.to_be_bytes()); // subtableOffsets[0]
+        lookup.extend_from_slice(&3u16.to_be_bytes()); // markFilteringSet
+                                                       // pad to the subtable offset (10) with two dummy bytes.
+        lookup.extend_from_slice(&[0u8, 0u8]);
+
+        let mut lookup_list = Vec::new();
+        lookup_list.extend_from_slice(&1u16.to_be_bytes()); // count
+        lookup_list.extend_from_slice(&4u16.to_be_bytes()); // offset[0]
+        lookup_list.extend_from_slice(&lookup);
+
+        let mut gsub = Vec::new();
+        gsub.extend_from_slice(&1u16.to_be_bytes()); // major
+        gsub.extend_from_slice(&0u16.to_be_bytes()); // minor
+        gsub.extend_from_slice(&0u16.to_be_bytes()); // scriptList
+        gsub.extend_from_slice(&0u16.to_be_bytes()); // featureList
+        gsub.extend_from_slice(&10u16.to_be_bytes()); // lookupList
+        gsub.extend_from_slice(&lookup_list);
+
+        let g = GsubTable::parse(&gsub).unwrap();
+        assert_eq!(g.lookup_flags(0), 0x0210);
+        assert_eq!(g.mark_filtering_set(0), Some(3));
+
+        // A lookup without the 0x0010 bit reports None even though the
+        // trailing bytes would parse as a u16.
+        let plain = build_singleton_gsub(LOOKUP_ALTERNATE_SUBST, &build_alt_subst_sub());
+        let gp = GsubTable::parse(&plain).unwrap();
+        assert_eq!(gp.mark_filtering_set(0), None);
+        // Out-of-range index is None.
+        assert_eq!(g.mark_filtering_set(99), None);
     }
 
     // ----- LookupType 5: Contextual Substitution -----

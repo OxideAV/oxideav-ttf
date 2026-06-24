@@ -2076,6 +2076,88 @@ impl<'a> Font<'a> {
             .unwrap_or(0)
     }
 
+    /// The `markFilteringSet` index of GSUB lookup `lookup_index`, or
+    /// `None` when the lookup does not carry `USE_MARK_FILTERING_SET`
+    /// (`0x0010`). When present, the value indexes the GDEF
+    /// `MarkGlyphSets` structure and the layout engine skips every mark
+    /// glyph *not* in that set ([`Self::shape`] honours this through the
+    /// shared skip predicate).
+    pub fn gsub_lookup_mark_filtering_set(&self, lookup_index: u16) -> Option<u16> {
+        self.gsub
+            .as_ref()
+            .and_then(|g| g.mark_filtering_set(lookup_index))
+    }
+
+    /// The `markFilteringSet` index of GPOS lookup `lookup_index`, or
+    /// `None` when the lookup does not carry `USE_MARK_FILTERING_SET`.
+    /// See [`Self::gsub_lookup_mark_filtering_set`].
+    pub fn gpos_lookup_mark_filtering_set(&self, lookup_index: u16) -> Option<u16> {
+        self.gpos
+            .as_ref()
+            .and_then(|g| g.mark_filtering_set(lookup_index))
+    }
+
+    /// The shared §2 ("Common Table Formats") lookup skip predicate:
+    /// returns `true` when a lookup with `flags` (its `lookupFlag`) and
+    /// the optional `mark_filtering_set` index must *skip* `glyph_id`
+    /// while matching its input / backtrack / lookahead sequences.
+    ///
+    /// The rule, per the LookupFlag bit enumeration:
+    ///
+    /// * `IGNORE_BASE_GLYPHS` (`0x0002`) — skip glyphs whose GDEF
+    ///   GlyphClassDef class is *base* (1).
+    /// * `IGNORE_LIGATURES` (`0x0004`) — skip glyphs whose class is
+    ///   *ligature* (2).
+    /// * `IGNORE_MARKS` (`0x0008`) — skip every mark glyph (class 3).
+    /// * `MARK_ATTACHMENT_CLASS_FILTER` (high byte `0xFF00`, non-zero) —
+    ///   skip every *mark* glyph whose GDEF MarkAttachClassDef class is
+    ///   not the specified class. Non-mark glyphs are unaffected.
+    /// * `USE_MARK_FILTERING_SET` (`0x0010`) — skip every *mark* glyph
+    ///   that is not a member of the GDEF mark glyph set named by
+    ///   `mark_filtering_set`.
+    ///
+    /// `IGNORE_MARKS` subsumes both mark-specific filters (a lookup that
+    /// already skips all marks ignores the mark-class / filtering-set
+    /// qualifiers). With no GDEF table the predicate degenerates to
+    /// "never skip", matching the §2 requirement that a GlyphClassDef
+    /// table be present whenever a skip bit is set.
+    pub fn lookup_skips_glyph(
+        &self,
+        flags: u16,
+        mark_filtering_set: Option<u16>,
+        glyph_id: u16,
+    ) -> bool {
+        let gdef = match self.gdef.as_ref() {
+            Some(g) => g,
+            None => return false,
+        };
+        let class = gdef.glyph_class(glyph_id);
+        if flags & 0x0002 != 0 && class == tables::gdef::CLASS_BASE {
+            return true;
+        }
+        if flags & 0x0004 != 0 && class == tables::gdef::CLASS_LIGATURE {
+            return true;
+        }
+        let is_mark = class == tables::gdef::CLASS_MARK;
+        if flags & 0x0008 != 0 && is_mark {
+            return true;
+        }
+        // The two mark-class qualifiers only filter mark glyphs, and only
+        // matter when IGNORE_MARKS has not already removed every mark.
+        if is_mark {
+            let attach_class = (flags >> 8) & 0x00FF;
+            if attach_class != 0 && gdef.mark_attach_class(glyph_id) != attach_class {
+                return true;
+            }
+            if let Some(set) = mark_filtering_set {
+                if !gdef.mark_glyph_set_contains(set, glyph_id) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     // ---- color bitmap glyphs (CBDT/CBLC) ---------------------------------
 
     /// `true` if this font ships a CBDT/CBLC pair — i.e. carries
