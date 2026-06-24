@@ -196,6 +196,35 @@ impl<'a> CffTable<'a> {
         self.string_for_sid(sid)
     }
 
+    /// Reverse lookup: the lowest glyph id whose CFF charset name equals
+    /// `name`, inverting [`Self::glyph_name`]. `None` for CID-keyed fonts
+    /// or when no glyph carries the name. In the predefined-charset case
+    /// only `.notdef` (GID 0) is resolvable.
+    pub fn gid_for_name(&self, name: &str) -> Option<u16> {
+        if self.cid.is_some() {
+            return None;
+        }
+        if self.charset.is_empty() {
+            return (name == ".notdef").then_some(0);
+        }
+        self.charset
+            .iter()
+            .position(|&sid| self.string_for_sid(sid) == Some(name))
+            .map(|p| p as u16)
+    }
+
+    /// Iterate every `(gid, PostScript name)` pair the CFF charset names,
+    /// in ascending glyph-id order. Empty for CID-keyed / predefined
+    /// charsets.
+    pub fn iter_glyph_names(&self) -> impl Iterator<Item = (u16, &str)> + '_ {
+        let active = self.cid.is_none() && !self.charset.is_empty();
+        self.charset
+            .iter()
+            .enumerate()
+            .filter(move |_| active)
+            .filter_map(move |(gid, &sid)| self.string_for_sid(sid).map(|n| (gid as u16, n)))
+    }
+
     /// Number of glyphs (the CharStrings INDEX count).
     pub fn glyph_count(&self) -> u16 {
         self.char_strings.count().min(u16::MAX as usize) as u16
@@ -1019,5 +1048,18 @@ mod tests {
         assert_eq!(cff.string_for_sid(391), None);
         // Out-of-range standard SID.
         assert_eq!(cff.string_for_sid(390), Some("Semibold"));
+    }
+
+    #[test]
+    fn predefined_charset_name_lookups() {
+        // The minimal font uses the predefined (ISOAdobe) charset, so
+        // only `.notdef` resolves by name.
+        let data = build_minimal_cff();
+        let cff = CffTable::parse(&data).expect("parse cff");
+        assert_eq!(cff.glyph_name(0), Some(".notdef"));
+        assert_eq!(cff.gid_for_name(".notdef"), Some(0));
+        assert_eq!(cff.gid_for_name("A"), None);
+        // No charset names beyond `.notdef` in the predefined case.
+        assert_eq!(cff.iter_glyph_names().count(), 0);
     }
 }

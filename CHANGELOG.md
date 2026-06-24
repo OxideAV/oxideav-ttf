@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **CFF reverse glyph-name lookup + iteration.**
+  `CffTable::gid_for_name(name)` inverts the charset (name → lowest GID),
+  and `CffTable::iter_glyph_names()` walks every `(gid, name)` pair.
+  `Font::gid_for_glyph_name` and `Font::iter_glyph_names` now fall back to
+  the CFF charset when the `post` table has no names, closing the
+  bidirectional glyph-naming loop for OTTO `post` v3.0 fonts.
+  (`Font::iter_glyph_names` now returns a boxed iterator so it can yield
+  either the `post` or the CFF name stream.)
+
 - **CFF glyph-name resolution — charset SID → PostScript name.** The
   `CFF ` walker now retains the String INDEX and ships the 391 CFF
   standard strings (Adobe TN #5176 Appendix A, in `cff::strings`).

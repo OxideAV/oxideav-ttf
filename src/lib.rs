@@ -936,7 +936,12 @@ impl<'a> Font<'a> {
     /// when the font has no `post` table, the table is v3.0, or no glyph
     /// is named `name`.
     pub fn gid_for_glyph_name(&self, name: &str) -> Option<u16> {
-        self.post.as_ref()?.gid_for_name(name)
+        if let Some(gid) = self.post.as_ref().and_then(|p| p.gid_for_name(name)) {
+            return Some(gid);
+        }
+        // OTTO/CFF fonts with a `post` v3.0 (no names) resolve through the
+        // CFF charset instead.
+        self.cff.as_ref().and_then(|c| c.gid_for_name(name))
     }
 
     /// Iterate every `(glyph_id, post-table name)` pair the font
@@ -947,8 +952,20 @@ impl<'a> Font<'a> {
     /// `post` table names with an unsatisfiable reference are skipped.
     /// The iterator is empty when the font has no `post` table or the
     /// table is v3.0 (no names at all).
-    pub fn iter_glyph_names(&self) -> impl Iterator<Item = (u16, &str)> + '_ {
-        self.post.iter().flat_map(|p| p.iter_glyph_names())
+    pub fn iter_glyph_names(&self) -> Box<dyn Iterator<Item = (u16, &str)> + '_> {
+        // Prefer `post`-table names; fall back to the CFF charset for OTTO
+        // fonts whose `post` is v3.0 (no names).
+        let has_post_names = self
+            .post
+            .as_ref()
+            .is_some_and(|p| p.iter_glyph_names().next().is_some());
+        if has_post_names {
+            Box::new(self.post.iter().flat_map(|p| p.iter_glyph_names()))
+        } else if let Some(cff) = self.cff.as_ref() {
+            Box::new(cff.iter_glyph_names())
+        } else {
+            Box::new(std::iter::empty())
+        }
     }
 
     // ---- glyph lookup ------------------------------------------------------
