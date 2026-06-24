@@ -32,6 +32,7 @@ pub mod hvar;
 pub mod kern;
 pub mod loca;
 pub mod ltsh;
+pub mod math;
 pub mod maxp;
 pub mod meta;
 pub mod mvar;

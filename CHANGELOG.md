@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`MATH` table — mathematical typesetting parameters (ISO/IEC
+  14496-22:2019 §6.3.6).** New `tables::math` module structurally
+  decodes the whole MATH table and exposes typed accessors. `MathTable`
+  validates the header's three sub-table offsets; `MathConstants` reads
+  the four leading scalar fields, all 51 `MathValueRecord` constants
+  (addressed by name through the `math::constant::*` index set in spec
+  declaration order) and the trailing `radicalDegreeBottomRaisePercent`.
+  `MathGlyphInfo` resolves per-glyph `italics_correction`,
+  `top_accent_attachment`, `is_extended_shape`, and height-dependent
+  `math_kern` (all four corners, with the §6.3.6.2.9 correction-height
+  range search) via the shared common-layout Coverage parser.
+  `MathVariants` exposes `min_connector_overlap`, ready-made stretchy
+  `variants(gid, dir)`, and general glyph `assembly(gid, dir)` parts
+  (with the extender flag) for both vertical and horizontal growth.
+  `Font::has_math` / `Font::math_table` surface it. Validated locally,
+  as a black-box check, against a system math OTF (STIX-class:
+  hundreds of italic corrections, dozens of stretchy glyphs + glyph
+  assemblies decoded) — fixture not committed.
+
 - **`CFF ` table — PostScript outlines via a Type 2 charstring
   interpreter (Adobe TN #5176 + #5177).** OTTO-flavoured fonts (no
   `glyf`) now produce glyph outlines. The new `tables::cff` module walks

@@ -66,10 +66,10 @@ use crate::tables::{
     ebsc::EbscTable, fvar::FvarTable, gasp::GaspTable, gdef::GdefTable, glyf::GlyfTable,
     gpos::GposTable, gsub::GsubTable, gvar::GvarTable, hdmx::HdmxTable, head::HeadTable,
     hhea::HheaTable, hmtx::HmtxTable, hvar::HvarTable, kern::KernTable, loca::LocaTable,
-    ltsh::LtshTable, maxp::MaxpTable, meta::MetaTable, mvar::MvarTable, name::NameTable,
-    os2::Os2Table, pclt::PcltTable, post::PostTable, sbix::SbixTable, stat::StatTable,
-    svg::SvgTable, vdmx::VdmxTable, vhea::VheaTable, vmtx::VmtxTable, vorg::VorgTable,
-    vvar::VvarTable,
+    ltsh::LtshTable, math::MathTable, maxp::MaxpTable, meta::MetaTable, mvar::MvarTable,
+    name::NameTable, os2::Os2Table, pclt::PcltTable, post::PostTable, sbix::SbixTable,
+    stat::StatTable, svg::SvgTable, vdmx::VdmxTable, vhea::VheaTable, vmtx::VmtxTable,
+    vorg::VorgTable, vvar::VvarTable,
 };
 
 pub use outline::{BBox, Contour, Point, TtOutline};
@@ -369,6 +369,11 @@ pub struct Font<'a> {
     /// documents (plain UTF-8 or gzip-encoded). Records borrow from the
     /// on-wire `SVG ` byte slice — the table does not copy the markup.
     svg: Option<SvgTable<'a>>,
+    /// Math typesetting table (`MATH`, ISO/IEC 14496-22:2019 §6.3.6).
+    /// Present in fonts designed for mathematical layout; carries the
+    /// MathConstants / MathGlyphInfo / MathVariants sub-tables that a
+    /// math-layout engine consumes. Borrows from the on-wire slice.
+    math: Option<MathTable<'a>>,
     /// Current user-space coordinate vector, one per axis (defaults
     /// to each axis's `default` value when `fvar` is present, empty
     /// vec otherwise). `set_variation_coords` updates this; the
@@ -556,6 +561,9 @@ impl<'a> Font<'a> {
             .find(&SVG_TABLE_TAG, bytes)
             .map(SvgTable::parse)
             .transpose()?;
+        // §6.3.6 MATH table — math-layout parameters. Borrows from the
+        // on-wire slice.
+        let math = dir.find(b"MATH", bytes).map(MathTable::parse).transpose()?;
         let var_coords = match fvar.as_ref() {
             Some(f) => f.axes().iter().map(|a| a.default).collect(),
             None => Vec::new(),
@@ -606,6 +614,7 @@ impl<'a> Font<'a> {
             meta,
             pclt,
             svg,
+            math,
             var_coords,
         })
     }
@@ -808,6 +817,17 @@ impl<'a> Font<'a> {
     /// `true` when the `CFF ` table is CID-keyed (Adobe TN #5176 §18).
     pub fn is_cid_keyed(&self) -> bool {
         self.cff.as_ref().is_some_and(|c| c.is_cid())
+    }
+
+    /// `true` when the font ships a `MATH` table (math typesetting data).
+    pub fn has_math(&self) -> bool {
+        self.math.is_some()
+    }
+
+    /// Borrow the parsed `MATH` table, when the font publishes one
+    /// (ISO/IEC 14496-22:2019 §6.3.6).
+    pub fn math_table(&self) -> Option<&MathTable<'a>> {
+        self.math.as_ref()
     }
 
     /// Borrow the parsed `post` table. `None` when the font does not

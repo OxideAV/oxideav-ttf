@@ -458,6 +458,36 @@ kerning, and mark attachment.
   resolve the document covering a glyph. The §5.5.2 SVG capability
   restrictions (no `<text>` / `<script>` / `<a>` elements, no relative
   `em` / `ex` units, …) are a renderer concern, not a table-decode one.
+- `CFF ` table — PostScript (Type 2 charstring) outlines, so
+  OTTO-flavoured fonts now produce glyph outlines. The `tables::cff`
+  module walks the Compact Font Format container (Adobe TN #5176: fixed
+  header, Name / Top-DICT / String / Global-Subr INDEXes, the
+  Top-DICT-referenced CharStrings INDEX, charset formats 0/1/2, the
+  Private DICT + local subrs) and runs each glyph's Type 2 charstring
+  (Adobe TN #5177) through a full interpreter — every path operator
+  (moveto/lineto/curveto families incl. `hhcurveto`/`vvcurveto`/
+  `hvcurveto`/`vhcurveto`/`rcurveline`/`rlinecurve` and the
+  `flex`/`hflex`/`hflex1`/`flex1` hints), the stem-hint operators with
+  `hintmask`/`cntrmask` mask-byte skipping, the arithmetic/storage/
+  conditional escaped operators, and biased `callsubr`/`callgsubr`/
+  `return`/`endchar` with depth-bounded recursion. Cubic Béziers are
+  flattened to on-curve polylines so CFF and TrueType outlines share one
+  `TtOutline`. CID-keyed fonts work end-to-end (`ROS` → FDArray +
+  FDSelect formats 0/3 select per-glyph Font-DICT local subrs and
+  `nominalWidthX`). `Font::glyph_outline` transparently falls back to
+  CFF when `glyf` is absent; `Font::has_cff_outlines` / `cff_table` /
+  `is_cid_keyed` gate and expose it.
+- `MATH` table — mathematical typesetting parameters (ISO/IEC
+  14496-22:2019 §6.3.6). `tables::math` decodes the full table:
+  `MathConstants` (the four scalar fields, all 51 `MathValueRecord`
+  constants addressed by name through `math::constant::*`, and the
+  trailing `radicalDegreeBottomRaisePercent`), `MathGlyphInfo`
+  (per-glyph italics correction, top-accent attachment, extended-shape
+  flag, and height-dependent four-corner `MathKern`), and `MathVariants`
+  (`minConnectorOverlap`, ready-made stretchy variants, and general
+  glyph-assembly parts with the extender flag, for both vertical and
+  horizontal growth). Coverage lookups reuse the shared common-layout
+  Coverage parser. `Font::has_math` / `Font::math_table` expose it.
 - Adobe Glyph List (AGL) glyph-name → Unicode resolution
   (`glyph_name_to_codepoints` / `glyph_name_to_char`). Direct table
   lookup against the embedded AGL 2.0 data: a PostScript glyph name
