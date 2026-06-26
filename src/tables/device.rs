@@ -31,7 +31,7 @@
 //!
 //! * **VariationIndex** (`deltaFormat == 0x8000`) — the variable-font
 //!   path. The `(outer, inner)` delta-set index is resolved against
-//!   the host table's [`ItemVariationStore`] at the current normalised
+//!   the host table's `ItemVariationStore` at the current normalised
 //!   instance, yielding a font-unit `f32` delta. This is the missing
 //!   piece for variable-font GPOS positioning: a value record / anchor
 //!   whose x/y shifts with the `wght` / `wdth` / `opsz` axes.
@@ -71,7 +71,7 @@ const MAX_DEVICE_PPEM_SPAN: usize = 4096;
 /// The `parse` entry point reads the discriminating `deltaFormat`
 /// field and produces the right variant. A `VariationIndex` carries
 /// the `(outer, inner)` delta-set index pair ready to feed an
-/// [`ItemVariationStore`]; a `Device` carries the unpacked per-ppem
+/// `ItemVariationStore`; a `Device` carries the unpacked per-ppem
 /// pixel deltas.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeviceOrVariationIndex {

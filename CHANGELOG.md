@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Font-level variable-font GPOS / GDEF accessors.** `Font` now
+  exposes `lookup_kerning_var`, `lookup_mark_to_base_var`,
+  `lookup_mark_to_mark_var`, `lookup_cursive_attachment_var`,
+  `gpos_apply_lookup_type_1_var`, and `ligature_carets_resolved`. Each
+  decodes the GDEF `ItemVariationStore` once and threads the font's
+  current `normalised_coords()` (post-`avar`) into the table-level
+  variation resolvers, so VariationIndex device offsets in GPOS value
+  records / anchors and GDEF caret values are resolved at the active
+  variation instance set via `set_variation_coords`. Two new
+  InterVariable integration tests confirm var == static at the default
+  instance and panic-free calls across the `wght` extremes.
+
 - **Device / VariationIndex table decoder (`tables::device`).** New
   `DeviceOrVariationIndex` type decodes the shared 6-byte Device /
   VariationIndex sub-table referenced by GPOS ValueRecords, Anchors,

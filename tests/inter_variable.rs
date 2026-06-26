@@ -512,3 +512,66 @@ fn varied_advance_equals_static_on_font_without_hvar() {
     // No vertical metrics → varied height is None.
     assert_eq!(font.glyph_advance_height_varied(gid), None);
 }
+
+#[test]
+fn var_kerning_equals_static_at_default_instance() {
+    // At the default instance, the variation-aware GPOS kerning must
+    // match the static path (every VariationIndex region scalar is 0
+    // at the default coordinate). This exercises the new
+    // Font::lookup_kerning_var plumbing end-to-end against a real
+    // variable font's GDEF ItemVariationStore (if present) without
+    // assuming Inter ships variable kerning.
+    let mut font = Font::from_bytes(FONT).unwrap();
+    // Default instance.
+    let defaults: Vec<f32> = font.variation_axes().iter().map(|a| a.default).collect();
+    font.set_variation_coords(&defaults);
+
+    // Scan a handful of common Latin pairs; for each, the var and
+    // static kerning must agree at the default instance.
+    let probe = ['A', 'V', 'T', 'o', 'W', 'a', 'e', '.', ',', 'f'];
+    for &l in &probe {
+        for &r in &probe {
+            let (Some(lg), Some(rg)) = (font.glyph_index(l), font.glyph_index(r)) else {
+                continue;
+            };
+            assert_eq!(
+                font.lookup_kerning_var(lg, rg),
+                font.lookup_kerning(lg, rg),
+                "var/static kerning differ at default instance for {l:?}{r:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn var_gpos_wrappers_callable_across_instances() {
+    // The variation-aware GPOS / GDEF accessors must be safe to call at
+    // any instance without panicking, for any glyph id. This guards the
+    // device-offset resolution plumbing against out-of-range
+    // ItemVariationStore indices in a real font.
+    let mut font = Font::from_bytes(FONT).unwrap();
+    let defaults: Vec<f32> = font.variation_axes().iter().map(|a| a.default).collect();
+    let wght_idx = font
+        .variation_axes()
+        .iter()
+        .position(|a| &a.tag == b"wght")
+        .unwrap();
+
+    for &coord in &[100.0f32, 400.0, 900.0] {
+        let mut c = defaults.clone();
+        c[wght_idx] = coord;
+        font.set_variation_coords(&c);
+
+        let a = font.glyph_index('A').unwrap();
+        let grave = font.glyph_index('\u{0300}');
+        // These all return Option/i16 and must never panic.
+        let _ = font.lookup_kerning_var(a, a);
+        let _ = font.gpos_apply_lookup_type_1_var(0, a);
+        let _ = font.lookup_cursive_attachment_var(a);
+        let _ = font.ligature_carets_resolved(a);
+        if let Some(m) = grave {
+            let _ = font.lookup_mark_to_base_var(a, m);
+            let _ = font.lookup_mark_to_mark_var(m, m);
+        }
+    }
+}

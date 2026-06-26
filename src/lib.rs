@@ -1995,6 +1995,95 @@ impl<'a> Font<'a> {
         self.gpos.as_ref()?.lookup_mark_to_mark(mark1, mark2)
     }
 
+    /// Decode the GDEF `ItemVariationStore` (v1.3+), if present. The
+    /// store feeds every variable-font GPOS / GDEF VariationIndex
+    /// resolution. Returns `None` for fonts without a GDEF IVS or when
+    /// the embedded store is malformed.
+    fn gdef_item_variation_store(&self) -> Option<ItemVariationStore> {
+        let bytes = self.gdef.as_ref()?.item_var_store_bytes()?;
+        ItemVariationStore::parse(bytes).ok()
+    }
+
+    /// Variation-aware sibling of [`Self::lookup_kerning`].
+    ///
+    /// Resolves a GPOS pair's `xAdvance` VariationIndex against the GDEF
+    /// `ItemVariationStore` at the font's current variation instance
+    /// (set via [`Self::set_variation_coords`]), so variable kerning
+    /// tracks the design axes. Falls back to the legacy `kern` table
+    /// exactly like the static accessor. For a non-variable font, or
+    /// one at its default instance, the result equals
+    /// [`Self::lookup_kerning`].
+    pub fn lookup_kerning_var(&self, left: u16, right: u16) -> i16 {
+        if let Some(gpos) = &self.gpos {
+            let ivs = self.gdef_item_variation_store();
+            let coords = self.normalised_coords();
+            let v = gpos.lookup_kerning_var(left, right, self.gdef.as_ref(), ivs.as_ref(), &coords);
+            if v != 0 {
+                return v;
+            }
+        }
+        if let Some(kern) = &self.kern {
+            return kern.lookup(left, right);
+        }
+        0
+    }
+
+    /// Variation-aware sibling of [`Self::lookup_mark_to_base`]:
+    /// resolves AnchorFormat3 VariationIndex offsets against the GDEF
+    /// `ItemVariationStore` at the current instance so the diacritic
+    /// attachment point tracks the design axes.
+    pub fn lookup_mark_to_base_var(&self, base: u16, mark: u16) -> Option<(i16, i16)> {
+        let gpos = self.gpos.as_ref()?;
+        let ivs = self.gdef_item_variation_store();
+        let coords = self.normalised_coords();
+        gpos.lookup_mark_to_base_var(base, mark, ivs.as_ref(), &coords)
+    }
+
+    /// Variation-aware sibling of [`Self::lookup_mark_to_mark`]:
+    /// resolves AnchorFormat3 VariationIndex offsets against the GDEF
+    /// `ItemVariationStore` at the current instance so the mark-on-mark
+    /// stacking offset tracks the design axes.
+    pub fn lookup_mark_to_mark_var(&self, mark1: u16, mark2: u16) -> Option<(i16, i16)> {
+        let gpos = self.gpos.as_ref()?;
+        let ivs = self.gdef_item_variation_store();
+        let coords = self.normalised_coords();
+        gpos.lookup_mark_to_mark_var(mark1, mark2, ivs.as_ref(), &coords)
+    }
+
+    /// Variation-aware sibling of [`Self::lookup_cursive_attachment`]:
+    /// resolves AnchorFormat3 VariationIndex offsets on the entry / exit
+    /// anchors against the GDEF `ItemVariationStore` at the current
+    /// instance.
+    pub fn lookup_cursive_attachment_var(&self, gid: u16) -> Option<CursiveAttachment> {
+        let gpos = self.gpos.as_ref()?;
+        let ivs = self.gdef_item_variation_store();
+        let coords = self.normalised_coords();
+        gpos.lookup_cursive_attachment_var(gid, ivs.as_ref(), &coords)
+    }
+
+    /// Variation-aware sibling of [`Self::gpos_apply_lookup_type_1`]:
+    /// resolves the matched ValueRecord's VariationIndex device offsets
+    /// against the GDEF `ItemVariationStore` at the current instance.
+    pub fn gpos_apply_lookup_type_1_var(&self, lookup_index: u16, gid: u16) -> Option<PosValue> {
+        let gpos = self.gpos.as_ref()?;
+        let ivs = self.gdef_item_variation_store();
+        let coords = self.normalised_coords();
+        gpos.apply_lookup_type_1_var(lookup_index, gid, ivs.as_ref(), &coords)
+    }
+
+    /// Resolve a ligature glyph's GDEF carets to concrete font-unit
+    /// coordinates at the current variation instance (CaretValueFormat3
+    /// VariationIndex deltas applied from the GDEF `ItemVariationStore`;
+    /// Format2 contour-point carets surface as `None`). Returns `None`
+    /// when the font has no GDEF ligature-caret list covering `gid`.
+    /// See [`GdefTable::ligature_carets_resolved`].
+    pub fn ligature_carets_resolved(&self, gid: u16) -> Option<Vec<Option<i16>>> {
+        let gdef = self.gdef.as_ref()?;
+        let ivs = self.gdef_item_variation_store();
+        let coords = self.normalised_coords();
+        gdef.ligature_carets_resolved(gid, ivs.as_ref(), &coords)
+    }
+
     /// Is this glyph classified as a mark by the font's `GDEF` table?
     /// Returns `false` if the font has no GDEF or the glyph isn't
     /// enumerated. Used by the consumer crate's shaper to decide
