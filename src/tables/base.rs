@@ -143,6 +143,7 @@
 //!   MVAR / HVAR / VVAR path that already exists in the crate.
 
 use crate::parser::{read_i16, read_u16, read_u32};
+use crate::tables::mvar::ItemVariationStore;
 use crate::Error;
 
 /// Documented header version per §6.3.1.3 ("Set to 1").
@@ -195,6 +196,12 @@ pub enum BaseCoord {
         /// containing BaseCoord table. `None` when the on-disk offset
         /// is `0` (the spec NULL marker).
         device_offset: Option<u16>,
+        /// Absolute offset of the Device / VariationIndex table within
+        /// the parent BASE table (`base_coord_abs + device_offset`),
+        /// retained so a VariationIndex-aware accessor can resolve it
+        /// against the BASE `ItemVariationStore` without re-walking the
+        /// axis tree. `None` mirrors a NULL `device_offset`.
+        device_abs_offset: Option<u32>,
     },
 }
 
@@ -223,7 +230,12 @@ impl BaseCoord {
     /// from the start of the BaseCoord table to the end of the
     /// containing BASE table, since format-3 device offsets may point
     /// past the BaseCoord but inside the parent BASE bytes.
-    fn parse(bytes: &[u8]) -> Result<Self, Error> {
+    ///
+    /// `abs_off` is the absolute offset of this BaseCoord table within
+    /// the BASE table; it is added to a format-3 `deviceOffset` to
+    /// record the device table's absolute position for later
+    /// VariationIndex resolution.
+    fn parse_at(bytes: &[u8], abs_off: usize) -> Result<Self, Error> {
         if bytes.len() < 4 {
             return Err(Error::UnexpectedEof);
         }
@@ -249,12 +261,56 @@ impl BaseCoord {
                 }
                 let raw = read_u16(bytes, 4)?;
                 let device_offset = if raw == 0 { None } else { Some(raw) };
+                let device_abs_offset = device_offset.map(|o| abs_off as u32 + o as u32);
                 Ok(Self::Format3 {
                     coordinate,
                     device_offset,
+                    device_abs_offset,
                 })
             }
             _ => Err(Error::BadStructure("BASE: unknown BaseCoord format")),
+        }
+    }
+
+    /// Resolve this BaseCoord to a font-unit coordinate at the
+    /// variation instance given by `normalised_coords`, using the
+    /// parent BASE table bytes (`base_bytes`) and its
+    /// `ItemVariationStore`.
+    ///
+    /// Format 1 / 2 return their static coordinate. Format 3 folds in
+    /// the VariationIndex delta resolved from the BASE IVS (the device
+    /// table's absolute position was recorded at parse time); a classic
+    /// Device table contributes nothing at the font-unit layer, and a
+    /// NULL device offset leaves the coordinate unchanged.
+    pub fn resolve(
+        &self,
+        base_bytes: &[u8],
+        ivs: Option<&ItemVariationStore>,
+        normalised_coords: &[f32],
+    ) -> i16 {
+        match self {
+            Self::Format1 { coordinate } | Self::Format2 { coordinate, .. } => *coordinate,
+            Self::Format3 {
+                coordinate,
+                device_abs_offset,
+                ..
+            } => {
+                let Some(abs) = device_abs_offset else {
+                    return *coordinate;
+                };
+                let abs = *abs as usize;
+                let Some(dev_bytes) = base_bytes.get(abs..) else {
+                    return *coordinate;
+                };
+                // The recorded offset is already absolute, so the
+                // device table sits at the start of `dev_bytes`.
+                let delta = crate::tables::device::DeviceOrVariationIndex::parse(dev_bytes)
+                    .ok()
+                    .and_then(|d| d.font_unit_delta(ivs, normalised_coords))
+                    .unwrap_or(0.0);
+                let rounded = delta.round() as i32;
+                (*coordinate as i32 + rounded).clamp(i16::MIN as i32, i16::MAX as i32) as i16
+            }
         }
     }
 }
@@ -430,6 +486,11 @@ pub struct BaseTable {
     /// [`crate::tables::mvar::ItemVariationStore`] decoder consumes
     /// these on demand inside the variable-font layer.
     item_var_store_bytes: Option<Vec<u8>>,
+    /// The full BASE table bytes, retained so a `BaseCoordFormat3`
+    /// VariationIndex device offset (recorded as an absolute position at
+    /// parse time) can be resolved against the IVS without re-walking
+    /// the axis tree.
+    raw_bytes: Vec<u8>,
 }
 
 impl BaseTable {
@@ -496,7 +557,49 @@ impl BaseTable {
             vert_axis,
             item_var_store_offset,
             item_var_store_bytes,
+            raw_bytes: bytes.to_vec(),
         })
+    }
+
+    /// Decode the BASE `ItemVariationStore` (v1.1), if present.
+    fn item_variation_store(&self) -> Option<ItemVariationStore> {
+        ItemVariationStore::parse(self.item_var_store_bytes.as_deref()?).ok()
+    }
+
+    /// Resolve a HorizAxis (Y) baseline coordinate for `(script_tag,
+    /// baseline_tag)` at the variation instance `normalised_coords`,
+    /// folding in a `BaseCoordFormat3` VariationIndex delta from the
+    /// BASE `ItemVariationStore`. Returns the static coordinate for
+    /// format-1/2 coords or a font without a BASE IVS.
+    pub fn horiz_baseline_y_resolved(
+        &self,
+        script_tag: [u8; 4],
+        baseline_tag: [u8; 4],
+        normalised_coords: &[f32],
+    ) -> Option<i16> {
+        let h = self.horiz_axis.as_ref()?;
+        let idx = h.baseline_index_for_tag(baseline_tag)?;
+        let bs = h.base_script_for_tag(script_tag)?;
+        let bv = bs.base_values.as_ref()?;
+        let coord = bv.base_coords.get(idx)?;
+        let ivs = self.item_variation_store();
+        Some(coord.resolve(&self.raw_bytes, ivs.as_ref(), normalised_coords))
+    }
+
+    /// VertAxis (X) mirror of [`Self::horiz_baseline_y_resolved`].
+    pub fn vert_baseline_x_resolved(
+        &self,
+        script_tag: [u8; 4],
+        baseline_tag: [u8; 4],
+        normalised_coords: &[f32],
+    ) -> Option<i16> {
+        let v = self.vert_axis.as_ref()?;
+        let idx = v.baseline_index_for_tag(baseline_tag)?;
+        let bs = v.base_script_for_tag(script_tag)?;
+        let bv = bs.base_values.as_ref()?;
+        let coord = bv.base_coords.get(idx)?;
+        let ivs = self.item_variation_store();
+        Some(coord.resolve(&self.raw_bytes, ivs.as_ref(), normalised_coords))
     }
 
     /// Borrow the ItemVariationStore raw bytes when the v1.1 trailer
@@ -749,7 +852,7 @@ fn parse_base_values(base_bytes: &[u8], off: usize) -> Result<BaseValuesTable, E
         if bc_abs >= base_bytes.len() {
             return Err(Error::UnexpectedEof);
         }
-        base_coords.push(BaseCoord::parse(&base_bytes[bc_abs..])?);
+        base_coords.push(BaseCoord::parse_at(&base_bytes[bc_abs..], bc_abs)?);
     }
     Ok(BaseValuesTable {
         default_baseline_index,
@@ -781,7 +884,7 @@ fn parse_min_max(base_bytes: &[u8], off: usize) -> Result<MinMaxTable, Error> {
         if abs >= base_bytes.len() {
             return Err(Error::UnexpectedEof);
         }
-        Some(BaseCoord::parse(&base_bytes[abs..])?)
+        Some(BaseCoord::parse_at(&base_bytes[abs..], abs)?)
     };
     let max_coord = if max_off_rel == 0 {
         None
@@ -792,7 +895,7 @@ fn parse_min_max(base_bytes: &[u8], off: usize) -> Result<MinMaxTable, Error> {
         if abs >= base_bytes.len() {
             return Err(Error::UnexpectedEof);
         }
-        Some(BaseCoord::parse(&base_bytes[abs..])?)
+        Some(BaseCoord::parse_at(&base_bytes[abs..], abs)?)
     };
     let body_start = off
         .checked_add(6)
@@ -827,7 +930,7 @@ fn parse_min_max(base_bytes: &[u8], off: usize) -> Result<MinMaxTable, Error> {
             if abs >= base_bytes.len() {
                 return Err(Error::UnexpectedEof);
             }
-            Some(BaseCoord::parse(&base_bytes[abs..])?)
+            Some(BaseCoord::parse_at(&base_bytes[abs..], abs)?)
         };
         let feat_max = if f_max_off == 0 {
             None
@@ -838,7 +941,7 @@ fn parse_min_max(base_bytes: &[u8], off: usize) -> Result<MinMaxTable, Error> {
             if abs >= base_bytes.len() {
                 return Err(Error::UnexpectedEof);
             }
-            Some(BaseCoord::parse(&base_bytes[abs..])?)
+            Some(BaseCoord::parse_at(&base_bytes[abs..], abs)?)
         };
         feat_min_max_records.push(FeatMinMaxRecord {
             feature_tag,
@@ -1151,6 +1254,7 @@ mod tests {
             BaseCoord::Format3 {
                 coordinate,
                 device_offset,
+                ..
             } => {
                 assert_eq!(coordinate, 1200);
                 assert_eq!(device_offset, Some(10));
@@ -1345,7 +1449,7 @@ mod tests {
         // Coordinate-format = 7 is undefined.
         let bytes = [0x00, 0x07, 0x00, 0x00];
         assert!(matches!(
-            BaseCoord::parse(&bytes),
+            BaseCoord::parse_at(&bytes, 0),
             Err(Error::BadStructure(_))
         ));
     }
@@ -1355,7 +1459,7 @@ mod tests {
         // Format 2 needs 8 bytes; provide 6.
         let bytes = [0x00, 0x02, 0x00, 0x00, 0x00, 0x00];
         assert!(matches!(
-            BaseCoord::parse(&bytes),
+            BaseCoord::parse_at(&bytes, 0),
             Err(Error::UnexpectedEof)
         ));
     }
@@ -1365,9 +1469,89 @@ mod tests {
         // Format 3 needs 6 bytes; provide 5.
         let bytes = [0x00, 0x03, 0x00, 0x00, 0x00];
         assert!(matches!(
-            BaseCoord::parse(&bytes),
+            BaseCoord::parse_at(&bytes, 0),
             Err(Error::UnexpectedEof)
         ));
+    }
+
+    #[test]
+    fn base_coord_format3_records_absolute_device_offset() {
+        // Format 3, coord = 50, deviceOffset = 4 (BaseCoord-relative).
+        // Parsed at abs_off = 100 → device_abs_offset = 104.
+        let bytes = [0x00, 0x03, 0x00, 0x32, 0x00, 0x04];
+        match BaseCoord::parse_at(&bytes, 100).unwrap() {
+            BaseCoord::Format3 {
+                coordinate,
+                device_offset,
+                device_abs_offset,
+            } => {
+                assert_eq!(coordinate, 50);
+                assert_eq!(device_offset, Some(4));
+                assert_eq!(device_abs_offset, Some(104));
+            }
+            other => panic!("expected Format3, got {other:?}"),
+        }
+        // NULL device offset → no absolute offset recorded.
+        let null_bytes = [0x00, 0x03, 0x00, 0x32, 0x00, 0x00];
+        match BaseCoord::parse_at(&null_bytes, 100).unwrap() {
+            BaseCoord::Format3 {
+                device_offset,
+                device_abs_offset,
+                ..
+            } => {
+                assert_eq!(device_offset, None);
+                assert_eq!(device_abs_offset, None);
+            }
+            other => panic!("expected Format3, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn base_coord_format3_resolves_variation_index() {
+        // Lay out a synthetic "BASE" byte buffer: a Format-3 BaseCoord
+        // at offset 0 (coord 50, deviceOffset = 6 → a VariationIndex
+        // at absolute offset 6), followed by the VariationIndex and an
+        // IVS the resolver reads.
+        let mut base_bytes = Vec::new();
+        // [0..6) BaseCoord Format 3.
+        base_bytes.extend_from_slice(&3u16.to_be_bytes()); // format
+        base_bytes.extend_from_slice(&50i16.to_be_bytes()); // coord
+        base_bytes.extend_from_slice(&6u16.to_be_bytes()); // deviceOffset
+                                                           // [6..12) VariationIndex { outer=0, inner=0, fmt=0x8000 }.
+        base_bytes.extend_from_slice(&0u16.to_be_bytes());
+        base_bytes.extend_from_slice(&0u16.to_be_bytes());
+        base_bytes.extend_from_slice(&0x8000u16.to_be_bytes());
+
+        let coord = BaseCoord::parse_at(&base_bytes[0..6], 0).unwrap();
+
+        // Build a single-region IVS with delta +80.
+        let mut ivs_b = vec![0u8; 32];
+        ivs_b[0..2].copy_from_slice(&1u16.to_be_bytes());
+        ivs_b[2..6].copy_from_slice(&12u32.to_be_bytes());
+        ivs_b[6..8].copy_from_slice(&1u16.to_be_bytes());
+        ivs_b[8..12].copy_from_slice(&22u32.to_be_bytes());
+        ivs_b[12..14].copy_from_slice(&1u16.to_be_bytes());
+        ivs_b[14..16].copy_from_slice(&1u16.to_be_bytes());
+        ivs_b[16..18].copy_from_slice(&0i16.to_be_bytes());
+        ivs_b[18..20].copy_from_slice(&16384i16.to_be_bytes());
+        ivs_b[20..22].copy_from_slice(&16384i16.to_be_bytes());
+        ivs_b[22..24].copy_from_slice(&1u16.to_be_bytes());
+        ivs_b[24..26].copy_from_slice(&1u16.to_be_bytes());
+        ivs_b[26..28].copy_from_slice(&1u16.to_be_bytes());
+        ivs_b[28..30].copy_from_slice(&0u16.to_be_bytes());
+        ivs_b[30..32].copy_from_slice(&80i16.to_be_bytes());
+        let ivs = ItemVariationStore::parse(&ivs_b).unwrap();
+
+        // Default instance → static 50.
+        assert_eq!(coord.resolve(&base_bytes, Some(&ivs), &[0.0]), 50);
+        // Max instance → 50 + 80 = 130.
+        assert_eq!(coord.resolve(&base_bytes, Some(&ivs), &[1.0]), 130);
+        // Half → 50 + 40 = 90.
+        assert_eq!(coord.resolve(&base_bytes, Some(&ivs), &[0.5]), 90);
+        // No IVS → static.
+        assert_eq!(coord.resolve(&base_bytes, None, &[1.0]), 50);
+        // coordinate() still surfaces the unresolved value.
+        assert_eq!(coord.coordinate(), 50);
     }
 
     #[test]

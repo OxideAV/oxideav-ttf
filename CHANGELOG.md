@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Variable-font BASE baseline coordinates
+  (`Font::base_horiz_y_for_script_baseline_var`,
+  `base_vert_x_for_script_baseline_var`).** `BaseCoordFormat3`
+  VariationIndex device offsets are now resolved against the BASE
+  `ItemVariationStore` at the current instance, so a per-script baseline
+  position tracks the design axes. `BaseCoord::parse` records each
+  Format-3 device table's *absolute* position within the BASE table
+  (new `device_abs_offset` field) and `BaseTable` retains its raw bytes,
+  so `BaseCoord::resolve` can dereference the device table without
+  re-walking the axis tree. Format 1/2 and classic Device tables are
+  unchanged. (Closes the BASE half of the variable-font GPOS/GDEF/BASE
+  VariationIndex sweep.)
+
 - **CFF2 variable-glyph `blend` interpolation test + doc.** The CFF2
   charstring interpreter already evaluates `blend` as
   `default + Σ scalarᵣ · deltaᵣ` at an arbitrary instance via

@@ -1352,6 +1352,35 @@ impl<'a> Font<'a> {
         bv.base_coords.get(idx).map(|c| c.coordinate())
     }
 
+    /// Variation-aware sibling of
+    /// [`Self::base_horiz_y_for_script_baseline`]: a `BaseCoordFormat3`
+    /// VariationIndex device offset is resolved against the BASE
+    /// `ItemVariationStore` at the font's current instance, so the
+    /// baseline Y tracks the design axes.
+    pub fn base_horiz_y_for_script_baseline_var(
+        &self,
+        script_tag: [u8; 4],
+        baseline_tag: [u8; 4],
+    ) -> Option<i16> {
+        let coords = self.normalised_coords();
+        self.base
+            .as_ref()?
+            .horiz_baseline_y_resolved(script_tag, baseline_tag, &coords)
+    }
+
+    /// Variation-aware sibling of
+    /// [`Self::base_vert_x_for_script_baseline`].
+    pub fn base_vert_x_for_script_baseline_var(
+        &self,
+        script_tag: [u8; 4],
+        baseline_tag: [u8; 4],
+    ) -> Option<i16> {
+        let coords = self.normalised_coords();
+        self.base
+            .as_ref()?
+            .vert_baseline_x_resolved(script_tag, baseline_tag, &coords)
+    }
+
     /// `true` when the font carries a `gasp` table
     /// (ISO/IEC 14496-22:2019 §5.3.7). Absent in many fonts; the
     /// rasteriser applies its default policy when missing.

@@ -340,8 +340,12 @@ kerning, and mark attachment.
   (AnchorFormat3 X/Y), `gpos_apply_lookup_type_1_var` (SinglePos), and
   `Font::ligature_carets_resolved` (CaretValueFormat3 carets to concrete
   font-unit coordinates; Format2 contour-point carets surface as `None`
-  since they need the TT bytecode interpreter). The static accessors are
-  unchanged and equal the `_var` results at the default instance.
+  since they need the TT bytecode interpreter). BASE baseline positions
+  resolve too — `Font::base_horiz_y_for_script_baseline_var` /
+  `base_vert_x_for_script_baseline_var` fold a `BaseCoordFormat3`
+  VariationIndex delta from the BASE ItemVariationStore. The static
+  accessors are unchanged and equal the `_var` results at the default
+  instance.
 - **`Font::shape(text, script, lang, features)` — end-to-end OpenType
   shaping.** The integration capstone over the GSUB / GPOS / GDEF
   primitives above: it maps text to nominal glyphs through `cmap`, runs
@@ -1018,13 +1022,6 @@ format-14 UVS sidecar is decoded.
 - The `STAT` format-2 overlapping-range tie-break (§7.3.7.3) is left to
   caller policy; the full document-order record array is exposed
   unchanged.
-- BASE `BaseCoordFormat3` VariationIndex resolution: the device offset
-  is parsed and exposed (`BaseCoord::Format3 { device_offset }`) but the
-  baseline-coordinate accessors do not yet fold in the IVS delta,
-  because `BaseTable::parse` eagerly decodes the axis trees and discards
-  the per-BaseCoord table slices the device offset is relative to.
-  (GPOS value-record / anchor and GDEF caret VariationIndex offsets
-  *are* resolved.)
 
 ## Test fixtures
 
