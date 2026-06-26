@@ -39,6 +39,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   now reads the two device offsets (was: skipped); format 1/2 and
   device-offset-free format-3 anchors are unchanged.
 
+- **Variable-font GPOS kerning (`lookup_kerning_var`).** Pair
+  adjustment now has a variation sibling that resolves the matched
+  pair's `xAdvance` VariationIndex device offset against the GDEF
+  `ItemVariationStore`, honouring the spec's per-format device-offset
+  base (the PairSet table for PairPosFormat1, the sub-table for
+  PairPosFormat2). Variable kerning tracks the design axes; static path
+  unchanged for pairs without an `xAdvance` device offset.
+
 - **CFF reverse glyph-name lookup + iteration.**
   `CffTable::gid_for_name(name)` inverts the charset (name → lowest GID),
   and `CffTable::iter_glyph_names()` walks every `(gid, name)` pair.

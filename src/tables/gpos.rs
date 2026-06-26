@@ -1106,6 +1106,42 @@ impl<'a> GposTable<'a> {
     /// refusing to attempt a lookup whose left or right glyph is a mark
     /// (per the spec, marks shouldn't kern with bases anyway).
     pub fn lookup_kerning(&self, left: u16, right: u16, gdef: Option<&GdefTable<'_>>) -> i16 {
+        self.lookup_kerning_ctx(left, right, gdef, AnchorCtx::STATIC)
+    }
+
+    /// Variation-aware sibling of [`Self::lookup_kerning`].
+    ///
+    /// Resolves the matched pair's `xAdvance` VariationIndex device
+    /// offset against the GDEF `ItemVariationStore` at the current
+    /// instance, so a variable font's kerning tracks the design axes
+    /// (a common use of GPOS VariationIndex). Identical to the static
+    /// path for pairs without an `xAdvance` device offset.
+    pub fn lookup_kerning_var(
+        &self,
+        left: u16,
+        right: u16,
+        gdef: Option<&GdefTable<'_>>,
+        ivs: Option<&ItemVariationStore>,
+        normalised_coords: &[f32],
+    ) -> i16 {
+        self.lookup_kerning_ctx(
+            left,
+            right,
+            gdef,
+            AnchorCtx {
+                ivs,
+                coords: normalised_coords,
+            },
+        )
+    }
+
+    fn lookup_kerning_ctx(
+        &self,
+        left: u16,
+        right: u16,
+        gdef: Option<&GdefTable<'_>>,
+        ctx: AnchorCtx<'_>,
+    ) -> i16 {
         let lookup_list = match self.bytes.get(self.lookup_list_off as usize..) {
             Some(s) => s,
             None => return 0,
@@ -1166,7 +1202,7 @@ impl<'a> GposTable<'a> {
                 if effective_kind != LOOKUP_PAIR_POS {
                     continue;
                 }
-                if let Some(v) = pair_pos_lookup(effective_sub, left, right) {
+                if let Some(v) = pair_pos_lookup_ctx(effective_sub, left, right, ctx) {
                     return v;
                 }
             }
@@ -1284,6 +1320,14 @@ impl<'a> GposTable<'a> {
 
 /// Walk a PairPos subtable (format 1 or 2) looking for `(left, right)`.
 fn pair_pos_lookup(sub: &[u8], left: u16, right: u16) -> Option<i16> {
+    pair_pos_lookup_ctx(sub, left, right, AnchorCtx::STATIC)
+}
+
+/// Variation-aware sibling of [`pair_pos_lookup`]. Resolves the matched
+/// ValueRecord1's `xAdvance` VariationIndex device offset against `ctx`,
+/// honouring the spec's per-format device-offset base (PairSet table
+/// for PairPosFormat1, sub-table for PairPosFormat2).
+fn pair_pos_lookup_ctx(sub: &[u8], left: u16, right: u16, ctx: AnchorCtx<'_>) -> Option<i16> {
     if sub.len() < 8 {
         return None;
     }
@@ -1296,12 +1340,13 @@ fn pair_pos_lookup(sub: &[u8], left: u16, right: u16) -> Option<i16> {
     let v1_size = popcount_u16(value_format1) * 2;
     let v2_size = popcount_u16(value_format2) * 2;
     match format {
-        1 => pair_pos_format1(sub, cov_idx, right, value_format1, v1_size, v2_size),
-        2 => pair_pos_format2(sub, left, right, value_format1, v1_size, v2_size),
+        1 => pair_pos_format1(sub, cov_idx, right, value_format1, v1_size, v2_size, ctx),
+        2 => pair_pos_format2(sub, left, right, value_format1, v1_size, v2_size, ctx),
         _ => None,
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn pair_pos_format1(
     sub: &[u8],
     cov_idx: u16,
@@ -1309,6 +1354,7 @@ fn pair_pos_format1(
     value_format1: u16,
     v1_size: usize,
     v2_size: usize,
+    ctx: AnchorCtx<'_>,
 ) -> Option<i16> {
     // Header (10 bytes) + pairSetOffsets[pairSetCount].
     let pair_set_count = read_u16(sub, 8).ok()?;
@@ -1331,7 +1377,15 @@ fn pair_pos_format1(
         let off = 2 + mid * record_size;
         let sg = read_u16(pair_set, off).ok()?;
         if sg == right {
-            return Some(extract_x_advance(pair_set, off + 2, value_format1));
+            // PairPosFormat1 ValueRecord device offsets are relative to
+            // the PairSet table (per §"ValueRecord" device-offset base).
+            return Some(extract_x_advance_var(
+                pair_set,
+                off + 2,
+                value_format1,
+                pair_set,
+                ctx,
+            ));
         }
         if sg < right {
             lo = mid + 1;
@@ -1342,6 +1396,7 @@ fn pair_pos_format1(
     None
 }
 
+#[allow(clippy::too_many_arguments)]
 fn pair_pos_format2(
     sub: &[u8],
     left: u16,
@@ -1349,6 +1404,7 @@ fn pair_pos_format2(
     value_format1: u16,
     v1_size: usize,
     v2_size: usize,
+    ctx: AnchorCtx<'_>,
 ) -> Option<i16> {
     // Header (16 bytes): format, cov, vf1, vf2, classDef1Offset,
     // classDef2Offset, class1Count, class2Count.
@@ -1369,7 +1425,9 @@ fn pair_pos_format2(
     if v1_size == 0 {
         return None;
     }
-    Some(extract_x_advance(sub, off, value_format1))
+    // PairPosFormat2 ValueRecord device offsets are relative to the
+    // PairPos sub-table (`sub`).
+    Some(extract_x_advance_var(sub, off, value_format1, sub, ctx))
 }
 
 /// Walk a MarkBasePosFormat1 subtable looking for `(base, mark)` and
@@ -1787,9 +1845,24 @@ fn parse_anchor_with(bytes: &[u8], ctx: AnchorCtx<'_>) -> Option<(i16, i16)> {
     }
 }
 
-/// Read the `xAdvance` field out of a ValueRecord starting at `bytes[off]`,
-/// given its `valueFormat`. Returns 0 if `xAdvance` isn't present.
-fn extract_x_advance(bytes: &[u8], off: usize, value_format: u16) -> i16 {
+/// Read the `xAdvance` field of a ValueRecord and, if the record
+/// carries an `X_ADVANCE` device offset, fold in the VariationIndex
+/// delta resolved against `ctx`.
+///
+/// `device_base` is the slice the ValueRecord's device offsets are
+/// relative to — per the OpenType spec that is the SinglePos /
+/// PairPosFormat2 sub-table for those layouts, but the **PairSet**
+/// table for a PairPosFormat1 record. The caller passes whichever
+/// applies.
+fn extract_x_advance_var(
+    bytes: &[u8],
+    off: usize,
+    value_format: u16,
+    device_base: &[u8],
+    ctx: AnchorCtx<'_>,
+) -> i16 {
+    // Field order: xPlacement, yPlacement, xAdvance, yAdvance,
+    // xPlaDevice, yPlaDevice, xAdvDevice, yAdvDevice.
     let mut p = off;
     if value_format & VF_X_PLACEMENT != 0 {
         p += 2;
@@ -1797,10 +1870,30 @@ fn extract_x_advance(bytes: &[u8], off: usize, value_format: u16) -> i16 {
     if value_format & VF_Y_PLACEMENT != 0 {
         p += 2;
     }
+    let mut x_adv = 0i16;
+    let mut x_adv_present = false;
     if value_format & VF_X_ADVANCE != 0 {
-        return read_i16(bytes, p).unwrap_or(0);
+        x_adv = read_i16(bytes, p).unwrap_or(0);
+        x_adv_present = true;
+        p += 2;
     }
-    0
+    if value_format & VF_Y_ADVANCE != 0 {
+        p += 2;
+    }
+    // Skip xPlaDevice / yPlaDevice to reach xAdvDevice.
+    if value_format & VF_X_PLA_DEVICE != 0 {
+        p += 2;
+    }
+    if value_format & VF_Y_PLA_DEVICE != 0 {
+        p += 2;
+    }
+    if value_format & VF_X_ADV_DEVICE != 0 {
+        let dev = read_device_offset(bytes, p);
+        if x_adv_present {
+            x_adv = saturating_add_delta(x_adv, device_base, dev, ctx.ivs, ctx.coords);
+        }
+    }
+    x_adv
 }
 
 /// On-disk byte size of a ValueRecord with `value_format` set.
@@ -3058,6 +3151,81 @@ mod tests {
         gpos.extend_from_slice(&10u16.to_be_bytes());
         gpos.extend_from_slice(&lookup_list);
         gpos
+    }
+
+    /// PairPosFormat1 with valueFormat1 = X_ADVANCE | X_ADV_DEVICE:
+    /// glyph 50 pairs glyph 60 → xAdvance = base, plus an xAdvance
+    /// VariationIndex (outer 0, inner 0) whose device offset is relative
+    /// to the PairSet base.
+    fn build_pp1_var_kern(base: i16) -> Vec<u8> {
+        let vf1 = VF_X_ADVANCE | VF_X_ADV_DEVICE;
+        // PairSet layout (base-relative offsets):
+        //   [0..2)  pairValueCount = 1
+        //   [2..4)  secondGlyph = 60
+        //   [4..6)  xAdvance = base
+        //   [6..8)  xAdvDeviceOffset = 8 (→ VariationIndex below)
+        //   [8..14) VariationIndex { outer=0, inner=0, fmt=0x8000 }
+        let mut pair_set = Vec::new();
+        pair_set.extend_from_slice(&1u16.to_be_bytes()); // pairValueCount
+        pair_set.extend_from_slice(&60u16.to_be_bytes()); // secondGlyph
+        pair_set.extend_from_slice(&base.to_be_bytes()); // xAdvance
+        pair_set.extend_from_slice(&8u16.to_be_bytes()); // xAdvDeviceOffset
+        pair_set.extend_from_slice(&0u16.to_be_bytes()); // VarIdx.outer
+        pair_set.extend_from_slice(&0u16.to_be_bytes()); // VarIdx.inner
+        pair_set.extend_from_slice(&0x8000u16.to_be_bytes()); // deltaFormat
+
+        let mut cov = Vec::new();
+        cov.extend_from_slice(&1u16.to_be_bytes());
+        cov.extend_from_slice(&1u16.to_be_bytes());
+        cov.extend_from_slice(&50u16.to_be_bytes());
+
+        let header = 10;
+        let cov_off = header + 2;
+        let pair_set_off = cov_off + cov.len();
+        let mut pp1 = Vec::new();
+        pp1.extend_from_slice(&1u16.to_be_bytes()); // format
+        pp1.extend_from_slice(&(cov_off as u16).to_be_bytes());
+        pp1.extend_from_slice(&vf1.to_be_bytes()); // value_format1
+        pp1.extend_from_slice(&0u16.to_be_bytes()); // value_format2
+        pp1.extend_from_slice(&1u16.to_be_bytes()); // pairSetCount
+        pp1.extend_from_slice(&(pair_set_off as u16).to_be_bytes());
+        pp1.extend_from_slice(&cov);
+        pp1.extend_from_slice(&pair_set);
+
+        let lookup = wrap_lookup(LOOKUP_PAIR_POS, &pp1);
+        wrap_gpos_single(&lookup)
+    }
+
+    #[test]
+    fn pair_pos_var_kerning_tracks_instance() {
+        let bytes = build_pp1_var_kern(-100);
+        let g = GposTable::parse(&bytes).unwrap();
+        let ivs_bytes = build_single_region_ivs(-40);
+        let ivs = ItemVariationStore::parse(&ivs_bytes).unwrap();
+
+        // Static path ignores the device offset → -100.
+        assert_eq!(g.lookup_kerning(50, 60, None), -100);
+
+        // Default instance: scalar 0 → -100.
+        assert_eq!(g.lookup_kerning_var(50, 60, None, Some(&ivs), &[0.0]), -100);
+        // Max instance: -100 + (-40) = -140.
+        assert_eq!(g.lookup_kerning_var(50, 60, None, Some(&ivs), &[1.0]), -140);
+        // Half: -100 + (-20) = -120.
+        assert_eq!(g.lookup_kerning_var(50, 60, None, Some(&ivs), &[0.5]), -120);
+        // No IVS → static.
+        assert_eq!(g.lookup_kerning_var(50, 60, None, None, &[1.0]), -100);
+        // Uncovered pair → 0 either way.
+        assert_eq!(g.lookup_kerning_var(50, 61, None, Some(&ivs), &[1.0]), 0);
+    }
+
+    #[test]
+    fn pair_pos_var_matches_static_without_device() {
+        let bytes = build_simple_pp1();
+        let g = GposTable::parse(&bytes).unwrap();
+        assert_eq!(
+            g.lookup_kerning(50, 60, None),
+            g.lookup_kerning_var(50, 60, None, None, &[0.3])
+        );
     }
 
     #[test]
