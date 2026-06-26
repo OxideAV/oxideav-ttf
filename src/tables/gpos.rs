@@ -70,9 +70,11 @@
 //! ISO/IEC 14496-22 §6 (OFF).
 
 use crate::parser::{read_i16, read_u16, read_u32};
+use crate::tables::device::{read_device_offset, resolve_device_delta};
 use crate::tables::gdef::{
     class_def_lookup, coverage_lookup, lookup_table_slice, popcount_u16, GdefTable,
 };
+use crate::tables::mvar::ItemVariationStore;
 use crate::Error;
 
 const LOOKUP_SINGLE_POS: u16 = 1;
@@ -596,6 +598,50 @@ impl<'a> GposTable<'a> {
                 continue;
             }
             if let Some(v) = single_pos_lookup(effective_sub, gid) {
+                return Some(v);
+            }
+        }
+        None
+    }
+
+    /// Variation-aware sibling of [`Self::apply_lookup_type_1`].
+    ///
+    /// Identical to `apply_lookup_type_1` for a non-variable font (or
+    /// any value record without device offsets), but additionally
+    /// resolves each VariationIndex / Device offset on the matched
+    /// ValueRecord against `ivs` at `normalised_coords`. The interpolated
+    /// font-unit deltas are folded into the returned [`PosValue`] so a
+    /// variable font's `wght` / `wdth` / `opsz` instance shifts the
+    /// single-adjustment placement and advance.
+    ///
+    /// `ivs` is the `ItemVariationStore` embedded in GDEF (obtained from
+    /// [`GdefTable::item_var_store_bytes`] + [`ItemVariationStore`]);
+    /// `None` falls back to the static value, with classic Device
+    /// tables contributing nothing either way.
+    pub fn apply_lookup_type_1_var(
+        &self,
+        lookup_index: u16,
+        gid: u16,
+        ivs: Option<&ItemVariationStore>,
+        normalised_coords: &[f32],
+    ) -> Option<PosValue> {
+        if self.lookup_list_off == 0 {
+            return None;
+        }
+        let lookup = lookup_table_slice(self.bytes, self.lookup_list_off, lookup_index)?;
+        if lookup.len() < 6 {
+            return None;
+        }
+        let kind = read_u16(lookup, 0).ok()?;
+        let sub_count = read_u16(lookup, 4).ok()? as usize;
+        for s in 0..sub_count {
+            let sub_off = read_u16(lookup, 6 + s * 2).ok()? as usize;
+            let sub = lookup.get(sub_off..)?;
+            let (effective_kind, effective_sub) = unwrap_extension(kind, sub)?;
+            if effective_kind != LOOKUP_SINGLE_POS {
+                continue;
+            }
+            if let Some(v) = single_pos_lookup_var(effective_sub, gid, ivs, normalised_coords) {
                 return Some(v);
             }
         }
@@ -1652,6 +1698,91 @@ fn parse_value_record(bytes: &[u8], off: usize, value_format: u16) -> PosValue {
     v
 }
 
+/// Decode a ValueRecord starting at `bytes[off]` per `value_format`,
+/// and additionally resolve each of its four device / VariationIndex
+/// offsets against `ivs` at `normalised_coords`, folding the resulting
+/// font-unit deltas into the corresponding geometric field.
+///
+/// `subtable_base` is the slice the device offsets are relative to —
+/// per the OpenType spec, ValueRecord Device offsets are measured "from
+/// beginning of the immediate parent table" (the SinglePos / PairPos
+/// sub-table that contains the value record). A VariationIndex
+/// (`deltaFormat == 0x8000`) yields the interpolated variation delta; a
+/// classic Device table contributes nothing at the font-unit layer.
+///
+/// When the value record carries no device offsets — the common,
+/// non-variable case — this is identical to [`parse_value_record`]
+/// plus a handful of NULL-offset short-circuits, so it is safe to use
+/// on any font.
+fn parse_value_record_var(
+    bytes: &[u8],
+    off: usize,
+    value_format: u16,
+    subtable_base: &[u8],
+    ivs: Option<&ItemVariationStore>,
+    normalised_coords: &[f32],
+) -> PosValue {
+    let mut v = PosValue::default();
+    let mut p = off;
+    if value_format & VF_X_PLACEMENT != 0 {
+        v.x_placement = read_i16(bytes, p).unwrap_or(0);
+        p += 2;
+    }
+    if value_format & VF_Y_PLACEMENT != 0 {
+        v.y_placement = read_i16(bytes, p).unwrap_or(0);
+        p += 2;
+    }
+    if value_format & VF_X_ADVANCE != 0 {
+        v.x_advance = read_i16(bytes, p).unwrap_or(0);
+        p += 2;
+    }
+    if value_format & VF_Y_ADVANCE != 0 {
+        v.y_advance = read_i16(bytes, p).unwrap_or(0);
+        p += 2;
+    }
+    // Resolve the four device / VariationIndex offsets in field order.
+    if value_format & VF_X_PLA_DEVICE != 0 {
+        let d = read_device_offset(bytes, p);
+        v.x_placement =
+            saturating_add_delta(v.x_placement, subtable_base, d, ivs, normalised_coords);
+        p += 2;
+    }
+    if value_format & VF_Y_PLA_DEVICE != 0 {
+        let d = read_device_offset(bytes, p);
+        v.y_placement =
+            saturating_add_delta(v.y_placement, subtable_base, d, ivs, normalised_coords);
+        p += 2;
+    }
+    if value_format & VF_X_ADV_DEVICE != 0 {
+        let d = read_device_offset(bytes, p);
+        v.x_advance = saturating_add_delta(v.x_advance, subtable_base, d, ivs, normalised_coords);
+        p += 2;
+    }
+    if value_format & VF_Y_ADV_DEVICE != 0 {
+        let d = read_device_offset(bytes, p);
+        v.y_advance = saturating_add_delta(v.y_advance, subtable_base, d, ivs, normalised_coords);
+        p += 2;
+    }
+    let _ = p;
+    v
+}
+
+/// Add the resolved (rounded) font-unit variation delta at device
+/// `offset` to a base `i16` value, saturating on overflow. The delta is
+/// rounded to the nearest integer (ties away from zero) before adding,
+/// matching the font-unit granularity of GPOS placement / advance.
+fn saturating_add_delta(
+    base: i16,
+    subtable_base: &[u8],
+    offset: u16,
+    ivs: Option<&ItemVariationStore>,
+    normalised_coords: &[f32],
+) -> i16 {
+    let delta = resolve_device_delta(subtable_base, offset, ivs, normalised_coords);
+    let rounded = delta.round() as i32;
+    (base as i32 + rounded).clamp(i16::MIN as i32, i16::MAX as i32) as i16
+}
+
 /// Walk a SinglePos sub-table (format 1 or 2) looking for `gid`.
 ///
 /// SinglePosFormat1 layout:
@@ -1695,6 +1826,56 @@ fn single_pos_lookup(sub: &[u8], gid: u16) -> Option<PosValue> {
                 return None;
             }
             Some(parse_value_record(sub, vr_off, value_format))
+        }
+        _ => None,
+    }
+}
+
+/// Variation-aware sibling of [`single_pos_lookup`]: identical coverage
+/// and format dispatch, but resolves the ValueRecord's device /
+/// VariationIndex offsets against `ivs` at `normalised_coords`. Device
+/// offsets are relative to the SinglePos sub-table base (`sub`).
+fn single_pos_lookup_var(
+    sub: &[u8],
+    gid: u16,
+    ivs: Option<&ItemVariationStore>,
+    normalised_coords: &[f32],
+) -> Option<PosValue> {
+    if sub.len() < 6 {
+        return None;
+    }
+    let format = read_u16(sub, 0).ok()?;
+    let coverage_off = read_u16(sub, 2).ok()? as usize;
+    let value_format = read_u16(sub, 4).ok()?;
+    let cov = sub.get(coverage_off..)?;
+    let cov_idx = coverage_lookup(cov, gid)? as usize;
+    let vr_size = value_record_size(value_format);
+    match format {
+        1 => Some(parse_value_record_var(
+            sub,
+            6,
+            value_format,
+            sub,
+            ivs,
+            normalised_coords,
+        )),
+        2 => {
+            let value_count = read_u16(sub, 6).ok()? as usize;
+            if cov_idx >= value_count {
+                return None;
+            }
+            let vr_off = 8 + cov_idx * vr_size;
+            if sub.len() < vr_off + vr_size {
+                return None;
+            }
+            Some(parse_value_record_var(
+                sub,
+                vr_off,
+                value_format,
+                sub,
+                ivs,
+                normalised_coords,
+            ))
         }
         _ => None,
     }
@@ -3066,6 +3247,114 @@ mod tests {
         let bytes = build_single_pos_format1();
         let g = GposTable::parse(&bytes).unwrap();
         assert_eq!(g.apply_lookup_type_1(99, 7), None);
+    }
+
+    /// Build a minimal `ItemVariationStore` (§7.2.3) with one region
+    /// (single axis, rising edge peaking at +1) and one IVD subtable
+    /// carrying a single delta row of `[delta]`. Returned bytes are a
+    /// standalone IVS the shared decoder consumes verbatim.
+    fn build_single_region_ivs(delta: i16) -> Vec<u8> {
+        // IVS layout:
+        //   [0..2)   format = 1
+        //   [2..6)   variationRegionListOffset = 12
+        //   [6..8)   itemVariationDataCount = 1
+        //   [8..12)  itemVariationDataOffsets[0] = 22
+        //   [12..22) region list (1 axis, 1 region of 6 B)
+        //   [22..)   IVD subtable
+        let mut b = vec![0u8; 32];
+        b[0..2].copy_from_slice(&1u16.to_be_bytes());
+        b[2..6].copy_from_slice(&12u32.to_be_bytes());
+        b[6..8].copy_from_slice(&1u16.to_be_bytes());
+        b[8..12].copy_from_slice(&22u32.to_be_bytes());
+        // region list: axisCount=1, regionCount=1, region0 = (0, +1, +1)
+        b[12..14].copy_from_slice(&1u16.to_be_bytes());
+        b[14..16].copy_from_slice(&1u16.to_be_bytes());
+        b[16..18].copy_from_slice(&0i16.to_be_bytes());
+        b[18..20].copy_from_slice(&16384i16.to_be_bytes());
+        b[20..22].copy_from_slice(&16384i16.to_be_bytes());
+        // IVD: itemCount=1, shortDeltaCount=1, regionIndexCount=1,
+        //      regionIndexes=[0], deltaSets[0] = [delta]
+        b[22..24].copy_from_slice(&1u16.to_be_bytes());
+        b[24..26].copy_from_slice(&1u16.to_be_bytes());
+        b[26..28].copy_from_slice(&1u16.to_be_bytes());
+        b[28..30].copy_from_slice(&0u16.to_be_bytes());
+        b[30..32].copy_from_slice(&delta.to_be_bytes());
+        b
+    }
+
+    /// SinglePosFormat1 whose ValueRecord carries `x_adv = base` plus an
+    /// X_ADVANCE VariationIndex device offset → (outer 0, inner 0). The
+    /// VariationIndex sub-table sits inside the SinglePos sub-table so
+    /// the device offset is sub-table-relative.
+    fn build_single_pos_format1_with_var_xadv(base: i16) -> Vec<u8> {
+        // Sub-table layout:
+        //   [0..2)  format = 1
+        //   [2..4)  coverageOffset
+        //   [4..6)  valueFormat = X_ADVANCE | X_ADV_DEVICE
+        //   [6..8)  ValueRecord.xAdvance = base
+        //   [8..10) ValueRecord.xAdvDeviceOffset = (sub-relative)
+        //   [10..16) VariationIndex { outer=0, inner=0, fmt=0x8000 }
+        //   [16..)  Coverage format 1: gids [7]
+        let vf = VF_X_ADVANCE | VF_X_ADV_DEVICE;
+        let mut sub = Vec::new();
+        sub.extend_from_slice(&1u16.to_be_bytes()); // format
+        sub.extend_from_slice(&16u16.to_be_bytes()); // covOff
+        sub.extend_from_slice(&vf.to_be_bytes());
+        sub.extend_from_slice(&base.to_be_bytes()); // xAdvance
+        sub.extend_from_slice(&10u16.to_be_bytes()); // xAdvDevice offset
+                                                     // VariationIndex sub-table at offset 10.
+        sub.extend_from_slice(&0u16.to_be_bytes()); // outer
+        sub.extend_from_slice(&0u16.to_be_bytes()); // inner
+        sub.extend_from_slice(&0x8000u16.to_be_bytes()); // deltaFormat
+                                                         // Coverage at offset 16.
+        sub.extend_from_slice(&1u16.to_be_bytes()); // cov format
+        sub.extend_from_slice(&1u16.to_be_bytes()); // glyph count
+        sub.extend_from_slice(&7u16.to_be_bytes()); // gid 7
+        let lookup = wrap_lookup(LOOKUP_SINGLE_POS, &sub);
+        wrap_gpos_single(&lookup)
+    }
+
+    #[test]
+    fn single_pos_var_applies_variation_index_delta() {
+        let bytes = build_single_pos_format1_with_var_xadv(100);
+        let g = GposTable::parse(&bytes).unwrap();
+        let ivs_bytes = build_single_region_ivs(-30);
+        let ivs = ItemVariationStore::parse(&ivs_bytes).unwrap();
+
+        // At the default instance (coord = 0) the rising-edge region
+        // scalar is 0 → delta 0 → static value.
+        let v_default = g.apply_lookup_type_1_var(0, 7, Some(&ivs), &[0.0]).unwrap();
+        assert_eq!(v_default.x_advance, 100);
+
+        // At the axis extreme (coord = +1) the region scalar is 1 →
+        // delta = -30 → x_advance = 70.
+        let v_max = g.apply_lookup_type_1_var(0, 7, Some(&ivs), &[1.0]).unwrap();
+        assert_eq!(v_max.x_advance, 70);
+
+        // Halfway (coord = 0.5) the scalar interpolates to 0.5 →
+        // delta = -15 → x_advance = 85.
+        let v_half = g.apply_lookup_type_1_var(0, 7, Some(&ivs), &[0.5]).unwrap();
+        assert_eq!(v_half.x_advance, 85);
+
+        // Without an IVS the VariationIndex resolves to 0 → static value.
+        let v_no_ivs = g.apply_lookup_type_1_var(0, 7, None, &[1.0]).unwrap();
+        assert_eq!(v_no_ivs.x_advance, 100);
+
+        // The non-variation accessor ignores the device offset entirely.
+        let v_static = g.apply_lookup_type_1(0, 7).unwrap();
+        assert_eq!(v_static.x_advance, 100);
+    }
+
+    #[test]
+    fn single_pos_var_matches_plain_when_no_device_offsets() {
+        // A value record without device offsets must give the same
+        // result through both the plain and variation-aware paths.
+        let bytes = build_single_pos_format1();
+        let g = GposTable::parse(&bytes).unwrap();
+        let v_plain = g.apply_lookup_type_1(0, 7).unwrap();
+        let v_var = g.apply_lookup_type_1_var(0, 7, None, &[0.5]).unwrap();
+        assert_eq!(v_plain, v_var);
+        assert_eq!(v_var.x_advance, -150);
     }
 
     #[test]

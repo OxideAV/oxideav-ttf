@@ -81,6 +81,7 @@ pub use tables::base::{
 pub use tables::cbdt::ColorBitmap;
 pub use tables::cblc::{BigGlyphMetrics, SmallGlyphMetrics};
 pub use tables::colr::ColorLayer;
+pub use tables::device::DeviceOrVariationIndex;
 pub use tables::ebdt::GrayBitmap;
 pub use tables::ebsc::{BitmapScale, SbitLineMetrics, EBSC_MAJOR_VERSION, EBSC_MINOR_VERSION};
 pub use tables::fvar::{NamedInstance, VariationAxis};

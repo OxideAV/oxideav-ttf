@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Device / VariationIndex table decoder (`tables::device`).** New
+  `DeviceOrVariationIndex` type decodes the shared 6-byte Device /
+  VariationIndex sub-table referenced by GPOS ValueRecords, Anchors,
+  GDEF caret values, and BASE coordinates, discriminating on the
+  `deltaFormat` field: classic Device tables (`0x0001`/`0x0002`/`0x0003`
+  — 2/4/8-bit MSB-first packed pixel deltas) are unpacked for tooling,
+  and VariationIndex tables (`0x8000`) carry the `(outer, inner)`
+  delta-set index pair. `font_unit_delta(ivs, coords)` resolves a
+  VariationIndex against an `ItemVariationStore` at the current
+  normalised instance; `resolve_device_delta` is the NULL-tolerant
+  offset entry point.
+
+- **Variable-font GPOS single adjustment (`apply_lookup_type_1_var`).**
+  The new LookupType-1 sibling resolves a matched ValueRecord's
+  VariationIndex device offsets against the GDEF `ItemVariationStore`,
+  folding the interpolated font-unit deltas into the returned
+  `PosValue` so a variable font's `wght`/`wdth`/`opsz` instance shifts
+  single-adjustment placement and advance. Identical to the static path
+  for value records without device offsets.
+
 - **CFF reverse glyph-name lookup + iteration.**
   `CffTable::gid_for_name(name)` inverts the charset (name → lowest GID),
   and `CffTable::iter_glyph_names()` walks every `(gid, name)` pair.
