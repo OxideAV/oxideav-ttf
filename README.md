@@ -536,6 +536,19 @@ kerning, and mark attachment.
   glyph-assembly parts with the extender flag, for both vertical and
   horizontal growth). Coverage lookups reuse the shared common-layout
   Coverage parser. `Font::has_math` / `Font::math_table` expose it.
+  Variable-font value resolution (§6.3.6.2.1): every `MathValueRecord`
+  carries an optional device / VariationIndex offset measured from its
+  parent sub-table, and the `*_resolved` accessors
+  (`MathConstants::value_resolved`, `MathGlyphInfo`'s
+  italics-correction / top-accent / math-kern resolvers, and the
+  glyph-assembly italics resolver) — surfaced font-wide through
+  `Font::math_constant_var` / `math_italics_correction_var` /
+  `math_top_accent_attachment_var` / `math_kern_var` /
+  `math_assembly_italics_correction_var` — fold in the VariationIndex
+  delta against the GDEF `ItemVariationStore` at the current instance.
+  Classic ppem-indexed Device tables (a render-time concern) contribute
+  no font-unit adjustment, so a static font's resolved values equal its
+  plain design-unit values.
 - `JSTF` table — justification suggestions (ISO/IEC 14496-22:2019
   §6.3.5). `tables::jstf` decodes the GSUB/GPOS-shaped navigation:
   `JstfTable` (script-record list), `JstfScript` (extender glyphs —
