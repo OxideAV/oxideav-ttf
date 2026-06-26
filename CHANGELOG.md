@@ -29,6 +29,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   single-adjustment placement and advance. Identical to the static path
   for value records without device offsets.
 
+- **Variable-font GPOS attachment (`lookup_mark_to_base_var`,
+  `lookup_mark_to_mark_var`, `lookup_cursive_attachment_var`).** The
+  mark-to-base, mark-to-mark, and cursive accessors gained variation
+  siblings that resolve AnchorFormat3 X/Y VariationIndex device offsets
+  against the GDEF `ItemVariationStore` at the current instance, so
+  diacritic attachment points, mark-on-mark stacking, and cursive
+  connection geometry track the variable axes. AnchorFormat3 parsing
+  now reads the two device offsets (was: skipped); format 1/2 and
+  device-offset-free format-3 anchors are unchanged.
+
 - **CFF reverse glyph-name lookup + iteration.**
   `CffTable::gid_for_name(name)` inverts the charset (name → lowest GID),
   and `CffTable::iter_glyph_names()` walks every `(gid, name)` pair.

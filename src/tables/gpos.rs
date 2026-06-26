@@ -686,7 +686,7 @@ impl<'a> GposTable<'a> {
             if effective_kind != LOOKUP_CURSIVE_POS {
                 continue;
             }
-            if let Some(v) = cursive_pos_lookup(effective_sub, gid) {
+            if let Some(v) = cursive_pos_lookup(effective_sub, gid, AnchorCtx::STATIC) {
                 return Some(v);
             }
         }
@@ -704,6 +704,35 @@ impl<'a> GposTable<'a> {
     /// first hit in lookup order (matches the OpenType "first matching
     /// subtable in lookup order" rule).
     pub fn lookup_cursive_attachment(&self, gid: u16) -> Option<CursiveAttachment> {
+        self.lookup_cursive_attachment_ctx(gid, AnchorCtx::STATIC)
+    }
+
+    /// Variation-aware sibling of [`Self::lookup_cursive_attachment`].
+    ///
+    /// Resolves AnchorFormat3 X/Y VariationIndex device offsets on the
+    /// entry / exit anchors against `ivs` at `normalised_coords` so a
+    /// variable font's instance shifts the cursive connection points
+    /// (Arabic Nastaliq joining geometry that varies with `wght`).
+    pub fn lookup_cursive_attachment_var(
+        &self,
+        gid: u16,
+        ivs: Option<&ItemVariationStore>,
+        normalised_coords: &[f32],
+    ) -> Option<CursiveAttachment> {
+        self.lookup_cursive_attachment_ctx(
+            gid,
+            AnchorCtx {
+                ivs,
+                coords: normalised_coords,
+            },
+        )
+    }
+
+    fn lookup_cursive_attachment_ctx(
+        &self,
+        gid: u16,
+        ctx: AnchorCtx<'_>,
+    ) -> Option<CursiveAttachment> {
         let lookup_list = self.bytes.get(self.lookup_list_off as usize..)?;
         if lookup_list.len() < 2 {
             return None;
@@ -723,7 +752,7 @@ impl<'a> GposTable<'a> {
                 if effective_kind != LOOKUP_CURSIVE_POS {
                     continue;
                 }
-                if let Some(v) = cursive_pos_lookup(effective_sub, gid) {
+                if let Some(v) = cursive_pos_lookup(effective_sub, gid, ctx) {
                     return Some(v);
                 }
             }
@@ -917,6 +946,39 @@ impl<'a> GposTable<'a> {
     /// Walks every LookupType 4 sub-table; the first hit wins (matches
     /// the OpenType "first matching subtable in lookup order" rule).
     pub fn lookup_mark_to_base(&self, base: u16, mark: u16) -> Option<(i16, i16)> {
+        self.lookup_mark_to_base_ctx(base, mark, AnchorCtx::STATIC)
+    }
+
+    /// Variation-aware sibling of [`Self::lookup_mark_to_base`].
+    ///
+    /// Resolves AnchorFormat3 X/Y VariationIndex device offsets on both
+    /// the mark and base anchors against `ivs` at `normalised_coords`,
+    /// so a variable font's instance shifts the diacritic attachment
+    /// point. Identical to the static path for anchors without device
+    /// offsets. `ivs` comes from the GDEF `ItemVariationStore`.
+    pub fn lookup_mark_to_base_var(
+        &self,
+        base: u16,
+        mark: u16,
+        ivs: Option<&ItemVariationStore>,
+        normalised_coords: &[f32],
+    ) -> Option<(i16, i16)> {
+        self.lookup_mark_to_base_ctx(
+            base,
+            mark,
+            AnchorCtx {
+                ivs,
+                coords: normalised_coords,
+            },
+        )
+    }
+
+    fn lookup_mark_to_base_ctx(
+        &self,
+        base: u16,
+        mark: u16,
+        ctx: AnchorCtx<'_>,
+    ) -> Option<(i16, i16)> {
         let lookup_list = self.bytes.get(self.lookup_list_off as usize..)?;
         if lookup_list.len() < 2 {
             return None;
@@ -946,7 +1008,7 @@ impl<'a> GposTable<'a> {
                 if effective_kind != LOOKUP_MARK_BASE_POS {
                     continue;
                 }
-                if let Some(v) = mark_base_pos_lookup(effective_sub, base, mark) {
+                if let Some(v) = mark_base_pos_lookup(effective_sub, base, mark, ctx) {
                     return Some(v);
                 }
             }
@@ -967,6 +1029,37 @@ impl<'a> GposTable<'a> {
     /// Walks every LookupType 6 sub-table; the first hit wins (matches
     /// the OpenType "first matching subtable in lookup order" rule).
     pub fn lookup_mark_to_mark(&self, mark1: u16, mark2: u16) -> Option<(i16, i16)> {
+        self.lookup_mark_to_mark_ctx(mark1, mark2, AnchorCtx::STATIC)
+    }
+
+    /// Variation-aware sibling of [`Self::lookup_mark_to_mark`].
+    ///
+    /// Resolves AnchorFormat3 X/Y VariationIndex device offsets on both
+    /// mark anchors against `ivs` at `normalised_coords` so a variable
+    /// font's instance shifts the mark-on-mark stacking offset.
+    pub fn lookup_mark_to_mark_var(
+        &self,
+        mark1: u16,
+        mark2: u16,
+        ivs: Option<&ItemVariationStore>,
+        normalised_coords: &[f32],
+    ) -> Option<(i16, i16)> {
+        self.lookup_mark_to_mark_ctx(
+            mark1,
+            mark2,
+            AnchorCtx {
+                ivs,
+                coords: normalised_coords,
+            },
+        )
+    }
+
+    fn lookup_mark_to_mark_ctx(
+        &self,
+        mark1: u16,
+        mark2: u16,
+        ctx: AnchorCtx<'_>,
+    ) -> Option<(i16, i16)> {
         let lookup_list = self.bytes.get(self.lookup_list_off as usize..)?;
         if lookup_list.len() < 2 {
             return None;
@@ -996,7 +1089,7 @@ impl<'a> GposTable<'a> {
                 if effective_kind != LOOKUP_MARK_MARK_POS {
                     continue;
                 }
-                if let Some(v) = mark_mark_pos_lookup(effective_sub, mark1, mark2) {
+                if let Some(v) = mark_mark_pos_lookup(effective_sub, mark1, mark2, ctx) {
                     return Some(v);
                 }
             }
@@ -1169,7 +1262,7 @@ impl<'a> GposTable<'a> {
         mark: u16,
     ) -> Option<(i16, i16)> {
         self.walk_lookup_subtables(lookup_index, LOOKUP_MARK_BASE_POS, |sub| {
-            mark_base_pos_lookup(sub, base, mark)
+            mark_base_pos_lookup(sub, base, mark, AnchorCtx::STATIC)
         })
     }
 
@@ -1184,7 +1277,7 @@ impl<'a> GposTable<'a> {
         mark2: u16,
     ) -> Option<(i16, i16)> {
         self.walk_lookup_subtables(lookup_index, LOOKUP_MARK_MARK_POS, |sub| {
-            mark_mark_pos_lookup(sub, mark1, mark2)
+            mark_mark_pos_lookup(sub, mark1, mark2, AnchorCtx::STATIC)
         })
     }
 }
@@ -1309,7 +1402,12 @@ fn pair_pos_format2(
 /// `mark.y_offset += dy` minus the un-attached pen advance for the
 /// mark, but the consumer crate handles that — this function returns
 /// the raw anchor delta only.
-fn mark_base_pos_lookup(sub: &[u8], base: u16, mark: u16) -> Option<(i16, i16)> {
+fn mark_base_pos_lookup(
+    sub: &[u8],
+    base: u16,
+    mark: u16,
+    ctx: AnchorCtx<'_>,
+) -> Option<(i16, i16)> {
     if sub.len() < 12 {
         return None;
     }
@@ -1345,7 +1443,7 @@ fn mark_base_pos_lookup(sub: &[u8], base: u16, mark: u16) -> Option<(i16, i16)> 
     }
     // MarkRecord's markAnchorOffset is relative to the MarkArray start.
     let mark_anchor = mark_array.get(mark_anchor_off_local..)?;
-    let (mx, my) = parse_anchor(mark_anchor)?;
+    let (mx, my) = parse_anchor_with(mark_anchor, ctx)?;
 
     // BaseArray: baseCount + baseRecord[base_idx] = baseAnchorOffset[mark_class_count]
     let base_array = sub.get(base_array_off..)?;
@@ -1363,7 +1461,7 @@ fn mark_base_pos_lookup(sub: &[u8], base: u16, mark: u16) -> Option<(i16, i16)> 
         return None;
     }
     let base_anchor = base_array.get(base_anchor_off_local..)?;
-    let (bx, by) = parse_anchor(base_anchor)?;
+    let (bx, by) = parse_anchor_with(base_anchor, ctx)?;
 
     // Mark gets pulled from its own anchor onto the base's anchor:
     //   (dx, dy) = base_anchor - mark_anchor
@@ -1379,7 +1477,12 @@ fn mark_base_pos_lookup(sub: &[u8], base: u16, mark: u16) -> Option<(i16, i16)> 
 /// MarkArray (mark1 records: class + anchor) and same outer Mark2Array
 /// (mark2 records: anchor per class). We share `parse_anchor` and the
 /// arithmetic with the mark-to-base path.
-fn mark_mark_pos_lookup(sub: &[u8], mark1: u16, mark2: u16) -> Option<(i16, i16)> {
+fn mark_mark_pos_lookup(
+    sub: &[u8],
+    mark1: u16,
+    mark2: u16,
+    ctx: AnchorCtx<'_>,
+) -> Option<(i16, i16)> {
     if sub.len() < 12 {
         return None;
     }
@@ -1422,7 +1525,7 @@ fn mark_mark_pos_lookup(sub: &[u8], mark1: u16, mark2: u16) -> Option<(i16, i16)
         return None;
     }
     let new_mark_anchor = new_mark_array.get(new_anchor_off_local..)?;
-    let (mx, my) = parse_anchor(new_mark_anchor)?;
+    let (mx, my) = parse_anchor_with(new_mark_anchor, ctx)?;
 
     // Mark2Array: mark2Count + mark2Record[mark1_idx] =
     // mark2AnchorOffset[mark_class_count].
@@ -1440,7 +1543,7 @@ fn mark_mark_pos_lookup(sub: &[u8], mark1: u16, mark2: u16) -> Option<(i16, i16)
         return None;
     }
     let prev_anchor = prev_array.get(prev_anchor_off_local..)?;
-    let (bx, by) = parse_anchor(prev_anchor)?;
+    let (bx, by) = parse_anchor_with(prev_anchor, ctx)?;
 
     // Same arithmetic as mark-to-base: pull the attaching mark from its
     // own anchor onto the previous mark's anchor for that class.
@@ -1464,7 +1567,7 @@ fn mark_mark_pos_lookup(sub: &[u8], mark1: u16, mark2: u16) -> Option<(i16, i16)
 /// Both offsets are relative to the **subtable** start. The Coverage
 /// table indexes the EntryExitRecord array (record `i` belongs to the
 /// `i`th covered glyph in coverage order).
-fn cursive_pos_lookup(sub: &[u8], gid: u16) -> Option<CursiveAttachment> {
+fn cursive_pos_lookup(sub: &[u8], gid: u16, ctx: AnchorCtx<'_>) -> Option<CursiveAttachment> {
     if sub.len() < 6 {
         return None;
     }
@@ -1489,12 +1592,12 @@ fn cursive_pos_lookup(sub: &[u8], gid: u16) -> Option<CursiveAttachment> {
     let entry = if entry_off == 0 {
         None
     } else {
-        sub.get(entry_off..).and_then(parse_anchor)
+        sub.get(entry_off..).and_then(|a| parse_anchor_with(a, ctx))
     };
     let exit = if exit_off == 0 {
         None
     } else {
-        sub.get(exit_off..).and_then(parse_anchor)
+        sub.get(exit_off..).and_then(|a| parse_anchor_with(a, ctx))
     };
     // The spec allows both offsets to be 0 (degenerate); we still
     // surface that as Some({None, None}) so the caller can distinguish
@@ -1612,19 +1715,74 @@ fn mark_ligature_pos_lookup(
     Some((lx.wrapping_sub(mx), ly.wrapping_sub(my)))
 }
 
+/// Variation context threaded through the anchor / value-record
+/// walkers. Carries the GDEF `ItemVariationStore` and the current
+/// normalised coordinate vector so an AnchorFormat3 X/Y device offset
+/// (or a ValueRecord device offset) that is actually a VariationIndex
+/// can be resolved to the current variation instance.
+///
+/// [`AnchorCtx::STATIC`] is the no-variation context — `ivs` is `None`
+/// so every device offset resolves to zero, reproducing the original
+/// static behaviour exactly.
+#[derive(Clone, Copy)]
+struct AnchorCtx<'a> {
+    ivs: Option<&'a ItemVariationStore>,
+    coords: &'a [f32],
+}
+
+impl AnchorCtx<'_> {
+    /// The static (non-variable) context: no IVS, empty coordinates.
+    const STATIC: AnchorCtx<'static> = AnchorCtx {
+        ivs: None,
+        coords: &[],
+    };
+}
+
 /// Parse an Anchor table. Supports format 1 (plain x/y) and format 3
 /// (x/y + device tables which we ignore — not relevant without TT
 /// hinting). Format 2 (x/y + anchor point) is read like format 1 since
 /// we don't run the bytecode interpreter to resolve the anchor point.
 fn parse_anchor(bytes: &[u8]) -> Option<(i16, i16)> {
+    parse_anchor_with(bytes, AnchorCtx::STATIC)
+}
+
+/// Parse an Anchor table, resolving an AnchorFormat3 X/Y device offset
+/// against `ctx` when it is a VariationIndex.
+///
+/// AnchorFormat3 layout (OpenType §"Anchor Table: Format 3"):
+/// ```text
+///   u16      anchorFormat == 3
+///   i16      xCoordinate
+///   i16      yCoordinate
+///   Offset16 xDeviceOffset    // Device/VariationIndex, NULL = 0
+///   Offset16 yDeviceOffset    // Device/VariationIndex, NULL = 0
+/// ```
+/// Both device offsets are relative to the Anchor table base. Formats 1
+/// and 2 carry only x/y; format 2's anchor-point index needs the TT
+/// bytecode interpreter, which is out of scope, so it reads like
+/// format 1. A VariationIndex device offset folds the interpolated
+/// font-unit delta (rounded, saturating) into the coordinate; a classic
+/// Device table contributes nothing at the font-unit layer.
+fn parse_anchor_with(bytes: &[u8], ctx: AnchorCtx<'_>) -> Option<(i16, i16)> {
     if bytes.len() < 6 {
         return None;
     }
     let format = read_u16(bytes, 0).ok()?;
-    let x = read_i16(bytes, 2).ok()?;
-    let y = read_i16(bytes, 4).ok()?;
+    let mut x = read_i16(bytes, 2).ok()?;
+    let mut y = read_i16(bytes, 4).ok()?;
     match format {
-        1..=3 => Some((x, y)),
+        1 | 2 => Some((x, y)),
+        3 => {
+            // Resolve the two device / VariationIndex offsets, which
+            // sit at +6 (x) and +8 (y), relative to the Anchor base.
+            if bytes.len() >= 10 {
+                let x_dev = read_device_offset(bytes, 6);
+                let y_dev = read_device_offset(bytes, 8);
+                x = saturating_add_delta(x, bytes, x_dev, ctx.ivs, ctx.coords);
+                y = saturating_add_delta(y, bytes, y_dev, ctx.ivs, ctx.coords);
+            }
+            Some((x, y))
+        }
         _ => None,
     }
 }
@@ -2230,7 +2388,7 @@ impl<'a> GposTable<'a> {
             if effective_kind != LOOKUP_MARK_BASE_POS {
                 continue;
             }
-            if let Some(v) = mark_base_pos_lookup(effective_sub, base, mark) {
+            if let Some(v) = mark_base_pos_lookup(effective_sub, base, mark, AnchorCtx::STATIC) {
                 return Some(v);
             }
         }
@@ -2258,7 +2416,7 @@ impl<'a> GposTable<'a> {
             if effective_kind != LOOKUP_MARK_MARK_POS {
                 continue;
             }
-            if let Some(v) = mark_mark_pos_lookup(effective_sub, mark1, mark2) {
+            if let Some(v) = mark_mark_pos_lookup(effective_sub, mark1, mark2, AnchorCtx::STATIC) {
                 return Some(v);
             }
         }
@@ -3019,6 +3177,116 @@ mod tests {
         let bytes = build_simple_pp1();
         let g = GposTable::parse(&bytes).unwrap();
         assert_eq!(g.lookup_mark_to_base(50, 60), None);
+    }
+
+    /// Same shape as `build_simple_mark_base` but the BASE anchor is
+    /// AnchorFormat3 with a Y VariationIndex device offset → (outer 0,
+    /// inner 0). The mark anchor stays format 1. So the static Y delta
+    /// is `800 - 0 = 800`, and the variation shifts the base Y by the
+    /// IVS delta.
+    fn build_mark_base_var_y() -> Vec<u8> {
+        // Base anchor format 3: format=3, x=100, y=800, xDev=0, yDev=10,
+        // then a VariationIndex { outer=0, inner=0, fmt=0x8000 } at +10.
+        let mut base_anchor = Vec::new();
+        base_anchor.extend_from_slice(&3u16.to_be_bytes()); // format 3
+        base_anchor.extend_from_slice(&100i16.to_be_bytes()); // x
+        base_anchor.extend_from_slice(&800i16.to_be_bytes()); // y
+        base_anchor.extend_from_slice(&0u16.to_be_bytes()); // xDevOff (NULL)
+        base_anchor.extend_from_slice(&10u16.to_be_bytes()); // yDevOff
+        base_anchor.extend_from_slice(&0u16.to_be_bytes()); // VarIdx.outer
+        base_anchor.extend_from_slice(&0u16.to_be_bytes()); // VarIdx.inner
+        base_anchor.extend_from_slice(&0x8000u16.to_be_bytes()); // deltaFormat
+
+        let mut mark_anchor = Vec::new();
+        mark_anchor.extend_from_slice(&1u16.to_be_bytes());
+        mark_anchor.extend_from_slice(&50i16.to_be_bytes());
+        mark_anchor.extend_from_slice(&0i16.to_be_bytes());
+
+        let mut mark_array = Vec::new();
+        mark_array.extend_from_slice(&1u16.to_be_bytes());
+        mark_array.extend_from_slice(&0u16.to_be_bytes()); // class 0
+        mark_array.extend_from_slice(&6u16.to_be_bytes()); // anchor offset
+        mark_array.extend_from_slice(&mark_anchor);
+
+        let mut base_array = Vec::new();
+        base_array.extend_from_slice(&1u16.to_be_bytes());
+        base_array.extend_from_slice(&4u16.to_be_bytes());
+        base_array.extend_from_slice(&base_anchor);
+
+        let mut mark_cov = Vec::new();
+        mark_cov.extend_from_slice(&1u16.to_be_bytes());
+        mark_cov.extend_from_slice(&1u16.to_be_bytes());
+        mark_cov.extend_from_slice(&200u16.to_be_bytes());
+
+        let mut base_cov = Vec::new();
+        base_cov.extend_from_slice(&1u16.to_be_bytes());
+        base_cov.extend_from_slice(&1u16.to_be_bytes());
+        base_cov.extend_from_slice(&10u16.to_be_bytes());
+
+        let header = 12usize;
+        let mark_cov_off = header;
+        let base_cov_off = mark_cov_off + mark_cov.len();
+        let mark_array_off = base_cov_off + base_cov.len();
+        let base_array_off = mark_array_off + mark_array.len();
+        let mut mbp = Vec::new();
+        mbp.extend_from_slice(&1u16.to_be_bytes());
+        mbp.extend_from_slice(&(mark_cov_off as u16).to_be_bytes());
+        mbp.extend_from_slice(&(base_cov_off as u16).to_be_bytes());
+        mbp.extend_from_slice(&1u16.to_be_bytes());
+        mbp.extend_from_slice(&(mark_array_off as u16).to_be_bytes());
+        mbp.extend_from_slice(&(base_array_off as u16).to_be_bytes());
+        mbp.extend_from_slice(&mark_cov);
+        mbp.extend_from_slice(&base_cov);
+        mbp.extend_from_slice(&mark_array);
+        mbp.extend_from_slice(&base_array);
+
+        let lookup = wrap_lookup(LOOKUP_MARK_BASE_POS, &mbp);
+        wrap_gpos_single(&lookup)
+    }
+
+    #[test]
+    fn mark_to_base_var_shifts_anchor_with_instance() {
+        let bytes = build_mark_base_var_y();
+        let g = GposTable::parse(&bytes).unwrap();
+        // IVS: rising-edge region peaking at +1, delta = +120.
+        let ivs_bytes = build_single_region_ivs(120);
+        let ivs = ItemVariationStore::parse(&ivs_bytes).unwrap();
+
+        // Static path ignores the device offset: (100-50, 800-0).
+        assert_eq!(g.lookup_mark_to_base(10, 200), Some((50, 800)));
+
+        // Default instance (coord 0): scalar 0 → no shift.
+        assert_eq!(
+            g.lookup_mark_to_base_var(10, 200, Some(&ivs), &[0.0]),
+            Some((50, 800))
+        );
+        // Max instance (coord +1): base Y += 120 → (50, 920).
+        assert_eq!(
+            g.lookup_mark_to_base_var(10, 200, Some(&ivs), &[1.0]),
+            Some((50, 920))
+        );
+        // Half (coord 0.5): base Y += 60 → (50, 860).
+        assert_eq!(
+            g.lookup_mark_to_base_var(10, 200, Some(&ivs), &[0.5]),
+            Some((50, 860))
+        );
+        // No IVS → static.
+        assert_eq!(
+            g.lookup_mark_to_base_var(10, 200, None, &[1.0]),
+            Some((50, 800))
+        );
+    }
+
+    #[test]
+    fn mark_to_base_var_matches_static_for_format1_anchors() {
+        // The format-1-anchor fixture must give identical results
+        // through both paths regardless of the instance.
+        let bytes = build_simple_mark_base();
+        let g = GposTable::parse(&bytes).unwrap();
+        assert_eq!(
+            g.lookup_mark_to_base(10, 200),
+            g.lookup_mark_to_base_var(10, 200, None, &[0.7])
+        );
     }
 
     /// Build a tiny GPOS with one MarkMarkPosFormat1 subtable: previous
