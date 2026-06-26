@@ -30,6 +30,8 @@
 //! already in the MVAR / HVAR / VVAR pipeline if/when callers need it.
 
 use crate::parser::{read_i16, read_u16, read_u32};
+use crate::tables::device::resolve_device_delta;
+use crate::tables::mvar::ItemVariationStore;
 use crate::Error;
 
 /// Predefined glyph classes per the GDEF spec.
@@ -239,6 +241,60 @@ impl<'a> GdefTable<'a> {
         Some(out)
     }
 
+    /// Like [`Self::ligature_carets`] but resolves each caret to a
+    /// concrete font-unit coordinate at the current variation instance.
+    ///
+    /// * **Format 1** (`DesignUnits`) → its coordinate, unchanged.
+    /// * **Format 3** (`DesignUnitsWithDevice`) → the coordinate plus
+    ///   the VariationIndex delta resolved against `ivs` at
+    ///   `normalised_coords` (a classic Device table adds nothing at the
+    ///   font-unit layer). The device offset is relative to the
+    ///   CaretValueFormat3 table base, per the spec.
+    /// * **Format 2** (`ContourPoint`) → `None` in that slot: resolving
+    ///   a contour-point caret needs the TrueType bytecode interpreter,
+    ///   which this crate does not run. The slot is preserved so callers
+    ///   keep the caret-index alignment.
+    ///
+    /// `ivs` is the GDEF `ItemVariationStore` (see
+    /// [`Self::item_var_store_bytes`]); pass `None` for a non-variable
+    /// font, in which case every Format-3 caret resolves to its static
+    /// coordinate.
+    pub fn ligature_carets_resolved(
+        &self,
+        glyph_id: u16,
+        ivs: Option<&ItemVariationStore>,
+        normalised_coords: &[f32],
+    ) -> Option<Vec<Option<i16>>> {
+        let base = self.lig_caret_list_off? as usize;
+        let sub = self.bytes.get(base..)?;
+        if sub.len() < 4 {
+            return None;
+        }
+        let cov_off = read_u16(sub, 0).ok()? as usize;
+        let count = read_u16(sub, 2).ok()? as usize;
+        let cov = sub.get(cov_off..)?;
+        let cov_idx = coverage_lookup(cov, glyph_id)? as usize;
+        if cov_idx >= count {
+            return None;
+        }
+        let lg_off = read_u16(sub, 4 + cov_idx * 2).ok()? as usize;
+        let lg = sub.get(lg_off..)?;
+        if lg.len() < 2 {
+            return None;
+        }
+        let caret_count = read_u16(lg, 0).ok()? as usize;
+        if lg.len() < 2 + caret_count * 2 {
+            return None;
+        }
+        let mut out = Vec::with_capacity(caret_count);
+        for i in 0..caret_count {
+            let cv_off = read_u16(lg, 2 + i * 2).ok()? as usize;
+            let cv = lg.get(cv_off..)?;
+            out.push(resolve_caret_value(cv, ivs, normalised_coords));
+        }
+        Some(out)
+    }
+
     /// Number of mark glyph sets defined by the GDEF `MarkGlyphSets`
     /// sub-table (v1.2+). Returns 0 if the table is absent.
     pub fn mark_glyph_set_count(&self) -> u16 {
@@ -343,6 +399,31 @@ fn parse_caret_value(bytes: &[u8]) -> Option<CaretValue> {
             })
         }
         _ => None,
+    }
+}
+
+/// Resolve a CaretValue table (offset 0 at the format word) to a
+/// concrete font-unit coordinate at the current instance.
+///
+/// Returns `None` for Format 2 (contour point — needs the TT bytecode
+/// interpreter) or a structurally invalid table. The Format-3 device
+/// offset is relative to the CaretValueFormat3 table base (`bytes`).
+fn resolve_caret_value(
+    bytes: &[u8],
+    ivs: Option<&ItemVariationStore>,
+    normalised_coords: &[f32],
+) -> Option<i16> {
+    match parse_caret_value(bytes)? {
+        CaretValue::DesignUnits(v) => Some(v),
+        CaretValue::ContourPoint(_) => None,
+        CaretValue::DesignUnitsWithDevice {
+            coordinate,
+            device_offset,
+        } => {
+            let delta = resolve_device_delta(bytes, device_offset, ivs, normalised_coords);
+            let rounded = delta.round() as i32;
+            Some((coordinate as i32 + rounded).clamp(i16::MIN as i32, i16::MAX as i32) as i16)
+        }
     }
 }
 
@@ -761,6 +842,104 @@ mod tests {
             }
             _ => panic!("expected DesignUnitsWithDevice variant"),
         }
+    }
+
+    /// Build a standalone single-region IVS (rising-edge region peaking
+    /// at +1, one IVD row carrying `[delta]`) — same shape used across
+    /// the variation-table tests.
+    fn build_single_region_ivs(delta: i16) -> Vec<u8> {
+        let mut b = vec![0u8; 32];
+        b[0..2].copy_from_slice(&1u16.to_be_bytes());
+        b[2..6].copy_from_slice(&12u32.to_be_bytes());
+        b[6..8].copy_from_slice(&1u16.to_be_bytes());
+        b[8..12].copy_from_slice(&22u32.to_be_bytes());
+        b[12..14].copy_from_slice(&1u16.to_be_bytes());
+        b[14..16].copy_from_slice(&1u16.to_be_bytes());
+        b[16..18].copy_from_slice(&0i16.to_be_bytes());
+        b[18..20].copy_from_slice(&16384i16.to_be_bytes());
+        b[20..22].copy_from_slice(&16384i16.to_be_bytes());
+        b[22..24].copy_from_slice(&1u16.to_be_bytes());
+        b[24..26].copy_from_slice(&1u16.to_be_bytes());
+        b[26..28].copy_from_slice(&1u16.to_be_bytes());
+        b[28..30].copy_from_slice(&0u16.to_be_bytes());
+        b[30..32].copy_from_slice(&delta.to_be_bytes());
+        b
+    }
+
+    #[test]
+    fn lig_caret_format3_resolves_variation_index() {
+        // ligCaretList for ligature glyph 5 with one Format-3 caret:
+        //   coord = 200, device offset → a VariationIndex (0, 0).
+        let cov_rel: u16 = 6; // after 6-byte ligCaretList header
+        let cov_bytes = {
+            let mut c = Vec::new();
+            c.extend_from_slice(&1u16.to_be_bytes());
+            c.extend_from_slice(&1u16.to_be_bytes());
+            c.extend_from_slice(&5u16.to_be_bytes());
+            c
+        };
+        let lg_rel: u16 = cov_rel + cov_bytes.len() as u16;
+        // Format-3 CaretValue table: format(2) + coord(2) + devOff(2) +
+        // VariationIndex{outer,inner,fmt}(6). devOff = 6 (caret-relative).
+        let cv0_bytes = {
+            let mut c = Vec::new();
+            c.extend_from_slice(&3u16.to_be_bytes()); // format 3
+            c.extend_from_slice(&200i16.to_be_bytes()); // coord
+            c.extend_from_slice(&6u16.to_be_bytes()); // device offset
+            c.extend_from_slice(&0u16.to_be_bytes()); // VarIdx.outer
+            c.extend_from_slice(&0u16.to_be_bytes()); // VarIdx.inner
+            c.extend_from_slice(&0x8000u16.to_be_bytes()); // deltaFormat
+            c
+        };
+        let cv0_rel: u16 = 4; // after 4-byte LigGlyph header
+        let mut lg_bytes = Vec::new();
+        lg_bytes.extend_from_slice(&1u16.to_be_bytes()); // caretCount
+        lg_bytes.extend_from_slice(&cv0_rel.to_be_bytes());
+        lg_bytes.extend_from_slice(&cv0_bytes);
+
+        let mut sub = Vec::new();
+        sub.extend_from_slice(&cov_rel.to_be_bytes());
+        sub.extend_from_slice(&1u16.to_be_bytes()); // ligGlyphCount
+        sub.extend_from_slice(&lg_rel.to_be_bytes()); // ligGlyphOffsets[0]
+        sub.extend_from_slice(&cov_bytes);
+        sub.extend_from_slice(&lg_bytes);
+
+        // GDEF v1.3 header (18 bytes): ligCaretList at slot 8,
+        // itemVarStore Offset32 at 14.
+        let mut t = vec![0u8; 18];
+        t[0..2].copy_from_slice(&1u16.to_be_bytes());
+        t[2..4].copy_from_slice(&3u16.to_be_bytes()); // minor 1.3
+        let lig_off: u16 = 18;
+        t[8..10].copy_from_slice(&lig_off.to_be_bytes());
+        let ivs_off: u32 = 18 + sub.len() as u32;
+        t[14..18].copy_from_slice(&ivs_off.to_be_bytes());
+        t.extend_from_slice(&sub);
+        t.extend_from_slice(&build_single_region_ivs(60));
+
+        let g = GdefTable::parse(&t).unwrap();
+        let ivs_bytes = g.item_var_store_bytes().unwrap();
+        let ivs = crate::tables::mvar::ItemVariationStore::parse(ivs_bytes).unwrap();
+
+        // Static (unresolved) variant still surfaces the raw offset.
+        let raw = g.ligature_carets(5).unwrap();
+        assert!(matches!(
+            raw[0],
+            CaretValue::DesignUnitsWithDevice {
+                coordinate: 200,
+                ..
+            }
+        ));
+
+        // Resolved: default instance → 200, max → 260, half → 230.
+        let at0 = g.ligature_carets_resolved(5, Some(&ivs), &[0.0]).unwrap();
+        assert_eq!(at0, vec![Some(200)]);
+        let at1 = g.ligature_carets_resolved(5, Some(&ivs), &[1.0]).unwrap();
+        assert_eq!(at1, vec![Some(260)]);
+        let at_half = g.ligature_carets_resolved(5, Some(&ivs), &[0.5]).unwrap();
+        assert_eq!(at_half, vec![Some(230)]);
+        // No IVS → static coordinate.
+        let no_ivs = g.ligature_carets_resolved(5, None, &[1.0]).unwrap();
+        assert_eq!(no_ivs, vec![Some(200)]);
     }
 
     #[test]

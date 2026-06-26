@@ -47,6 +47,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   PairPosFormat2). Variable kerning tracks the design axes; static path
   unchanged for pairs without an `xAdvance` device offset.
 
+- **Variable-font GDEF ligature carets
+  (`GdefTable::ligature_carets_resolved`).** Resolves each ligature
+  caret to a concrete font-unit coordinate at the current instance:
+  CaretValueFormat1 passes through, Format3 folds in its VariationIndex
+  delta resolved against the GDEF `ItemVariationStore` (device offset
+  relative to the CaretValueFormat3 table base), and Format2
+  contour-point carets surface as `None` (need the TT bytecode
+  interpreter). Cursor placement inside a ligature now tracks the
+  variable axes.
+
 - **CFF reverse glyph-name lookup + iteration.**
   `CffTable::gid_for_name(name)` inverts the charset (name → lowest GID),
   and `CffTable::iter_glyph_names()` walks every `(gid, name)` pair.
