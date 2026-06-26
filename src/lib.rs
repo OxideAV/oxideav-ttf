@@ -2188,6 +2188,21 @@ impl<'a> Font<'a> {
             .lookup_mark_to_ligature(ligature, ligature_component, mark)
     }
 
+    /// Variation-aware sibling of [`Self::lookup_mark_to_ligature`]:
+    /// resolves AnchorFormat3 VariationIndex offsets against the GDEF
+    /// `ItemVariationStore` at the font's current instance.
+    pub fn lookup_mark_to_ligature_var(
+        &self,
+        ligature: u16,
+        ligature_component: u16,
+        mark: u16,
+    ) -> Option<(i16, i16)> {
+        let gpos = self.gpos.as_ref()?;
+        let ivs = self.gdef_item_variation_store();
+        let coords = self.normalised_coords();
+        gpos.lookup_mark_to_ligature_var(ligature, ligature_component, mark, ivs.as_ref(), &coords)
+    }
+
     /// Apply GPOS LookupType 7 (Contextual Positioning) to the glyph
     /// run starting at `pos` via the lookup at `lookup_index`.
     ///

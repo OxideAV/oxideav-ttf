@@ -9,10 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Variable-font GPOS mark-to-ligature (`lookup_mark_to_ligature_var`,
+  Font + GposTable).** The LookupType-5 accessor resolves AnchorFormat3
+  VariationIndex offsets on both the mark anchor and the selected
+  ligature component's anchor against the GDEF `ItemVariationStore`, so
+  a mark attached to a ligature component tracks the design axes.
+  (`parse_anchor` is now fully variation-aware: every GPOS anchor path
+  — base, mark, cursive, ligature — goes through `parse_anchor_with`.)
+
 - **Font-level variable-font GPOS / GDEF accessors.** `Font` now
   exposes `lookup_kerning_var`, `lookup_mark_to_base_var`,
   `lookup_mark_to_mark_var`, `lookup_cursive_attachment_var`,
-  `gpos_apply_lookup_type_1_var`, and `ligature_carets_resolved`. Each
+  `lookup_mark_to_ligature_var`, `gpos_apply_lookup_type_1_var`, and
+  `ligature_carets_resolved`. Each
   decodes the GDEF `ItemVariationStore` once and threads the font's
   current `normalised_coords()` (post-`avar`) into the table-level
   variation resolvers, so VariationIndex device offsets in GPOS value

@@ -804,9 +804,13 @@ impl<'a> GposTable<'a> {
             if effective_kind != LOOKUP_MARK_LIGATURE_POS {
                 continue;
             }
-            if let Some(v) =
-                mark_ligature_pos_lookup(effective_sub, ligature, ligature_component, mark)
-            {
+            if let Some(v) = mark_ligature_pos_lookup(
+                effective_sub,
+                ligature,
+                ligature_component,
+                mark,
+                AnchorCtx::STATIC,
+            ) {
                 return Some(v);
             }
         }
@@ -823,6 +827,39 @@ impl<'a> GposTable<'a> {
         ligature: u16,
         ligature_component: u16,
         mark: u16,
+    ) -> Option<(i16, i16)> {
+        self.lookup_mark_to_ligature_ctx(ligature, ligature_component, mark, AnchorCtx::STATIC)
+    }
+
+    /// Variation-aware sibling of [`Self::lookup_mark_to_ligature`]:
+    /// resolves AnchorFormat3 X/Y VariationIndex device offsets on both
+    /// the mark anchor and the selected component's ligature anchor
+    /// against `ivs` at `normalised_coords`.
+    pub fn lookup_mark_to_ligature_var(
+        &self,
+        ligature: u16,
+        ligature_component: u16,
+        mark: u16,
+        ivs: Option<&ItemVariationStore>,
+        normalised_coords: &[f32],
+    ) -> Option<(i16, i16)> {
+        self.lookup_mark_to_ligature_ctx(
+            ligature,
+            ligature_component,
+            mark,
+            AnchorCtx {
+                ivs,
+                coords: normalised_coords,
+            },
+        )
+    }
+
+    fn lookup_mark_to_ligature_ctx(
+        &self,
+        ligature: u16,
+        ligature_component: u16,
+        mark: u16,
+        ctx: AnchorCtx<'_>,
     ) -> Option<(i16, i16)> {
         let lookup_list = self.bytes.get(self.lookup_list_off as usize..)?;
         if lookup_list.len() < 2 {
@@ -844,7 +881,7 @@ impl<'a> GposTable<'a> {
                     continue;
                 }
                 if let Some(v) =
-                    mark_ligature_pos_lookup(effective_sub, ligature, ligature_component, mark)
+                    mark_ligature_pos_lookup(effective_sub, ligature, ligature_component, mark, ctx)
                 {
                     return Some(v);
                 }
@@ -1703,6 +1740,7 @@ fn mark_ligature_pos_lookup(
     ligature: u16,
     ligature_component: u16,
     mark: u16,
+    ctx: AnchorCtx<'_>,
 ) -> Option<(i16, i16)> {
     if sub.len() < 12 {
         return None;
@@ -1738,7 +1776,7 @@ fn mark_ligature_pos_lookup(
         return None;
     }
     let mark_anchor = mark_array.get(mark_anchor_off_local..)?;
-    let (mx, my) = parse_anchor(mark_anchor)?;
+    let (mx, my) = parse_anchor_with(mark_anchor, ctx)?;
 
     // LigatureArray: ligatureCount + ligatureAttachOffsets[lig_idx]
     let lig_array = sub.get(lig_array_off..)?;
@@ -1768,7 +1806,7 @@ fn mark_ligature_pos_lookup(
     }
     // Component-anchor offsets are relative to the LigatureAttach start.
     let lig_anchor = lig_attach.get(lig_anchor_off_local..)?;
-    let (lx, ly) = parse_anchor(lig_anchor)?;
+    let (lx, ly) = parse_anchor_with(lig_anchor, ctx)?;
 
     Some((lx.wrapping_sub(mx), ly.wrapping_sub(my)))
 }
@@ -1794,14 +1832,6 @@ impl AnchorCtx<'_> {
         ivs: None,
         coords: &[],
     };
-}
-
-/// Parse an Anchor table. Supports format 1 (plain x/y) and format 3
-/// (x/y + device tables which we ignore — not relevant without TT
-/// hinting). Format 2 (x/y + anchor point) is read like format 1 since
-/// we don't run the bytecode interpreter to resolve the anchor point.
-fn parse_anchor(bytes: &[u8]) -> Option<(i16, i16)> {
-    parse_anchor_with(bytes, AnchorCtx::STATIC)
 }
 
 /// Parse an Anchor table, resolving an AnchorFormat3 X/Y device offset
@@ -4421,6 +4451,21 @@ mod tests {
         let g = GposTable::parse(&bytes).unwrap();
         assert_eq!(g.lookup_mark_to_ligature(100, 1, 200), Some((490, 850)));
         assert_eq!(g.lookup_mark_to_ligature(99, 0, 200), None);
+    }
+
+    #[test]
+    fn lookup_mark_to_ligature_var_matches_static_for_format1_anchors() {
+        // The format-1-anchor fixture carries no device offsets, so the
+        // variation path must agree with the static path at any
+        // instance. (Format-3 anchor interpolation shares the
+        // parse_anchor_with code path validated in
+        // mark_to_base_var_shifts_anchor_with_instance.)
+        let bytes = build_mark_ligature_pos_format1();
+        let g = GposTable::parse(&bytes).unwrap();
+        assert_eq!(
+            g.lookup_mark_to_ligature(100, 1, 200),
+            g.lookup_mark_to_ligature_var(100, 1, 200, None, &[0.9])
+        );
     }
 
     // ---- ExtensionPos (LookupType 9) wrapping at the lookup level --
