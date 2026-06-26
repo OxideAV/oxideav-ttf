@@ -61,15 +61,50 @@ pub use shape::ShapedGlyph;
 
 use crate::parser::TableDirectory;
 use crate::tables::{
-    avar::AvarTable, base::BaseTable, cbdt::CbdtTable, cblc::CblcTable, cff::CffTable,
-    cff2::Cff2Table, cmap::CmapTable, colr::ColrTable, cpal::CpalTable, cvar::CvarTable,
-    ebdt::EbdtTable, ebsc::EbscTable, fvar::FvarTable, gasp::GaspTable, gdef::GdefTable,
-    glyf::GlyfTable, gpos::GposTable, gsub::GsubTable, gvar::GvarTable, hdmx::HdmxTable,
-    head::HeadTable, hhea::HheaTable, hmtx::HmtxTable, hvar::HvarTable, jstf::JstfTable,
-    kern::KernTable, loca::LocaTable, ltsh::LtshTable, math::MathTable, maxp::MaxpTable,
-    meta::MetaTable, mvar::MvarTable, name::NameTable, os2::Os2Table, pclt::PcltTable,
-    post::PostTable, sbix::SbixTable, stat::StatTable, svg::SvgTable, vdmx::VdmxTable,
-    vhea::VheaTable, vmtx::VmtxTable, vorg::VorgTable, vvar::VvarTable,
+    avar::AvarTable,
+    base::BaseTable,
+    cbdt::CbdtTable,
+    cblc::CblcTable,
+    cff::CffTable,
+    cff2::Cff2Table,
+    cmap::CmapTable,
+    colr::ColrTable,
+    cpal::CpalTable,
+    cvar::CvarTable,
+    ebdt::EbdtTable,
+    ebsc::EbscTable,
+    fvar::FvarTable,
+    gasp::GaspTable,
+    gdef::GdefTable,
+    glyf::GlyfTable,
+    gpos::GposTable,
+    gsub::GsubTable,
+    gvar::GvarTable,
+    hdmx::HdmxTable,
+    head::HeadTable,
+    hhea::HheaTable,
+    hmtx::HmtxTable,
+    hvar::HvarTable,
+    jstf::JstfTable,
+    kern::KernTable,
+    loca::LocaTable,
+    ltsh::LtshTable,
+    math::{GrowDirection, MathKernCorner, MathTable},
+    maxp::MaxpTable,
+    meta::MetaTable,
+    mvar::MvarTable,
+    name::NameTable,
+    os2::Os2Table,
+    pclt::PcltTable,
+    post::PostTable,
+    sbix::SbixTable,
+    stat::StatTable,
+    svg::SvgTable,
+    vdmx::VdmxTable,
+    vhea::VheaTable,
+    vmtx::VmtxTable,
+    vorg::VorgTable,
+    vvar::VvarTable,
 };
 
 pub use outline::{BBox, Contour, Point, TtOutline};
@@ -854,6 +889,66 @@ impl<'a> Font<'a> {
     /// (ISO/IEC 14496-22:2019 §6.3.6).
     pub fn math_table(&self) -> Option<&MathTable<'a>> {
         self.math.as_ref()
+    }
+
+    /// A `MathConstants` value (one of the `tables::math::constant::*`
+    /// indices) resolved at the font's current variation instance.
+    ///
+    /// Folds in the record's VariationIndex correction (§6.3.6.2.1)
+    /// against the GDEF `ItemVariationStore` at the instance set via
+    /// [`Self::set_variation_coords`]. Returns `None` when the font has no
+    /// MATH table or no MathConstants sub-table; the value is in font
+    /// design units (fractional after variation). For a non-variable font
+    /// the result equals the plain `MathConstants` design-unit value.
+    pub fn math_constant_var(&self, index: usize) -> Option<f32> {
+        let c = self.math.as_ref()?.constants()?;
+        let ivs = self.gdef_item_variation_store();
+        let coords = self.normalised_coords();
+        Some(c.value_resolved(index, ivs.as_ref(), &coords))
+    }
+
+    /// Per-glyph MATH italics correction for `gid` resolved at the current
+    /// variation instance (§6.3.6.2.5 + §6.3.6.2.1). `None` when there is
+    /// no MATH table, no MathGlyphInfo, or `gid` is uncovered.
+    pub fn math_italics_correction_var(&self, gid: u16) -> Option<f32> {
+        let gi = self.math.as_ref()?.glyph_info()?;
+        let ivs = self.gdef_item_variation_store();
+        let coords = self.normalised_coords();
+        gi.italics_correction_resolved(gid, ivs.as_ref(), &coords)
+    }
+
+    /// Per-glyph MATH top-accent attachment point for `gid` resolved at the
+    /// current variation instance (§6.3.6.2.6 + §6.3.6.2.1). `None` when
+    /// uncovered (the layout engine then uses the glyph's geometric centre).
+    pub fn math_top_accent_attachment_var(&self, gid: u16) -> Option<f32> {
+        let gi = self.math.as_ref()?.glyph_info()?;
+        let ivs = self.gdef_item_variation_store();
+        let coords = self.normalised_coords();
+        gi.top_accent_attachment_resolved(gid, ivs.as_ref(), &coords)
+    }
+
+    /// MATH per-corner kern value for `gid` at correction `height`,
+    /// resolved at the current variation instance (§6.3.6.2.8/.9 +
+    /// §6.3.6.2.1). `None` when `gid` has no kern table for `corner`.
+    pub fn math_kern_var(&self, gid: u16, corner: MathKernCorner, height: i16) -> Option<f32> {
+        let gi = self.math.as_ref()?.glyph_info()?;
+        let ivs = self.gdef_item_variation_store();
+        let coords = self.normalised_coords();
+        gi.math_kern_resolved(gid, corner, height, ivs.as_ref(), &coords)
+    }
+
+    /// MATH glyph-assembly italics correction for `gid` growing in `dir`,
+    /// resolved at the current variation instance (§6.3.6.2.12 +
+    /// §6.3.6.2.1). `None` when `gid` has no assembly in `dir`.
+    pub fn math_assembly_italics_correction_var(
+        &self,
+        gid: u16,
+        dir: GrowDirection,
+    ) -> Option<f32> {
+        let v = self.math.as_ref()?.variants()?;
+        let ivs = self.gdef_item_variation_store();
+        let coords = self.normalised_coords();
+        v.assembly_italics_correction_resolved(gid, dir, ivs.as_ref(), &coords)
     }
 
     /// `true` when the font ships a `JSTF` table (justification data).

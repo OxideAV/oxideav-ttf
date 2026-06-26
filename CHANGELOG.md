@@ -26,6 +26,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Reuses the shared Device/VariationIndex decoder. (Closes the MATH half
   of the variable-font VariationIndex sweep.)
 
+- **`Font`-level MATH variation accessors.** `Font::math_constant_var`,
+  `math_italics_correction_var`, `math_top_accent_attachment_var`,
+  `math_kern_var` and `math_assembly_italics_correction_var` resolve the
+  matching MATH value at the font's current variation instance (set via
+  `set_variation_coords`), pulling the GDEF `ItemVariationStore` and
+  normalised coordinates through the same plumbing the GPOS / GDEF / BASE
+  `*_var` accessors use. Fonts without a MATH table decline cleanly.
+  Integration coverage on DejaVu Sans (static MATH) confirms the resolved
+  values equal the plain design-unit values when no axis is active.
+
 - **Variable-font BASE baseline coordinates
   (`Font::base_horiz_y_for_script_baseline_var`,
   `base_vert_x_for_script_baseline_var`).** `BaseCoordFormat3`
