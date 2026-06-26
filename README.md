@@ -321,6 +321,27 @@ kerning, and mark attachment.
   ItemVariationStore feeding CaretValueFormat3 VariationIndex
   references through the same IVS decoder shared with MVAR / HVAR /
   VVAR.
+- **Variable-font GPOS / GDEF VariationIndex resolution.** The shared
+  `tables::device::DeviceOrVariationIndex` decoder reads the 6-byte
+  Device / VariationIndex sub-table referenced from GPOS ValueRecords,
+  GPOS AnchorFormat3 fields, and GDEF CaretValueFormat3, discriminating
+  on `deltaFormat` (`0x0001`/`0x0002`/`0x0003` classic Device tables —
+  2/4/8-bit MSB-first packed pixel deltas, unpacked for tooling — versus
+  `0x8000` VariationIndex). A VariationIndex `(outer, inner)` pair is
+  resolved against the GDEF ItemVariationStore at the current normalised
+  instance, yielding a font-unit delta; classic Device tables contribute
+  nothing at the font-unit layer (pixel snapping is render-time). Every
+  GPOS positioning accessor has a variation sibling that folds these
+  deltas in at the instance set via `set_variation_coords`:
+  `Font::lookup_kerning_var` (PairPos `xAdvance`, honouring the spec's
+  per-format device-offset base — PairSet for format 1, sub-table for
+  format 2), `lookup_mark_to_base_var` / `lookup_mark_to_mark_var` /
+  `lookup_mark_to_ligature_var` / `lookup_cursive_attachment_var`
+  (AnchorFormat3 X/Y), `gpos_apply_lookup_type_1_var` (SinglePos), and
+  `Font::ligature_carets_resolved` (CaretValueFormat3 carets to concrete
+  font-unit coordinates; Format2 contour-point carets surface as `None`
+  since they need the TT bytecode interpreter). The static accessors are
+  unchanged and equal the `_var` results at the default instance.
 - **`Font::shape(text, script, lang, features)` — end-to-end OpenType
   shaping.** The integration capstone over the GSUB / GPOS / GDEF
   primitives above: it maps text to nominal glyphs through `cmap`, runs
@@ -988,13 +1009,22 @@ format-14 UVS sidecar is decoded.
   need it).
 - COLR **v1** paint graph (gradients, transforms, composites) — only
   the v0 flat layer stack is supported.
-- avar **v2** delta-set index map (variable-axis remap).
+- avar **v2** delta-set index map (variable-axis remap). avar v2 is an
+  OpenType 1.9 (post-2020) addition that is **not present in the
+  in-tree spec** (`docs/text/opentype/`, whose Amd1 stops at the 2020
+  colour-font update) — blocked on a docs update, not on
+  implementation effort. The GPOS / GSUB FeatureVariations paths honour
+  the current normalised instance but neither runs the avar v2 remap.
 - The `STAT` format-2 overlapping-range tie-break (§7.3.7.3) is left to
   caller policy; the full document-order record array is exposed
   unchanged.
-- avar **v2** delta-set index map (variable-axis remap) — listed
-  above; the GPOS / GSUB FeatureVariations paths both honour the
-  current normalised instance but neither runs the avar v2 remap yet.
+- BASE `BaseCoordFormat3` VariationIndex resolution: the device offset
+  is parsed and exposed (`BaseCoord::Format3 { device_offset }`) but the
+  baseline-coordinate accessors do not yet fold in the IVS delta,
+  because `BaseTable::parse` eagerly decodes the axis trees and discards
+  the per-BaseCoord table slices the device offset is relative to.
+  (GPOS value-record / anchor and GDEF caret VariationIndex offsets
+  *are* resolved.)
 
 ## Test fixtures
 
