@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **CFF2 variable-glyph `blend` interpolation test + doc.** The CFF2
+  charstring interpreter already evaluates `blend` as
+  `default + Σ scalarᵣ · deltaᵣ` at an arbitrary instance via
+  `glyph_outline_at`; this round adds a hand-built variable-CFF2 fixture
+  (1-region VariationStore + a `blend`-ed move) proving a coordinate
+  interpolates 100→300→500 across default/half/max, and corrects the
+  module doc (it previously claimed only the default instance was
+  rendered). Also documents that Type2 charstring 16-bit ints use the
+  `[28, hi, lo]` form (not the DICT `[29, …]` 5-byte form).
+
 - **Variable-font GPOS mark-to-ligature (`lookup_mark_to_ligature_var`,
   Font + GposTable).** The LookupType-5 accessor resolves AnchorFormat3
   VariationIndex offsets on both the mark anchor and the selected

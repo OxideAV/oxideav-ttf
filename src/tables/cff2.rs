@@ -23,11 +23,14 @@
 //!
 //! The container walk (header → Top DICT → Global Subrs → CharStrings →
 //! FDArray/FDSelect → per-FD Private DICT + local subrs + default
-//! vsindex) and the **default-instance** outline of each glyph: the
-//! charstring interpreter (shared with `CFF `) collapses every `blend` to
-//! its default values, so the rendered outline matches the font at its
-//! default variation coordinates. Region counts per `vsindex` are read
-//! from the embedded VariationStore.
+//! vsindex) and the outline of each glyph **at an arbitrary variation
+//! instance**: the charstring interpreter (shared with `CFF `) evaluates
+//! every `blend` as `default + Σ scalarᵣ · deltaᵣ`, where the per-region
+//! scalars come from the embedded VariationStore at the caller's
+//! normalised coordinates. [`Cff2Table::glyph_outline`] renders the
+//! default instance (all scalars zero, blends collapse to their
+//! defaults); [`Cff2Table::glyph_outline_at`] renders any instance.
+//! Region counts per `vsindex` are read from the VariationStore.
 
 use super::cff::charstring::Interp;
 use super::cff::{Dict, Index};
@@ -433,6 +436,142 @@ mod tests {
         assert_eq!((pts[1].x, pts[1].y), (600, 100));
         assert_eq!((pts[2].x, pts[2].y), (600, 600));
         assert_eq!((pts[3].x, pts[3].y), (100, 600));
+    }
+
+    /// Build a single-region ItemVariationStore (no length prefix —
+    /// the caller prepends the uint16 vstore length): one axis, one
+    /// region (rising edge peaking at +1), one IVD subtable carrying a
+    /// single delta row `[delta]`. vsindex 0 → this subtable.
+    fn build_single_region_ivs(delta: i16) -> Vec<u8> {
+        let mut b = vec![0u8; 32];
+        b[0..2].copy_from_slice(&1u16.to_be_bytes()); // format
+        b[2..6].copy_from_slice(&12u32.to_be_bytes()); // regionListOffset
+        b[6..8].copy_from_slice(&1u16.to_be_bytes()); // ivdCount
+        b[8..12].copy_from_slice(&22u32.to_be_bytes()); // ivdOffsets[0]
+        b[12..14].copy_from_slice(&1u16.to_be_bytes()); // axisCount
+        b[14..16].copy_from_slice(&1u16.to_be_bytes()); // regionCount
+        b[16..18].copy_from_slice(&0i16.to_be_bytes()); // start
+        b[18..20].copy_from_slice(&16384i16.to_be_bytes()); // peak +1
+        b[20..22].copy_from_slice(&16384i16.to_be_bytes()); // end +1
+        b[22..24].copy_from_slice(&1u16.to_be_bytes()); // itemCount
+        b[24..26].copy_from_slice(&1u16.to_be_bytes()); // shortDeltaCount
+        b[26..28].copy_from_slice(&1u16.to_be_bytes()); // regionIndexCount
+        b[28..30].copy_from_slice(&0u16.to_be_bytes()); // regionIndexes[0]
+        b[30..32].copy_from_slice(&delta.to_be_bytes()); // delta row 0
+        b
+    }
+
+    /// Build a *variable* CFF2 with a VariationStore (1 region) and one
+    /// glyph (GID1) whose first move's x-coordinate is `blend`-ed:
+    /// `x = 100 + scalar·delta_x`. At the default instance x = 100; at
+    /// the axis extreme x = 100 + `delta_x`.
+    fn build_variable_cff2(delta_x: i32, region_delta: i16) -> Vec<u8> {
+        // GID1 charstring:
+        //   100 <delta_x> 1 blend   -> x (blended)
+        //   100                     -> y
+        //   rmoveto
+        //   500 0 rlineto 0 500 rlineto -500 0 rlineto
+        let i100 = [239u8]; // 100
+        let i0 = [139u8]; // 0
+        let i500 = [248u8, 136]; // 500
+        let im500 = [252u8, 136]; // -500
+                                  // Type2 charstrings encode a 16-bit integer as [28, hi, lo]
+                                  // (NOT the DICT 5-byte form `enc5`, which uses operator 29).
+        let cs_int16 = |v: i32| -> Vec<u8> {
+            let mut b = vec![28u8];
+            b.extend_from_slice(&(v as i16).to_be_bytes());
+            b
+        };
+        let cs0: Vec<u8> = Vec::new();
+        let mut cs1 = Vec::new();
+        cs1.extend_from_slice(&i100); // default x
+        cs1.extend_from_slice(&cs_int16(delta_x)); // region-0 delta for x
+        cs1.extend_from_slice(&[139 + 1]); // n = 1 (operand count to blend)
+        cs1.push(16); // blend → leaves blended x on stack
+        cs1.extend_from_slice(&i100); // y
+        cs1.push(21); // rmoveto
+        cs1.extend_from_slice(&i500);
+        cs1.extend_from_slice(&i0);
+        cs1.push(5); // rlineto
+        cs1.extend_from_slice(&i0);
+        cs1.extend_from_slice(&i500);
+        cs1.push(5);
+        cs1.extend_from_slice(&im500);
+        cs1.extend_from_slice(&i0);
+        cs1.push(5);
+        let charstrings = build_index(&[&cs0, &cs1]);
+
+        let fd_dict: Vec<u8> = Vec::new();
+        let fd_array = build_index(&[&fd_dict]);
+        let gsubrs = build_index(&[]);
+
+        // vstore = uint16 length + ItemVariationStore.
+        let ivs = build_single_region_ivs(region_delta);
+        let mut vstore = Vec::new();
+        vstore.extend_from_slice(&(ivs.len() as u16).to_be_bytes());
+        vstore.extend_from_slice(&ivs);
+
+        // Top DICT: CharStrings(17), vstore(24), FDArray(12 36) — all
+        // 5-byte ints so the size is stable across the two passes.
+        let make_top = |cs_off: i32, vs_off: i32, fd_off: i32| -> Vec<u8> {
+            let mut d = Vec::new();
+            d.extend_from_slice(&enc5(cs_off));
+            d.push(17);
+            d.extend_from_slice(&enc5(vs_off));
+            d.push(24);
+            d.extend_from_slice(&enc5(fd_off));
+            d.extend_from_slice(&[12, 36]);
+            d
+        };
+        let top_placeholder = make_top(0, 0, 0);
+        let header_len = 5;
+        let top_dict_size = top_placeholder.len();
+        let top_end = header_len + top_dict_size;
+        let gsub_start = top_end;
+        let gsub_end = gsub_start + gsubrs.len();
+        let cs_off = gsub_end;
+        let vs_off = cs_off + charstrings.len();
+        let fd_off = vs_off + vstore.len();
+        let top = make_top(cs_off as i32, vs_off as i32, fd_off as i32);
+        assert_eq!(top.len(), top_dict_size);
+
+        let mut out = Vec::new();
+        out.push(2);
+        out.push(0);
+        out.push(5);
+        out.extend_from_slice(&(top_dict_size as u16).to_be_bytes());
+        out.extend_from_slice(&top);
+        out.extend_from_slice(&gsubrs);
+        out.extend_from_slice(&charstrings);
+        out.extend_from_slice(&vstore);
+        out.extend_from_slice(&fd_array);
+        out
+    }
+
+    #[test]
+    fn variable_cff2_blends_x_at_instance() {
+        // x = 100 + scalar·(+400); region scalar is 0 at default, 1 at
+        // the axis extreme, 0.5 halfway.
+        let data = build_variable_cff2(400, 0);
+        let cff2 = Cff2Table::parse(&data).expect("parse variable cff2");
+        assert_eq!(cff2.vsindex_count(), 1);
+        assert_eq!(cff2.region_count(0), 1);
+
+        // Default instance: x = 100.
+        let g_def = cff2.glyph_outline_at(1, &[0.0]).expect("gid1 default");
+        assert_eq!(g_def.contours[0].points[0].x, 100);
+
+        // In CFF2 the per-region deltas are *charstring* operands and
+        // the VariationStore supplies the per-region *scalars*: the
+        // blended value is `default + Σ scalar_r · delta_r`. Here the
+        // single region's scalar rises 0→1 across the axis, so the
+        // charstring delta (+400) is applied proportionally.
+        let g_max = cff2.glyph_outline_at(1, &[1.0]).expect("gid1 max");
+        assert_eq!(g_max.contours[0].points[0].x, 500); // 100 + 1·400
+        let g_half = cff2.glyph_outline_at(1, &[0.5]).expect("gid1 half");
+        assert_eq!(g_half.contours[0].points[0].x, 300); // 100 + 0.5·400
+                                                         // y is unaffected by the blend.
+        assert_eq!(g_max.contours[0].points[0].y, 100);
     }
 
     #[test]
