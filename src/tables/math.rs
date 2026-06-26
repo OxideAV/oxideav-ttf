@@ -20,29 +20,49 @@
 //! ```
 //!
 //! Many values are [`MathValueRecord`]s: a design-unit `int16` plus an
-//! optional device-table offset (device corrections are ignored here —
-//! we expose the design-unit value, which is what a high-resolution
-//! engine uses). Coverage tables reuse the common-layout Coverage parser.
+//! optional device / VariationIndex offset (§6.3.6.2.1). The plain
+//! accessors expose the design-unit value; the `*_resolved` accessors fold
+//! in the variable-font delta at a given instance — a VariationIndex
+//! offset is evaluated against the GDEF `ItemVariationStore`, while a
+//! classic ppem-indexed Device table (a render-time concern) contributes
+//! no font-unit adjustment. Coverage tables reuse the common-layout
+//! Coverage parser.
 //!
 //! This module decodes the whole table structurally and exposes typed
 //! accessors. Each accessor borrows the parent table slice, so the
 //! parsed [`MathTable`] is a cheap set of validated offsets.
 
 use crate::parser::{read_i16, read_u16};
+use crate::tables::device::resolve_device_delta;
 use crate::tables::gdef::coverage_lookup;
+use crate::tables::mvar::ItemVariationStore;
 use crate::Error;
 
 /// The 4-byte table tag.
 pub const MATH_TABLE_TAG: [u8; 4] = *b"MATH";
 
 /// A `MathValueRecord` (§6.3.6.2.1): a design-unit value plus an optional
-/// device-table offset (the device correction is not applied here).
+/// device / VariationIndex table offset.
+///
+/// Per §6.3.6.2.1 the `deviceTableOffset` is measured **from the beginning
+/// of the parent table** that contains the record (the MathConstants
+/// table, a per-glyph value sub-table, a MathKern table, or a
+/// GlyphAssembly table — never the MATH-table root). In a variable font
+/// the referenced table is a VariationIndex table (§6.2, `deltaFormat`
+/// `0x8000`) whose `(outer, inner)` delta-set index is evaluated against
+/// the font-wide GDEF `ItemVariationStore`; in a non-variable font it is a
+/// classic ppem-indexed Device table whose pixel correction is a
+/// render-time concern and contributes no font-unit adjustment here.
+///
+/// The plain `value` field is always the unmodified design-unit value; use
+/// [`MathValueRecord::resolved_value`] to fold in the variable-font delta
+/// at a given instance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MathValueRecord {
     /// The X or Y value in font design units.
     pub value: i16,
-    /// Offset to a device table from the start of the *parent* table, or
-    /// 0 for none. Exposed for completeness; corrections are not applied.
+    /// Offset to a device / VariationIndex table from the start of the
+    /// *parent* table, or 0 for none.
     pub device_offset: u16,
 }
 
@@ -54,6 +74,28 @@ impl MathValueRecord {
             value: read_i16(bytes, at)?,
             device_offset: read_u16(bytes, at + 2)?,
         })
+    }
+
+    /// The design-unit value adjusted for the current variation instance.
+    ///
+    /// `parent_bytes` is the slice the record's `device_offset` is relative
+    /// to (the parent sub-table base, per §6.3.6.2.1), `ivs` the GDEF
+    /// `ItemVariationStore` (pass `None` for a non-variable font), and
+    /// `coords` the normalised axis coordinates. A NULL `device_offset`, a
+    /// classic Device table, or a missing/out-of-range VariationIndex all
+    /// fold to a zero adjustment, so the return collapses to `value` for a
+    /// static instance.
+    ///
+    /// The result is `value as f32` plus the resolved font-unit delta; a
+    /// caller wanting an integer can round it.
+    pub fn resolved_value(
+        &self,
+        parent_bytes: &[u8],
+        ivs: Option<&ItemVariationStore>,
+        coords: &[f32],
+    ) -> f32 {
+        let delta = resolve_device_delta(parent_bytes, self.device_offset, ivs, coords);
+        self.value as f32 + delta
     }
 }
 
@@ -257,6 +299,26 @@ impl<'a> MathConstants<'a> {
     pub fn value_i16(&self, index: usize) -> i16 {
         self.value(index).map(|r| r.value).unwrap_or(0)
     }
+
+    /// MathValueRecord `index` resolved for the current variation instance.
+    ///
+    /// Folds in the record's device / VariationIndex correction per
+    /// §6.3.6.2.1: in a variable font the `(outer, inner)` delta-set index
+    /// is evaluated against the GDEF `ItemVariationStore` `ivs` at `coords`;
+    /// in a static font (or for an absent record) the result is the plain
+    /// design-unit value. The device offset is relative to the start of the
+    /// MathConstants table, so the parent slice is `self.data[self.base..]`.
+    pub fn value_resolved(
+        &self,
+        index: usize,
+        ivs: Option<&ItemVariationStore>,
+        coords: &[f32],
+    ) -> f32 {
+        match self.value(index) {
+            Some(r) => r.resolved_value(&self.data[self.base..], ivs, coords),
+            None => 0.0,
+        }
+    }
 }
 
 // --- MathGlyphInfo (§6.3.6.2.4) --------------------------------------
@@ -295,6 +357,40 @@ impl<'a> MathGlyphInfo<'a> {
         Some(MathValueRecord::read(self.data, at).ok()?.value)
     }
 
+    /// Look up the per-glyph MathValueRecord at `value_sub`
+    /// (`mathItalicsCorrectionInfo` index 0 / `mathTopAccentAttachment`
+    /// index 1) for `gid`, returning the *record* (value + parent-relative
+    /// device offset) and the parent-table base needed to resolve that
+    /// offset per §6.3.6.2.1.
+    fn value_record_for(&self, value_sub: usize, gid: u16) -> Option<(MathValueRecord, usize)> {
+        let base = self.sub_off(value_sub)?;
+        let cov_off = read_u16(self.data, base).ok()? as usize;
+        if cov_off == 0 {
+            return None;
+        }
+        let idx = coverage_lookup(self.data.get(base + cov_off..)?, gid)? as usize;
+        let count = read_u16(self.data, base + 2).ok()? as usize;
+        if idx >= count {
+            return None;
+        }
+        let at = base + 4 + idx * MathValueRecord::LEN;
+        Some((MathValueRecord::read(self.data, at).ok()?, base))
+    }
+
+    /// Italics-correction for `gid` resolved at the current variation
+    /// instance (§6.3.6.2.5 + §6.3.6.2.1). Folds in a VariationIndex delta
+    /// against the GDEF `ItemVariationStore` `ivs` at `coords`; `None` when
+    /// uncovered (layout treats that as zero).
+    pub fn italics_correction_resolved(
+        &self,
+        gid: u16,
+        ivs: Option<&ItemVariationStore>,
+        coords: &[f32],
+    ) -> Option<f32> {
+        let (rec, base) = self.value_record_for(0, gid)?;
+        Some(rec.resolved_value(&self.data[base..], ivs, coords))
+    }
+
     /// Top-accent horizontal attachment point for `gid` (§6.3.6.2.6), or
     /// `None` when uncovered (use the glyph's geometric centre instead).
     pub fn top_accent_attachment(&self, gid: u16) -> Option<i16> {
@@ -310,6 +406,18 @@ impl<'a> MathGlyphInfo<'a> {
         }
         let at = base + 4 + idx * MathValueRecord::LEN;
         Some(MathValueRecord::read(self.data, at).ok()?.value)
+    }
+
+    /// Top-accent attachment for `gid` resolved at the current variation
+    /// instance (§6.3.6.2.6 + §6.3.6.2.1).
+    pub fn top_accent_attachment_resolved(
+        &self,
+        gid: u16,
+        ivs: Option<&ItemVariationStore>,
+        coords: &[f32],
+    ) -> Option<f32> {
+        let (rec, base) = self.value_record_for(1, gid)?;
+        Some(rec.resolved_value(&self.data[base..], ivs, coords))
     }
 
     /// Whether `gid` is flagged as an extended shape (§6.3.6.2.7).
@@ -345,7 +453,40 @@ impl<'a> MathGlyphInfo<'a> {
         if kern_off == 0 {
             return None;
         }
-        math_kern_value(self.data, base + kern_off, height)
+        math_kern_value(self.data, base + kern_off, height).map(|r| r.value)
+    }
+
+    /// Math-kern value for `gid` at one corner and correction `height`,
+    /// resolved at the current variation instance (§6.3.6.2.8/.9 +
+    /// §6.3.6.2.1). The selected kern value's device offset is parent-
+    /// relative to the MathKern table, so a VariationIndex delta is
+    /// evaluated against `ivs` at `coords`.
+    pub fn math_kern_resolved(
+        &self,
+        gid: u16,
+        corner: MathKernCorner,
+        height: i16,
+        ivs: Option<&ItemVariationStore>,
+        coords: &[f32],
+    ) -> Option<f32> {
+        let base = self.sub_off(3)?; // mathKernInfoOffset
+        let cov_off = read_u16(self.data, base).ok()? as usize;
+        if cov_off == 0 {
+            return None;
+        }
+        let idx = coverage_lookup(self.data.get(base + cov_off..)?, gid)? as usize;
+        let count = read_u16(self.data, base + 2).ok()? as usize;
+        if idx >= count {
+            return None;
+        }
+        let rec_at = base + 4 + idx * 8;
+        let kern_off = read_u16(self.data, rec_at + corner as usize * 2).ok()? as usize;
+        if kern_off == 0 {
+            return None;
+        }
+        let kern_base = base + kern_off;
+        let rec = math_kern_value(self.data, kern_base, height)?;
+        Some(rec.resolved_value(&self.data[kern_base..], ivs, coords))
     }
 }
 
@@ -361,7 +502,7 @@ pub enum MathKernCorner {
 /// Look up a MathKern value (§6.3.6.2.9) at `height` from a MathKern
 /// table located at `base`. `heightCount` correction heights partition
 /// the vertical extent; `heightCount + 1` kern values cover the ranges.
-fn math_kern_value(data: &[u8], base: usize, height: i16) -> Option<i16> {
+fn math_kern_value(data: &[u8], base: usize, height: i16) -> Option<MathValueRecord> {
     let n = read_u16(data, base).ok()? as usize;
     // correctionHeight[n] then kernValue[n+1], each a MathValueRecord.
     let heights_at = base + 2;
@@ -379,7 +520,7 @@ fn math_kern_value(data: &[u8], base: usize, height: i16) -> Option<i16> {
         }
     }
     let at = kerns_at + sel * MathValueRecord::LEN;
-    Some(MathValueRecord::read(data, at).ok()?.value)
+    MathValueRecord::read(data, at).ok()
 }
 
 // --- MathVariants (§6.3.6.2.10) --------------------------------------
@@ -530,6 +671,29 @@ impl<'a> MathVariants<'a> {
         }
         Some((italics, parts))
     }
+
+    /// The glyph-assembly italics correction for `gid` growing in `dir`,
+    /// resolved at the current variation instance (§6.3.6.2.12 +
+    /// §6.3.6.2.1). The italicsCorrection record's device offset is
+    /// relative to the GlyphAssembly table, so a VariationIndex delta is
+    /// evaluated against `ivs` at `coords`. `None` when no assembly is
+    /// defined for `gid` in `dir`.
+    pub fn assembly_italics_correction_resolved(
+        &self,
+        gid: u16,
+        dir: GrowDirection,
+        ivs: Option<&ItemVariationStore>,
+        coords: &[f32],
+    ) -> Option<f32> {
+        let ctor = self.construction_off(gid, dir)?;
+        let asm_off = read_u16(self.data, ctor).ok()? as usize;
+        if asm_off == 0 {
+            return None;
+        }
+        let asm = ctor + asm_off;
+        let rec = MathValueRecord::read(self.data, asm).ok()?;
+        Some(rec.resolved_value(&self.data[asm..], ivs, coords))
+    }
 }
 
 #[cfg(test)]
@@ -599,6 +763,113 @@ mod tests {
         let mut data = vec![0u8; 10];
         data[1] = 2; // major = 2
         assert!(MathTable::parse(&data).is_err());
+    }
+
+    /// A single-axis, single-region ItemVariationStore that contributes
+    /// `delta` font units at the +1 end of the axis. Mirrors the GDEF /
+    /// GPOS test stores so MATH VariationIndex resolution exercises the
+    /// same shared decoder.
+    fn build_single_region_ivs(delta: i16) -> Vec<u8> {
+        let mut b = vec![0u8; 32];
+        b[0..2].copy_from_slice(&1u16.to_be_bytes()); // format 1
+        b[2..6].copy_from_slice(&12u32.to_be_bytes()); // regionListOffset
+        b[6..8].copy_from_slice(&1u16.to_be_bytes()); // itemVariationDataCount
+        b[8..12].copy_from_slice(&22u32.to_be_bytes()); // IVD[0] offset
+        b[12..14].copy_from_slice(&1u16.to_be_bytes()); // axisCount
+        b[14..16].copy_from_slice(&1u16.to_be_bytes()); // regionCount
+        b[16..18].copy_from_slice(&0i16.to_be_bytes()); // startCoord
+        b[18..20].copy_from_slice(&16384i16.to_be_bytes()); // peakCoord = 1.0
+        b[20..22].copy_from_slice(&16384i16.to_be_bytes()); // endCoord = 1.0
+        b[22..24].copy_from_slice(&1u16.to_be_bytes()); // itemCount
+        b[24..26].copy_from_slice(&1u16.to_be_bytes()); // shortDeltaCount
+        b[26..28].copy_from_slice(&1u16.to_be_bytes()); // regionIndexCount
+        b[28..30].copy_from_slice(&0u16.to_be_bytes()); // regionIndexes[0]
+        b[30..32].copy_from_slice(&delta.to_be_bytes()); // deltaSets[0]
+        b
+    }
+
+    /// Build a MATH table whose MathConstants `axisHeight` record carries a
+    /// VariationIndex device offset (outer 0, inner 0) pointing at a
+    /// VariationIndex sub-table appended after the constants table. The
+    /// device offset is measured from the start of the MathConstants table
+    /// per §6.3.6.2.1.
+    fn build_math_constants_with_var_axis_height(base: i16) -> Vec<u8> {
+        let mut data = Vec::new();
+        data.extend_from_slice(&1u16.to_be_bytes()); // major
+        data.extend_from_slice(&0u16.to_be_bytes()); // minor
+        let const_off_pos = data.len();
+        data.extend_from_slice(&0u16.to_be_bytes()); // constants (patched)
+        data.extend_from_slice(&0u16.to_be_bytes()); // glyphInfo
+        data.extend_from_slice(&0u16.to_be_bytes()); // variants
+
+        let const_off = data.len();
+        data.extend_from_slice(&80i16.to_be_bytes()); // scriptPercentScaleDown
+        data.extend_from_slice(&60i16.to_be_bytes()); // scriptScriptPercentScaleDown
+        data.extend_from_slice(&300u16.to_be_bytes()); // delimitedSubFormulaMinHeight
+        data.extend_from_slice(&1500u16.to_be_bytes()); // displayOperatorMinHeight
+        let records_at = data.len();
+        for i in 0..51usize {
+            if i == constant::AXIS_HEIGHT {
+                data.extend_from_slice(&base.to_be_bytes()); // value
+                data.extend_from_slice(&0u16.to_be_bytes()); // device offset (patched)
+            } else {
+                data.extend_from_slice(&0i16.to_be_bytes());
+                data.extend_from_slice(&0u16.to_be_bytes());
+            }
+        }
+        data.extend_from_slice(&60i16.to_be_bytes()); // radicalDegreeBottomRaisePercent
+
+        // VariationIndex sub-table (outer 0, inner 0, fmt 0x8000), appended
+        // right after the constants table; its offset is relative to the
+        // MathConstants table start.
+        let var_idx_at = data.len();
+        data.extend_from_slice(&0u16.to_be_bytes()); // outer
+        data.extend_from_slice(&0u16.to_be_bytes()); // inner
+        data.extend_from_slice(&0x8000u16.to_be_bytes()); // deltaFormat
+
+        // Patch the axisHeight record's device offset (parent-relative).
+        let dev_off_pos = records_at + constant::AXIS_HEIGHT * MathValueRecord::LEN + 2;
+        let dev_off = (var_idx_at - const_off) as u16;
+        data[dev_off_pos..dev_off_pos + 2].copy_from_slice(&dev_off.to_be_bytes());
+        // Patch the constants offset.
+        data[const_off_pos..const_off_pos + 2].copy_from_slice(&(const_off as u16).to_be_bytes());
+        data
+    }
+
+    #[test]
+    fn math_constants_value_resolves_variation_index_delta() {
+        let data = build_math_constants_with_var_axis_height(250);
+        let m = MathTable::parse(&data).expect("parse");
+        let c = m.constants().expect("constants");
+        let ivs_bytes = build_single_region_ivs(-40);
+        let ivs = ItemVariationStore::parse(&ivs_bytes).expect("ivs");
+
+        // Plain value ignores the device offset entirely.
+        assert_eq!(c.value_i16(constant::AXIS_HEIGHT), 250);
+
+        // No IVS → static value (device contributes nothing).
+        assert_eq!(c.value_resolved(constant::AXIS_HEIGHT, None, &[0.0]), 250.0);
+        // Default instance (coord 0): region scalar 0 → no delta.
+        assert_eq!(
+            c.value_resolved(constant::AXIS_HEIGHT, Some(&ivs), &[0.0]),
+            250.0
+        );
+        // Max instance (coord +1): 250 + (-40) = 210.
+        assert_eq!(
+            c.value_resolved(constant::AXIS_HEIGHT, Some(&ivs), &[1.0]),
+            210.0
+        );
+        // Half: 250 + (-20) = 230.
+        assert_eq!(
+            c.value_resolved(constant::AXIS_HEIGHT, Some(&ivs), &[0.5]),
+            230.0
+        );
+
+        // A record with no device offset folds to its plain value.
+        assert_eq!(
+            c.value_resolved(constant::MATH_LEADING, Some(&ivs), &[1.0]),
+            0.0
+        );
     }
 
     /// Build a MATH table with a MathVariants table carrying one vertical
@@ -703,5 +974,172 @@ mod tests {
         assert_eq!(parts[1].glyph, 21);
         assert!(parts[1].is_extender());
         assert_eq!(parts[1].full_advance, 200);
+    }
+
+    /// Build a MATH table with a MathGlyphInfo carrying, for gid 7:
+    ///   * an italicsCorrectionInfo entry (value `ic`, VariationIndex dev),
+    ///   * a topAccentAttachment entry (value `tac`, no device),
+    ///   * a MathKernInfo with a single TopRight kern (one height boundary,
+    ///     two kern values; the upper kern carries a VariationIndex dev).
+    ///
+    /// All device offsets are parent-relative per §6.3.6.2.1.
+    fn build_math_glyph_info(ic: i16, tac: i16, kern_hi: i16) -> Vec<u8> {
+        // We build the MathGlyphInfo body self-contained, then splice it
+        // into a MATH header at glyphInfoOffset.
+        // ---- italicsCorrectionInfo (gi-relative offsets) ----
+        // header: coverageOffset(=8), italicsCorrectionCount(=1),
+        //         MathValueRecord[1] = { ic, devOff }
+        // then Coverage at +8, then a VariationIndex at +(after coverage).
+        let mut gi = Vec::new();
+        // We assemble four sub-tables back to back, recording their
+        // gi-relative starts so the four leading Offset16 fields can point
+        // at them. Layout: [4 Offset16 header][ic][tac][esc=0][kern].
+        let header_len = 8usize; // four Offset16
+
+        // -- italicsCorrectionInfo sub-table --
+        let mut ic_sub = Vec::new();
+        ic_sub.extend_from_slice(&8u16.to_be_bytes()); // coverageOffset
+        ic_sub.extend_from_slice(&1u16.to_be_bytes()); // count
+        ic_sub.extend_from_slice(&ic.to_be_bytes()); // value
+        let ic_dev_pos = ic_sub.len();
+        ic_sub.extend_from_slice(&0u16.to_be_bytes()); // device (patched)
+                                                       // Coverage @ +8: format 1, [7]
+        ic_sub.extend_from_slice(&1u16.to_be_bytes());
+        ic_sub.extend_from_slice(&1u16.to_be_bytes());
+        ic_sub.extend_from_slice(&7u16.to_be_bytes());
+        // VariationIndex (outer 0, inner 0) right after coverage.
+        let ic_var_at = ic_sub.len();
+        ic_sub.extend_from_slice(&0u16.to_be_bytes());
+        ic_sub.extend_from_slice(&0u16.to_be_bytes());
+        ic_sub.extend_from_slice(&0x8000u16.to_be_bytes());
+        ic_sub[ic_dev_pos..ic_dev_pos + 2].copy_from_slice(&(ic_var_at as u16).to_be_bytes());
+
+        // -- topAccentAttachment sub-table (no device) --
+        let mut tac_sub = Vec::new();
+        tac_sub.extend_from_slice(&8u16.to_be_bytes()); // coverageOffset
+        tac_sub.extend_from_slice(&1u16.to_be_bytes()); // count
+        tac_sub.extend_from_slice(&tac.to_be_bytes());
+        tac_sub.extend_from_slice(&0u16.to_be_bytes()); // no device
+        tac_sub.extend_from_slice(&1u16.to_be_bytes()); // cov fmt
+        tac_sub.extend_from_slice(&1u16.to_be_bytes());
+        tac_sub.extend_from_slice(&7u16.to_be_bytes());
+
+        // -- MathKernInfo sub-table --
+        // header: coverageOffset, mathKernCount(=1),
+        //         MathKernInfoRecord[1] = four Offset16 (TR,TL,BR,BL).
+        // Only TopRight is non-zero → points at a MathKern table.
+        let mut kern_sub = Vec::new();
+        let kcov_pos = kern_sub.len();
+        kern_sub.extend_from_slice(&0u16.to_be_bytes()); // coverageOffset (patched)
+        kern_sub.extend_from_slice(&1u16.to_be_bytes()); // mathKernCount
+        let krec_pos = kern_sub.len();
+        kern_sub.extend_from_slice(&0u16.to_be_bytes()); // TR (patched)
+        kern_sub.extend_from_slice(&0u16.to_be_bytes()); // TL
+        kern_sub.extend_from_slice(&0u16.to_be_bytes()); // BR
+        kern_sub.extend_from_slice(&0u16.to_be_bytes()); // BL
+                                                         // Coverage [7].
+        let kcov_at = kern_sub.len();
+        kern_sub.extend_from_slice(&1u16.to_be_bytes());
+        kern_sub.extend_from_slice(&1u16.to_be_bytes());
+        kern_sub.extend_from_slice(&7u16.to_be_bytes());
+        kern_sub[kcov_pos..kcov_pos + 2].copy_from_slice(&(kcov_at as u16).to_be_bytes());
+        // MathKern table: heightCount=1, correctionHeight[0]=100 (no dev),
+        //   kernValue[0]=10 (no dev), kernValue[1]=kern_hi (+ VariationIndex).
+        let mkern_at = kern_sub.len();
+        kern_sub.extend_from_slice(&1u16.to_be_bytes()); // heightCount
+        kern_sub.extend_from_slice(&100i16.to_be_bytes()); // height[0] value
+        kern_sub.extend_from_slice(&0u16.to_be_bytes()); // height[0] dev
+        kern_sub.extend_from_slice(&10i16.to_be_bytes()); // kern[0] value
+        kern_sub.extend_from_slice(&0u16.to_be_bytes()); // kern[0] dev
+        kern_sub.extend_from_slice(&kern_hi.to_be_bytes()); // kern[1] value
+        let khi_dev_pos = kern_sub.len();
+        kern_sub.extend_from_slice(&0u16.to_be_bytes()); // kern[1] dev (patched)
+        let kvar_at = kern_sub.len();
+        kern_sub.extend_from_slice(&0u16.to_be_bytes()); // outer
+        kern_sub.extend_from_slice(&0u16.to_be_bytes()); // inner
+        kern_sub.extend_from_slice(&0x8000u16.to_be_bytes()); // fmt
+                                                              // kern[1] device offset is relative to the MathKern table start.
+        kern_sub[khi_dev_pos..khi_dev_pos + 2]
+            .copy_from_slice(&((kvar_at - mkern_at) as u16).to_be_bytes());
+        kern_sub[krec_pos..krec_pos + 2].copy_from_slice(&(mkern_at as u16).to_be_bytes());
+
+        // Assemble the MathGlyphInfo: header (four Offset16) + sub-tables.
+        let ic_at = header_len;
+        let tac_at = ic_at + ic_sub.len();
+        let kern_at = tac_at + tac_sub.len();
+        gi.extend_from_slice(&(ic_at as u16).to_be_bytes()); // italicsCorrectionInfoOffset
+        gi.extend_from_slice(&(tac_at as u16).to_be_bytes()); // topAccentAttachmentOffset
+        gi.extend_from_slice(&0u16.to_be_bytes()); // extendedShapeCoverageOffset = none
+        gi.extend_from_slice(&(kern_at as u16).to_be_bytes()); // mathKernInfoOffset
+        gi.extend_from_slice(&ic_sub);
+        gi.extend_from_slice(&tac_sub);
+        gi.extend_from_slice(&kern_sub);
+
+        // MATH header: glyphInfo only.
+        let mut data = Vec::new();
+        data.extend_from_slice(&1u16.to_be_bytes()); // major
+        data.extend_from_slice(&0u16.to_be_bytes()); // minor
+        data.extend_from_slice(&0u16.to_be_bytes()); // constants = none
+        let gi_off_pos = data.len();
+        data.extend_from_slice(&0u16.to_be_bytes()); // glyphInfo (patched)
+        data.extend_from_slice(&0u16.to_be_bytes()); // variants = none
+        let gi_off = data.len();
+        data.extend_from_slice(&gi);
+        data[gi_off_pos..gi_off_pos + 2].copy_from_slice(&(gi_off as u16).to_be_bytes());
+        data
+    }
+
+    #[test]
+    fn glyph_info_values_resolve_variation_deltas() {
+        let data = build_math_glyph_info(120, 300, 25);
+        let m = MathTable::parse(&data).expect("parse");
+        let gi = m.glyph_info().expect("glyph info");
+        let ivs_bytes = build_single_region_ivs(-15);
+        let ivs = ItemVariationStore::parse(&ivs_bytes).expect("ivs");
+
+        // Plain accessors ignore device offsets.
+        assert_eq!(gi.italics_correction(7), Some(120));
+        assert_eq!(gi.top_accent_attachment(7), Some(300));
+        // Below the single height boundary (100) → first kern value (10).
+        assert_eq!(gi.math_kern(7, MathKernCorner::TopRight, 50), Some(10));
+        // At/above the boundary → second kern value (25).
+        assert_eq!(gi.math_kern(7, MathKernCorner::TopRight, 150), Some(25));
+
+        // Resolved italics correction tracks the instance.
+        assert_eq!(
+            gi.italics_correction_resolved(7, Some(&ivs), &[0.0]),
+            Some(120.0)
+        );
+        assert_eq!(
+            gi.italics_correction_resolved(7, Some(&ivs), &[1.0]),
+            Some(105.0)
+        ); // 120 + (-15)
+           // Top-accent has no device → unchanged.
+        assert_eq!(
+            gi.top_accent_attachment_resolved(7, Some(&ivs), &[1.0]),
+            Some(300.0)
+        );
+        // The lower kern range has no device → static.
+        assert_eq!(
+            gi.math_kern_resolved(7, MathKernCorner::TopRight, 50, Some(&ivs), &[1.0]),
+            Some(10.0)
+        );
+        // The upper kern range carries the VariationIndex.
+        assert_eq!(
+            gi.math_kern_resolved(7, MathKernCorner::TopRight, 150, Some(&ivs), &[0.0]),
+            Some(25.0)
+        );
+        assert_eq!(
+            gi.math_kern_resolved(7, MathKernCorner::TopRight, 150, Some(&ivs), &[1.0]),
+            Some(10.0)
+        ); // 25 + (-15)
+
+        // Uncovered glyph → None on every accessor.
+        assert!(gi
+            .italics_correction_resolved(99, Some(&ivs), &[1.0])
+            .is_none());
+        assert!(gi
+            .math_kern_resolved(99, MathKernCorner::TopRight, 0, Some(&ivs), &[1.0])
+            .is_none());
     }
 }

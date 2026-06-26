@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Variable-font MATH value resolution (§6.3.6.2.1).** Every MATH
+  `MathValueRecord` carries an optional device / VariationIndex offset
+  measured from the start of its *parent* sub-table; the new
+  `MathValueRecord::resolved_value` and the `*_resolved` accessors
+  (`MathConstants::value_resolved`,
+  `MathGlyphInfo::italics_correction_resolved` /
+  `top_accent_attachment_resolved` / `math_kern_resolved`,
+  `MathVariants::assembly_italics_correction_resolved`) fold in the
+  VariationIndex delta evaluated against the GDEF `ItemVariationStore` at
+  the current normalised instance. A classic ppem-indexed Device table
+  (render-time only) contributes no font-unit adjustment, and a NULL
+  offset collapses to the plain design-unit value, so a static instance is
+  unchanged. Parent-relative offset bases are honoured per the spec
+  (MathConstants, per-glyph value sub-tables, MathKern, GlyphAssembly).
+  Reuses the shared Device/VariationIndex decoder. (Closes the MATH half
+  of the variable-font VariationIndex sweep.)
+
 - **Variable-font BASE baseline coordinates
   (`Font::base_horiz_y_for_script_baseline_var`,
   `base_vert_x_for_script_baseline_var`).** `BaseCoordFormat3`
