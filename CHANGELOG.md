@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`fpgm` / `prep` hinting-program raw accessors (§5.3.3).** The `fpgm`
+  font program and `prep` control-value program (TrueType bytecode) are
+  now surfaced raw through `Font::fpgm_program()` / `Font::prep_program()`,
+  completing the hinting-table family alongside the existing `cvt `
+  accessors. The bytecode is **not** executed (out of scope); the bytes
+  are for tooling, round-tripping, and a downstream interpreter. New
+  `Font::has_hinting_program()` reports whether the font carries any of
+  `fpgm` / `prep` / a non-empty `cvt `.
+
 - **`MERG` merge table (§5.7.5).** New decoder for the glyph-merge table:
   the header, the array of ClassDef-table offsets, and the square
   `mergeClassCount²` array of `uint8` merge-entry bit-fields. Glyphs

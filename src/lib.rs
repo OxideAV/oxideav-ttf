@@ -324,6 +324,16 @@ pub struct Font<'a> {
     /// `int16` FWORDs). Held so [`Font::cvt_value`] / [`Font::cvt_count`]
     /// can resolve entries, optionally with `cvar` deltas applied.
     cvt_bytes: Option<&'a [u8]>,
+    /// Raw `fpgm` font-program bytes (TrueType bytecode, run once when the
+    /// font is first used — ISO/IEC 14496-22:2019 §5.3.3). This crate does
+    /// not execute the program; the bytes are surfaced through
+    /// [`Font::fpgm_program`] for tooling that introspects or round-trips
+    /// the hinting program.
+    fpgm_bytes: Option<&'a [u8]>,
+    /// Raw `prep` control-value-program bytes (TrueType bytecode, run
+    /// whenever size / transform changes — ISO/IEC 14496-22:2019 §5.3.x).
+    /// Surfaced raw through [`Font::prep_program`]; not executed.
+    prep_bytes: Option<&'a [u8]>,
     /// Font-wide metrics-variation table (`MVAR`). Present in many
     /// variable fonts; carries per-instance adjustments for `OS/2`,
     /// `hhea`, `vhea`, `post`, `gasp` metric fields keyed by the
@@ -576,6 +586,10 @@ impl<'a> Font<'a> {
         let cvar = dir.find(b"cvar", bytes).map(CvarTable::parse).transpose()?;
         // `cvt ` is a plain `int16[]` Control Value Table; held raw.
         let cvt_bytes = dir.find(b"cvt ", bytes);
+        // `fpgm` / `prep` are raw TrueType bytecode programs (§5.3.3 /
+        // §5.3.x). Not executed by this crate — held raw for tooling.
+        let fpgm_bytes = dir.find(b"fpgm", bytes);
+        let prep_bytes = dir.find(b"prep", bytes);
         let mvar = dir.find(b"MVAR", bytes).map(MvarTable::parse).transpose()?;
         let hvar = dir.find(b"HVAR", bytes).map(HvarTable::parse).transpose()?;
         let vvar = dir.find(b"VVAR", bytes).map(VvarTable::parse).transpose()?;
@@ -676,6 +690,8 @@ impl<'a> Font<'a> {
             gvar,
             cvar,
             cvt_bytes,
+            fpgm_bytes,
+            prep_bytes,
             mvar,
             hvar,
             vvar,
@@ -3176,6 +3192,38 @@ impl<'a> Font<'a> {
             None => 0,
         };
         Some((base + delta).clamp(i16::MIN as i32, i16::MAX as i32) as i16)
+    }
+
+    // ---- TrueType hinting programs (fpgm / prep) -------------------------
+
+    /// The raw `fpgm` font-program bytes (TrueType bytecode run once when
+    /// the font is first used, ISO/IEC 14496-22:2019 §5.3.3), or `None`
+    /// when the font ships no `fpgm` table.
+    ///
+    /// This crate does **not** execute the bytecode (TrueType hinting is
+    /// out of scope — modern anti-aliasing at typical sizes does not need
+    /// it). The bytes are surfaced for tooling that introspects, edits, or
+    /// round-trips the hinting program, and for a downstream interpreter.
+    pub fn fpgm_program(&self) -> Option<&'a [u8]> {
+        self.fpgm_bytes
+    }
+
+    /// The raw `prep` control-value-program bytes (TrueType bytecode run
+    /// whenever the point size / font / transform changes, ISO/IEC
+    /// 14496-22:2019 §5.3.x), or `None` when absent. Like `fpgm`, surfaced
+    /// raw and not executed.
+    pub fn prep_program(&self) -> Option<&'a [u8]> {
+        self.prep_bytes
+    }
+
+    /// `true` if the font carries any TrueType hinting program (`fpgm`,
+    /// `prep`, or a non-empty `cvt `). A purely outline-driven font with no
+    /// hinting returns `false`. Note the bytecode is surfaced raw, never
+    /// executed.
+    pub fn has_hinting_program(&self) -> bool {
+        self.fpgm_bytes.is_some_and(|b| !b.is_empty())
+            || self.prep_bytes.is_some_and(|b| !b.is_empty())
+            || self.cvt_count() != 0
     }
 
     /// Borrow the parsed `MVAR` table, when present. Static fonts and

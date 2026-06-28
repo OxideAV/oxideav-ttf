@@ -1080,8 +1080,13 @@ format-14 UVS sidecar is decoded.
 - CFF / Type 2 charstrings — belongs in a sibling `oxideav-otf` crate.
 - Bidi, Arabic shaping, Indic conjuncts, and other complex contextual
   shaping beyond the GSUB/GPOS lookup coverage above.
-- TrueType bytecode hinting (modern anti-aliasing at ≥ 16 px does not
-  need it).
+- TrueType bytecode *execution* (modern anti-aliasing at ≥ 16 px does not
+  need it). The hinting tables themselves are surfaced raw for tooling and
+  a downstream interpreter: `cvt ` through `Font::cvt_value` /
+  `Font::cvt_count` (with `cvar` instance deltas), and the `fpgm`
+  font-program / `prep` control-value-program bytecode through
+  `Font::fpgm_program()` / `Font::prep_program()` (with
+  `Font::has_hinting_program()` gating). The bytes are never executed.
 - COLR **v1** paint graph (gradients, transforms, composites) — only
   the v0 flat layer stack is supported.
 - avar **v2** delta-set index map (variable-axis remap). avar v2 is an
