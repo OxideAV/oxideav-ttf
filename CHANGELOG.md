@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`DSIG` digital signature table (§8.x).** New structural decoder for
+  the digital-signature table: the header (`version`, `numSignatures`,
+  `flags`), the `SignatureRecord` array (`format`, `length`, `offset`),
+  and — for the spec's only defined block format, Signature Block
+  Format 1 — the reserved words, `signatureLength`, and the PKCS#7 packet
+  surfaced raw as a borrowed `&[u8]`. The PKCS#7 / X.509 contents are not
+  parsed and the signature is not verified (host-application policy, out
+  of a font-table parser's scope). `version == 1`, every block range, and
+  the Format-1 `signatureLength` are bounds-checked; the "cannot be
+  resigned" permission bit is decoded. New `Font::has_dsig` /
+  `Font::dsig_table` and the `DsigTable` / `DsigSignature` public types.
+
 - **`kern` table Format 2 — class-based two-dimensional array (§5.7.3).**
   The legacy `kern` decoder previously handled only Format 0 (explicit
   pair list). Format 2 — where left and right glyphs map to classes and

@@ -234,6 +234,25 @@ kerning, and mark attachment.
   `minorVersion` and the trailing Reserved pad byte are surfaced
   raw. `Font::has_pclt()` / `Font::pclt_table()` expose the
   parsed table),
+  `DSIG` (digital signature table, ISO/IEC 14496-22:2019 §8.x — the
+  8-byte header (`uint32 version == 1`, `uint16 numSignatures`,
+  `uint16 flags`) plus a `SignatureRecord[numSignatures]` array
+  (`uint32 format`, `uint32 length`, `Offset32 offset`) and the
+  signature blocks themselves. For the only block format the spec
+  defines — Signature Block Format 1 — the `reserved1` / `reserved2` /
+  `signatureLength` sub-header is decoded and the PKCS#7 packet is
+  surfaced **raw** as a borrowed `&[u8]` (`Signature::pkcs7_packet`); the
+  PKCS#7 / X.509 / ASN.1 contents are *not* parsed and the signature is
+  *not* verified — that is the host application's policy decision and is
+  out of scope for a font-table parser, matching the raw-payload policy
+  used for `sbix` / `CBDT` / `SVG ` blobs. The `signatureLength` field is
+  bounds-checked against its block, every `SignatureRecord` block range
+  against the table, and `version == 1` enforced per the spec; the
+  "cannot be resigned" permission bit (flags bit 0) is decoded into
+  `DsigTable::cannot_be_resigned()`. Unrecognised block formats surface
+  their format id, declared length, and raw block bytes for
+  forward-compatibility. `Font::has_dsig()` / `Font::dsig_table()` expose
+  the parsed table),
 - `name` table: full accessor API beyond family / full name — the
   registered nameID registry (`name_id` constants), typed accessors
   (subfamily, PostScript, version, copyright, trademark, manufacturer,

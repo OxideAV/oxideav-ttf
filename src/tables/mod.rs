@@ -16,6 +16,7 @@ pub mod colr;
 pub mod cpal;
 pub mod cvar;
 pub mod device;
+pub mod dsig;
 pub mod ebdt;
 pub mod ebsc;
 pub mod feature_variations;

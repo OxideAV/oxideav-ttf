@@ -71,6 +71,7 @@ use crate::tables::{
     colr::ColrTable,
     cpal::CpalTable,
     cvar::CvarTable,
+    dsig::DsigTable,
     ebdt::EbdtTable,
     ebsc::EbscTable,
     fvar::FvarTable,
@@ -117,6 +118,7 @@ pub use tables::cbdt::ColorBitmap;
 pub use tables::cblc::{BigGlyphMetrics, SmallGlyphMetrics};
 pub use tables::colr::ColorLayer;
 pub use tables::device::DeviceOrVariationIndex;
+pub use tables::dsig::{Signature as DsigSignature, DSIG_BLOCK_FORMAT_PKCS7, DSIG_VERSION};
 pub use tables::ebdt::{CompositeBitmap, EbdtComponent, GrayBitmap};
 pub use tables::ebsc::{BitmapScale, SbitLineMetrics, EBSC_MAJOR_VERSION, EBSC_MINOR_VERSION};
 pub use tables::fvar::{NamedInstance, VariationAxis};
@@ -417,6 +419,12 @@ pub struct Font<'a> {
     /// Optional; carries per-script/language justification suggestions
     /// (GSUB/GPOS lookup enable/disable lists + extender glyphs).
     jstf: Option<JstfTable<'a>>,
+    /// Digital signature table (`DSIG`, ISO/IEC 14496-22:2019 §8.x).
+    /// Optional; carries the font's digital signature as one or more
+    /// `SignatureRecord`s pointing at PKCS#7 signature blocks. Block
+    /// payloads borrow from the on-wire `DSIG` slice — this crate decodes
+    /// the table structure but does not verify the signature.
+    dsig: Option<DsigTable<'a>>,
     /// Current user-space coordinate vector, one per axis (defaults
     /// to each axis's `default` value when `fvar` is present, empty
     /// vec otherwise). `set_variation_coords` updates this; the
@@ -613,6 +621,9 @@ impl<'a> Font<'a> {
         // §6.3.5 JSTF table — justification suggestions. Borrows from the
         // on-wire slice.
         let jstf = dir.find(b"JSTF", bytes).map(JstfTable::parse).transpose()?;
+        // §8.x DSIG table — digital signature. Structural decode only; the
+        // PKCS#7 block payloads borrow from this slice.
+        let dsig = dir.find(b"DSIG", bytes).map(DsigTable::parse).transpose()?;
         let var_coords = match fvar.as_ref() {
             Some(f) => f.axes().iter().map(|a| a.default).collect(),
             None => Vec::new(),
@@ -666,6 +677,7 @@ impl<'a> Font<'a> {
             svg,
             math,
             jstf,
+            dsig,
             var_coords,
         })
     }
@@ -960,6 +972,19 @@ impl<'a> Font<'a> {
     /// (ISO/IEC 14496-22:2019 §6.3.5).
     pub fn jstf_table(&self) -> Option<&JstfTable<'a>> {
         self.jstf.as_ref()
+    }
+
+    /// `true` when the font ships a `DSIG` table (a digital signature).
+    pub fn has_dsig(&self) -> bool {
+        self.dsig.is_some()
+    }
+
+    /// Borrow the parsed `DSIG` table (ISO/IEC 14496-22:2019 §8.x), when
+    /// the font publishes one. The table carries one or more PKCS#7
+    /// signature blocks surfaced as raw bytes; this crate decodes the table
+    /// structure but does not verify the signature cryptographically.
+    pub fn dsig_table(&self) -> Option<&DsigTable<'a>> {
+        self.dsig.as_ref()
     }
 
     /// Borrow the parsed `post` table. `None` when the font does not
