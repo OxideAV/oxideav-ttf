@@ -307,6 +307,18 @@ kerning, and mark attachment.
   (validated 0/1, drives `loca` width), and `glyphDataFormat`.
   `Font::head_table()`, `Font::font_revision()`, and
   `Font::lowest_rec_ppem()` expose it),
+  `hhea` (horizontal header, ISO/IEC 14496-22:2019 §5.2.4 — ascent /
+  descent / line gap, `advanceWidthMax`, the min left / right side-bearing
+  extremes, `xMaxExtent`, the caret-slope rise / run / offset
+  (`caret_is_vertical()` distinguishes upright from italic carets),
+  `metricDataFormat`, and `numberOfHMetrics`; `Font::hhea_table()`),
+  `maxp` (maximum profile, ISO/IEC 14496-22:2019 §5.2.5 — v0.5
+  (`numGlyphs` only, CFF fonts) and v1.0 (TrueType), the latter adding the
+  rasteriser-sizing maxima `maxPoints` / `maxContours` / composite-point
+  and -contour limits / the bytecode-interpreter resource caps
+  (`maxZones` / `maxStorage` / `maxFunctionDefs` / `maxStackElements` / …)
+  / `maxComponentElements` / `maxComponentDepth`, surfaced as a `v1`
+  `Option`; `Font::maxp_table()`),
 - `name` table: full accessor API beyond family / full name — the
   registered nameID registry (`name_id` constants), typed accessors
   (subfamily, PostScript, version, copyright, trademark, manufacturer,

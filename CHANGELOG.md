@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`hhea` + `maxp` full field decode (§5.2.4 / §5.2.5).** `hhea` now
+  decodes the min left / right side-bearing extremes, `xMaxExtent`, the
+  caret-slope rise / run / offset (with `caret_is_vertical()`), and
+  `metricDataFormat` in addition to the ascent / descent / advance-max it
+  already had. `maxp` now decodes the full v1.0 TrueType maxima
+  (`maxPoints`, `maxContours`, composite limits, the bytecode-interpreter
+  resource caps, `maxComponentDepth`) as a `v1: Option<MaxpV1>`, populated
+  only for a v1.0 table. New `Font::hhea_table` / `Font::maxp_table`.
+  Existing fields keep their names.
+
 - **`head` table full field decode (§5.2.1).** The `head` decoder
   previously surfaced only `unitsPerEm`, the bbox, `macStyle`, and
   `indexToLocFormat`. It now decodes the whole table: `fontRevision`, the

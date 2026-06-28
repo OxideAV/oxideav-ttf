@@ -911,6 +911,22 @@ impl<'a> Font<'a> {
         self.maxp.num_glyphs
     }
 
+    /// Borrow the parsed `hhea` table (ISO/IEC 14496-22:2019 §5.2.4),
+    /// exposing the horizontal header in full: ascent / descent / line gap,
+    /// `advanceWidthMax`, the min side-bearing extremes, `xMaxExtent`, the
+    /// caret-slope rise / run / offset, and `numberOfHMetrics`.
+    pub fn hhea_table(&self) -> &HheaTable {
+        &self.hhea
+    }
+
+    /// Borrow the parsed `maxp` table (ISO/IEC 14496-22:2019 §5.2.5). For a
+    /// v1.0 (TrueType) table the `v1` field carries the rasteriser-sizing
+    /// maxima (`maxPoints`, composite limits, bytecode resource caps,
+    /// `maxComponentDepth`); `v1` is `None` for a v0.5 (CFF) table.
+    pub fn maxp_table(&self) -> &MaxpTable {
+        &self.maxp
+    }
+
     /// `OS/2.usWeightClass` (100..1000), or 400 (Regular) if `OS/2` absent.
     pub fn weight_class(&self) -> u16 {
         self.os2.as_ref().map(|o| o.us_weight_class).unwrap_or(400)

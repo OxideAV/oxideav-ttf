@@ -48,6 +48,25 @@ fn head_table_full_fields() {
 }
 
 #[test]
+fn hhea_and_maxp_full_fields() {
+    let f = Font::from_bytes(FIXTURE).expect("DejaVu parse");
+    let hhea = f.hhea_table();
+    // Upright (non-italic) face: vertical caret.
+    assert!(hhea.caret_is_vertical());
+    assert_eq!(hhea.caret_slope_rise, 1);
+    assert!(hhea.advance_width_max > 0);
+    assert!(hhea.num_long_hor_metrics > 0);
+
+    // DejaVu Mono has TrueType outlines -> maxp v1.0 with real maxima.
+    let maxp = f.maxp_table();
+    let v1 = maxp.v1.expect("DejaVu ships maxp v1.0");
+    assert!(v1.max_points > 0);
+    assert!(v1.max_contours > 0);
+    // A font with composite glyphs reports a non-zero component depth.
+    assert!(v1.max_component_depth >= 1);
+}
+
+#[test]
 fn glyph_lookup_and_outline_for_a() {
     let f = Font::from_bytes(FIXTURE).unwrap();
     let gid = f.glyph_index('A').expect("'A' must map");
