@@ -413,8 +413,16 @@ kerning, and mark attachment.
   glyph_gray_bitmap(gid, target_ppem)` returns a `GrayBitmap` from the
   closest strike (same closest-ppem-with-larger-wins tie-break as the
   colour path); `Font::has_gray_bitmaps()` / `Font::gray_strike_sizes()`
-  gate and enumerate. Format 4 (compressed) and formats 8 / 9
-  (composite) decode to `None`; `bitDepth == 32` (BGRA) routes to the
+  gate and enumerate. Composite formats 8 (small metrics) and 9 (big
+  metrics) per §5.6.2.2.8 / §5.6.2.2.9 are also assembled: the
+  `EbdtComponent` array (`glyphID` + `int8 xOffset` + `int8 yOffset`)
+  is decoded through `EbdtTable::lookup_composite` into a `CompositeBitmap`
+  descriptor, then `glyph_gray_bitmap` resolves each component glyph out of
+  the *same* strike and blits it onto the composite's canvas at its
+  per-component `(xOffset, yOffset)` placement — nested composites are
+  followed up to a bounded depth (`EBDT_COMPOSITE_MAX_DEPTH` = 8) with
+  self-reference guarded, and out-of-canvas component pixels clip. Format 4
+  (compressed) decodes to `None`; `bitDepth == 32` (BGRA) routes to the
   `CBDT` colour path instead.
 - `EBSC` embedded bitmap scaling table (ISO/IEC 14496-22:2019 §5.6.4) —
   the 8-byte header (`uint16 majorVersion == 2`, `uint16 minorVersion`,

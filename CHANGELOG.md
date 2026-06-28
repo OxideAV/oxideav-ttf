@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`EBDT` composite glyph bitmaps — formats 8 & 9 (§5.6.2.2.8 /
+  §5.6.2.2.9).** Composite (component-data) embedded bitmaps were
+  previously skipped (`glyph_gray_bitmap` returned `None`). The new
+  `EbdtTable::lookup_composite` decodes the composite descriptor — the
+  composite's own Small/BigGlyphMetrics plus its `EbdtComponent` array
+  (`glyphID` + `int8 xOffset` + `int8 yOffset`) — and `Font::glyph_gray_bitmap`
+  now assembles the finished glyph: each component's bitmap is resolved out
+  of the *same* `EBLC` strike and blitted onto the composite's canvas at its
+  `(xOffset, yOffset)` placement. Nested composites (a component that is
+  itself a format-8/9 glyph) are followed up to a bounded depth, with
+  self-reference guarded. Out-of-canvas component pixels clip. New public
+  types `EbdtComponent` / `CompositeBitmap`.
+
 - **Variable-font MATH value resolution (§6.3.6.2.1).** Every MATH
   `MathValueRecord` carries an optional device / VariationIndex offset
   measured from the start of its *parent* sub-table; the new

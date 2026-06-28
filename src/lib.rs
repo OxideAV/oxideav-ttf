@@ -117,7 +117,7 @@ pub use tables::cbdt::ColorBitmap;
 pub use tables::cblc::{BigGlyphMetrics, SmallGlyphMetrics};
 pub use tables::colr::ColorLayer;
 pub use tables::device::DeviceOrVariationIndex;
-pub use tables::ebdt::GrayBitmap;
+pub use tables::ebdt::{CompositeBitmap, EbdtComponent, GrayBitmap};
 pub use tables::ebsc::{BitmapScale, SbitLineMetrics, EBSC_MAJOR_VERSION, EBSC_MINOR_VERSION};
 pub use tables::fvar::{NamedInstance, VariationAxis};
 pub use tables::gasp::{
@@ -2577,7 +2577,13 @@ impl<'a> Font<'a> {
     /// whose `ppem_y` is closest to `target_ppem`. Returns `None` if the
     /// font has no EBDT/EBLC tables OR no strike contains `glyph_id` OR
     /// the strike's per-glyph entry is in an EBDT format we don't decode
-    /// (format 4 compressed, or formats 8 / 9 composite).
+    /// (format 4 compressed).
+    ///
+    /// Composite formats 8 / 9 (§5.6.2.2.8 / §5.6.2.2.9) **are** decoded:
+    /// the composite's component glyphs are resolved out of the same strike
+    /// and blitted onto the composite's canvas at their per-component
+    /// `(xOffset, yOffset)` offsets (nested composites are followed up to a
+    /// bounded depth). The returned `GrayBitmap` is the assembled image.
     ///
     /// On success returns a [`GrayBitmap`] whose `pixels` field is an
     /// unpacked `width * height` row-major grid of alpha coverage
@@ -2588,7 +2594,82 @@ impl<'a> Font<'a> {
         let eblc = self.eblc.as_ref()?;
         let ebdt = self.ebdt.as_ref()?;
         let entry = eblc.lookup_glyph(glyph_id, target_ppem)?;
+        // Pixel formats (1/2/5/6/7) decode directly. Composite formats
+        // (8/9) assemble component glyphs from the *same* strike — resolve
+        // them recursively at that strike's exact ppemY so every component
+        // lands in the same pixel grid.
+        if matches!(entry.image_format, 8 | 9) {
+            return self.composite_gray_bitmap(glyph_id, entry.ppem_y, 0);
+        }
         ebdt.lookup(&entry).ok().flatten()
+    }
+
+    /// Maximum `EBDT` composite (format 8 / 9) nesting depth. §5.6.2.2 says
+    /// "the number of nesting levels is determined by implementation stack
+    /// space"; we bound it to keep a malformed self-referential composite
+    /// from recursing without limit.
+    const EBDT_COMPOSITE_MAX_DEPTH: u8 = 8;
+
+    /// Resolve `glyph_id` to a `GrayBitmap` at the *exact* strike ppemY,
+    /// assembling composite (format 8 / 9) glyphs by recursively resolving
+    /// and blitting their components. `depth` guards against runaway
+    /// recursion in a malformed font.
+    fn composite_gray_bitmap(&self, glyph_id: u16, ppem_y: u8, depth: u8) -> Option<GrayBitmap> {
+        if depth > Self::EBDT_COMPOSITE_MAX_DEPTH {
+            return None;
+        }
+        let eblc = self.eblc.as_ref()?;
+        let ebdt = self.ebdt.as_ref()?;
+        let entry = eblc.lookup_glyph(glyph_id, ppem_y)?;
+        // A non-composite component decodes directly as pixels.
+        if !matches!(entry.image_format, 8 | 9) {
+            return ebdt.lookup(&entry).ok().flatten();
+        }
+        let comp = ebdt.lookup_composite(&entry).ok().flatten()?;
+        // Allocate the composite's own canvas (white / transparent).
+        let cw = comp.width as usize;
+        let ch = comp.height as usize;
+        let mut canvas = vec![0u8; cw.checked_mul(ch)?];
+        // §5.6.2.2: each component's (xOffset, yOffset) places the top-left
+        // corner of the component bitmap within the composite. Components
+        // are blitted back-to-front in array order; a non-zero alpha
+        // pixel overwrites what is underneath (the bitmaps are alpha masks,
+        // so "max coverage wins" preserves overlap without a true blend —
+        // the spec leaves the composite raster model to the rasteriser).
+        for component in &comp.components {
+            // Guard against a component pointing back at itself.
+            if component.glyph_id == glyph_id {
+                continue;
+            }
+            let part = self.composite_gray_bitmap(component.glyph_id, ppem_y, depth + 1)?;
+            let pw = part.width as usize;
+            let ph = part.height as usize;
+            for py in 0..ph {
+                let cy = component.y_offset as isize + py as isize;
+                if cy < 0 || cy as usize >= ch {
+                    continue;
+                }
+                for px in 0..pw {
+                    let cx = component.x_offset as isize + px as isize;
+                    if cx < 0 || cx as usize >= cw {
+                        continue;
+                    }
+                    let src = part.pixels.get(py * pw + px).copied().unwrap_or(0);
+                    let dst = &mut canvas[cy as usize * cw + cx as usize];
+                    *dst = (*dst).max(src);
+                }
+            }
+        }
+        Some(GrayBitmap {
+            width: comp.width,
+            height: comp.height,
+            bearing_x: comp.bearing_x,
+            bearing_y: comp.bearing_y,
+            advance: comp.advance,
+            ppem: comp.ppem,
+            bit_depth: comp.bit_depth,
+            pixels: canvas,
+        })
     }
 
     // ---- scaled embedded bitmaps (EBSC) ----------------------------------

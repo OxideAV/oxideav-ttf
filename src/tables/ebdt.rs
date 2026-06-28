@@ -80,6 +80,53 @@ pub struct GrayBitmap {
     pub pixels: Vec<u8>,
 }
 
+/// One `EbdtComponent` record (§5.6.2.2 "EbdtComponent Record") — a
+/// reference, by glyph ID, to another glyph whose bitmap is copied into a
+/// composite (format 8 / 9) glyph at `(x_offset, y_offset)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EbdtComponent {
+    /// Component glyph ID. Its bitmap is looked up in the *same* `EBLC`
+    /// strike as the composite. Nested composites are allowed (a component
+    /// may itself be a format-8/9 glyph).
+    pub glyph_id: u16,
+    /// Position of the component's left edge, in pixels, relative to the
+    /// composite's bitmap origin (§5.6.2.2: "Position of component left").
+    pub x_offset: i8,
+    /// Position of the component's top edge, in pixels (§5.6.2.2:
+    /// "Position of component top").
+    pub y_offset: i8,
+}
+
+/// The decoded *descriptor* of a composite (format 8 / 9) `EBDT` glyph —
+/// the composite's own bounding metrics plus the list of component glyphs
+/// to assemble. It carries no pixels itself; the [`Font`] layer resolves
+/// each [`EbdtComponent`]'s `GrayBitmap` and blits them onto a canvas.
+///
+/// [`Font`]: crate::Font
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompositeBitmap {
+    /// Composite bounding-box width in pixels (from the composite's own
+    /// Small/BigGlyphMetrics).
+    pub width: u8,
+    /// Composite bounding-box height in pixels.
+    pub height: u8,
+    /// Horizontal pen origin → left edge of the composite bitmap, pixels.
+    pub bearing_x: i8,
+    /// Horizontal pen origin → top edge of the composite bitmap, pixels.
+    pub bearing_y: i8,
+    /// Horizontal advance of the composite, pixels.
+    pub advance: u8,
+    /// Strike ppem on the Y axis.
+    pub ppem: u8,
+    /// Bit depth of the strike (1 / 2 / 4 / 8); shared by every component.
+    pub bit_depth: u8,
+    /// The component glyphs to assemble, in declaration order. The spec
+    /// does not prescribe a paint order; later components in the array are
+    /// drawn over earlier ones (back-to-front) so the array order is
+    /// preserved.
+    pub components: Vec<EbdtComponent>,
+}
+
 /// Parsed `EBDT` table.
 #[derive(Debug, Clone)]
 pub struct EbdtTable<'a> {
@@ -191,6 +238,112 @@ impl<'a> EbdtTable<'a> {
             ppem: entry.ppem_y,
             bit_depth: entry.bit_depth,
             pixels,
+        }))
+    }
+
+    /// Decode a composite (component-data) entry — §5.6.2.2.8 format 8
+    /// (small metrics) and §5.6.2.2.9 format 9 (big metrics). Unlike the
+    /// pixel formats these carry **no** imagery of their own: the glyph is
+    /// assembled from copies of other glyphs' bitmaps positioned at
+    /// per-component `(xOffset, yOffset)` offsets. This method only decodes
+    /// the *descriptor* (composite metrics + the [`EbdtComponent`] array);
+    /// resolving each component's pixels and compositing them onto a canvas
+    /// needs the `EBLC` strike, so that recursion lives at the [`Font`]
+    /// layer (`crate::Font::glyph_gray_bitmap`).
+    ///
+    /// Returns `Ok(None)` for non-composite formats (so a caller can probe
+    /// every entry uniformly); `Err(_)` only on structural damage.
+    ///
+    /// [`Font`]: crate::Font
+    pub fn lookup_composite(&self, entry: &CblcEntry) -> Result<Option<CompositeBitmap>, Error> {
+        let off = entry.image_data_offset as usize;
+        let end = off
+            .checked_add(entry.data_len as usize)
+            .ok_or(Error::BadStructure("EBDT: composite entry overflow"))?;
+        if end > self.bytes.len() {
+            return Err(Error::BadOffset);
+        }
+        let blob = &self.bytes[off..end];
+        match entry.image_format {
+            8 => self.decode_composite(blob, entry, /* big_metrics */ false),
+            9 => self.decode_composite(blob, entry, /* big_metrics */ true),
+            _ => Ok(None),
+        }
+    }
+
+    /// Shared body for formats 8 (small metrics + 1-byte pad) and 9 (big
+    /// metrics, no pad). Layout per §5.6.2.2.8 / §5.6.2.2.9:
+    ///
+    /// ```text
+    /// Format 8: SmallGlyphMetrics(5) | uint8 pad | uint16 numComponents | EbdtComponent[n]
+    /// Format 9: BigGlyphMetrics(8)              | uint16 numComponents | EbdtComponent[n]
+    /// ```
+    ///
+    /// Each `EbdtComponent` is `uint16 glyphID | int8 xOffset | int8 yOffset`
+    /// (4 bytes), `xOffset`/`yOffset` giving the top-left placement of the
+    /// component in the composite.
+    fn decode_composite(
+        &self,
+        blob: &[u8],
+        entry: &CblcEntry,
+        big_metrics: bool,
+    ) -> Result<Option<CompositeBitmap>, Error> {
+        // Decode the composite's own bounding metrics, and find where the
+        // numComponents field begins.
+        let (width, height, bearing_x, bearing_y, advance, n_off) = if big_metrics {
+            let m = BigGlyphMetrics::parse(blob, 0)?;
+            (
+                m.width,
+                m.height,
+                m.hori_bearing_x,
+                m.hori_bearing_y,
+                m.hori_advance,
+                8usize,
+            )
+        } else {
+            let m = SmallGlyphMetrics::parse(blob, 0)?;
+            // Format 8 has a 1-byte pad "to short boundary" before the count.
+            (
+                m.width,
+                m.height,
+                m.bearing_x,
+                m.bearing_y,
+                m.advance,
+                6usize,
+            )
+        };
+        let num_components = blob
+            .get(n_off..n_off + 2)
+            .map(|b| u16::from_be_bytes([b[0], b[1]]))
+            .ok_or(Error::UnexpectedEof)? as usize;
+        let arr_off = n_off + 2;
+        // 4 bytes per EbdtComponent record.
+        let needed = arr_off
+            .checked_add(num_components.checked_mul(4).ok_or(Error::BadStructure(
+                "EBDT composite: component count overflow",
+            ))?)
+            .ok_or(Error::BadStructure("EBDT composite: array overflow"))?;
+        if blob.len() < needed {
+            return Err(Error::UnexpectedEof);
+        }
+        let mut components = Vec::with_capacity(num_components);
+        for i in 0..num_components {
+            let base = arr_off + i * 4;
+            components.push(EbdtComponent {
+                glyph_id: u16::from_be_bytes([blob[base], blob[base + 1]]),
+                x_offset: blob[base + 2] as i8,
+                y_offset: blob[base + 3] as i8,
+            });
+        }
+        Ok(Some(CompositeBitmap {
+            width,
+            height,
+            bearing_x,
+            bearing_y,
+            advance,
+            ppem: entry.ppem_y,
+            bit_depth: entry.bit_depth,
+            components,
         }))
     }
 
@@ -501,5 +654,107 @@ mod tests {
         let t = EbdtTable::parse(&bytes).unwrap();
         let e = small_entry(1, 100, 10, 1);
         assert!(matches!(t.lookup(&e), Err(Error::BadOffset)));
+    }
+
+    #[test]
+    fn composite_format8_descriptor() {
+        // Format 8: SmallGlyphMetrics(5) | pad(1) | numComponents(2) |
+        // EbdtComponent[2] (4 bytes each).
+        let mut bytes = vec![0u8; 4];
+        bytes[0..2].copy_from_slice(&2u16.to_be_bytes());
+        let off = bytes.len();
+        // metrics h=10, w=8, bx=1, by=9, adv=8.
+        bytes.extend_from_slice(&[10, 8, 1, 9, 8]);
+        bytes.push(0x00); // pad
+        bytes.extend_from_slice(&2u16.to_be_bytes()); // numComponents
+                                                      // component 0: glyph 5 at (0, 0)
+        bytes.extend_from_slice(&5u16.to_be_bytes());
+        bytes.push(0);
+        bytes.push(0);
+        // component 1: glyph 6 at (3, 255==-1)
+        bytes.extend_from_slice(&6u16.to_be_bytes());
+        bytes.push(3);
+        bytes.push(0xFF);
+        let total = (bytes.len() - off) as u32;
+        let t = EbdtTable::parse(&bytes).unwrap();
+        let e = small_entry(8, off as u32, total, 1);
+        // The pixel lookup yields None (no imagery) ...
+        assert!(t.lookup(&e).unwrap().is_none());
+        // ... but the composite descriptor decodes.
+        let c = t.lookup_composite(&e).unwrap().unwrap();
+        assert_eq!((c.width, c.height), (8, 10));
+        assert_eq!((c.bearing_x, c.bearing_y, c.advance), (1, 9, 8));
+        assert_eq!(c.components.len(), 2);
+        assert_eq!(
+            c.components[0],
+            EbdtComponent {
+                glyph_id: 5,
+                x_offset: 0,
+                y_offset: 0
+            }
+        );
+        assert_eq!(
+            c.components[1],
+            EbdtComponent {
+                glyph_id: 6,
+                x_offset: 3,
+                y_offset: -1
+            }
+        );
+    }
+
+    #[test]
+    fn composite_format9_big_metrics() {
+        // Format 9: BigGlyphMetrics(8) | numComponents(2) | EbdtComponent[1]
+        let mut bytes = vec![0u8; 4];
+        bytes[0..2].copy_from_slice(&2u16.to_be_bytes());
+        let off = bytes.len();
+        // BigGlyphMetrics: h=4, w=4, hbx=0, hby=4, hadv=4, vbx, vby, vadv.
+        bytes.extend_from_slice(&[4, 4, 0, 4, 4, 0, 0, 4]);
+        bytes.extend_from_slice(&1u16.to_be_bytes()); // numComponents
+        bytes.extend_from_slice(&7u16.to_be_bytes());
+        bytes.push(2);
+        bytes.push(2);
+        let total = (bytes.len() - off) as u32;
+        let t = EbdtTable::parse(&bytes).unwrap();
+        let e = small_entry(9, off as u32, total, 4);
+        let c = t.lookup_composite(&e).unwrap().unwrap();
+        assert_eq!((c.width, c.height), (4, 4));
+        assert_eq!(c.bit_depth, 4);
+        assert_eq!(c.components.len(), 1);
+        assert_eq!(
+            c.components[0],
+            EbdtComponent {
+                glyph_id: 7,
+                x_offset: 2,
+                y_offset: 2
+            }
+        );
+    }
+
+    #[test]
+    fn composite_truncated_array_errors() {
+        let mut bytes = vec![0u8; 4];
+        bytes[0..2].copy_from_slice(&2u16.to_be_bytes());
+        let off = bytes.len();
+        bytes.extend_from_slice(&[10, 8, 1, 9, 8]); // small metrics
+        bytes.push(0x00); // pad
+        bytes.extend_from_slice(&3u16.to_be_bytes()); // claims 3 components
+                                                      // ... but only supply one 4-byte record.
+        bytes.extend_from_slice(&[0, 5, 0, 0]);
+        let total = (bytes.len() - off) as u32;
+        let t = EbdtTable::parse(&bytes).unwrap();
+        let e = small_entry(8, off as u32, total, 1);
+        assert!(matches!(t.lookup_composite(&e), Err(Error::UnexpectedEof)));
+    }
+
+    #[test]
+    fn lookup_composite_none_for_pixel_format() {
+        let mut bytes = vec![0u8; 8];
+        bytes[0..2].copy_from_slice(&2u16.to_be_bytes());
+        let t = EbdtTable::parse(&bytes).unwrap();
+        // A format-1 (pixel) entry has no composite descriptor.
+        let e = small_entry(1, 4, 1, 1);
+        assert!(t.lookup_composite(&e).unwrap().is_none());
     }
 }
