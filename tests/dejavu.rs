@@ -28,6 +28,26 @@ fn parses_dejavu_sans_mono() {
 }
 
 #[test]
+fn head_table_full_fields() {
+    let f = Font::from_bytes(FIXTURE).expect("DejaVu parse");
+    let head = f.head_table();
+    assert_eq!(head.units_per_em, 2048);
+    // DejaVu (manually hinted, glyf outlines) honours the baseline-at-y0
+    // convention and declares a lowestRecPPEM.
+    assert!(head.flag_baseline_at_y0());
+    assert!(f.lowest_rec_ppem() > 0);
+    // fontRevision is a positive 16.16 value (DejaVu 2.x).
+    assert!(f.font_revision() > 1.0);
+    // Created/modified timestamps are populated (seconds since 1904).
+    assert!(head.modified >= head.created);
+    // glyphDataFormat is the current format (0).
+    assert_eq!(head.glyph_data_format, 0);
+    // DejaVu Mono Book is the regular upright face.
+    assert!(!head.mac_style_bold());
+    assert!(!head.mac_style_italic());
+}
+
+#[test]
 fn glyph_lookup_and_outline_for_a() {
     let f = Font::from_bytes(FIXTURE).unwrap();
     let gid = f.glyph_index('A').expect("'A' must map");

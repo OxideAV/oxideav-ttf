@@ -133,6 +133,11 @@ pub use tables::gsub::GsubFeature;
 pub use tables::hdmx::{
     HdmxRecord, HDMX_HEADER_LEN, HDMX_RECORD_HEADER_LEN, HDMX_TABLE_TAG, HDMX_VERSION_0,
 };
+pub use tables::head::{
+    HEAD_FLAG_BASELINE_AT_Y0, HEAD_FLAG_CLEARTYPE_OPTIMIZED, HEAD_FLAG_CONVERTED,
+    HEAD_FLAG_INSTRUCTIONS_ALTER_ADVANCE, HEAD_FLAG_LAST_RESORT, HEAD_FLAG_LOSSLESS,
+    MAC_STYLE_BOLD, MAC_STYLE_CONDENSED, MAC_STYLE_EXTENDED, MAC_STYLE_ITALIC,
+};
 pub use tables::hvar::DeltaSetIndexMap;
 pub use tables::kern::HeaderVariant as KernHeaderVariant;
 pub use tables::ltsh::{LTSH_ALWAYS_LINEAR, LTSH_TABLE_TAG, LTSH_VERSION_0};
@@ -854,6 +859,26 @@ impl<'a> Font<'a> {
     /// fonts.
     pub fn units_per_em(&self) -> u16 {
         self.head.units_per_em
+    }
+
+    /// Borrow the parsed `head` table (ISO/IEC 14496-22:2019 §5.2.1),
+    /// exposing `fontRevision`, the `flags` / `macStyle` words (with
+    /// decoded predicates), the created / modified timestamps,
+    /// `lowestRecPPEM`, `fontDirectionHint`, and `glyphDataFormat`.
+    pub fn head_table(&self) -> &HeadTable {
+        &self.head
+    }
+
+    /// `head.fontRevision` — the font designer's revision number as a
+    /// 16.16 fixed value (e.g. `2.37`).
+    pub fn font_revision(&self) -> f32 {
+        self.head.font_revision
+    }
+
+    /// `head.lowestRecPPEM` — the smallest size, in pixels, at which the
+    /// font is intended to remain legible.
+    pub fn lowest_rec_ppem(&self) -> u16 {
+        self.head.lowest_rec_ppem
     }
 
     /// Typographic ascent. We prefer `OS/2.sTypoAscender` if present

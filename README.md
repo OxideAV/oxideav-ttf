@@ -296,6 +296,17 @@ kerning, and mark attachment.
   size still decodes the prefix without over-reading. `Font::os2_table()`,
   `Font::weight_class()`, `Font::width_class()`, and
   `Font::embedding_installable()` expose it),
+  `head` (font header, ISO/IEC 14496-22:2019 §5.2.1 — the full table:
+  `fontRevision` (16.16), the 16-bit `flags` word with decoded predicates
+  (`flag_baseline_at_y0` / `flag_lsb_at_x0` /
+  `flag_instructions_alter_advance` / `flag_lossless` / `flag_last_resort`),
+  `unitsPerEm`, the created / modified LONGDATETIME timestamps, the
+  glyph-extent bbox, the `macStyle` word (`mac_style_bold` /
+  `mac_style_italic` / `mac_style_condensed` / `mac_style_extended`),
+  `lowestRecPPEM`, the deprecated `fontDirectionHint`, `indexToLocFormat`
+  (validated 0/1, drives `loca` width), and `glyphDataFormat`.
+  `Font::head_table()`, `Font::font_revision()`, and
+  `Font::lowest_rec_ppem()` expose it),
 - `name` table: full accessor API beyond family / full name — the
   registered nameID registry (`name_id` constants), typed accessors
   (subfamily, PostScript, version, copyright, trademark, manufacturer,

@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`head` table full field decode (§5.2.1).** The `head` decoder
+  previously surfaced only `unitsPerEm`, the bbox, `macStyle`, and
+  `indexToLocFormat`. It now decodes the whole table: `fontRevision`, the
+  16-bit `flags` word (with `flag_baseline_at_y0` / `flag_lsb_at_x0` /
+  `flag_instructions_alter_advance` / `flag_lossless` / `flag_last_resort`
+  predicates), the created / modified timestamps, `lowestRecPPEM`,
+  `fontDirectionHint`, `glyphDataFormat`, and the full `macStyle`
+  predicate set. New `Font::head_table` / `Font::font_revision` /
+  `Font::lowest_rec_ppem`. Existing fields keep their names.
+
 - **`OS/2` table full field decode (§5.2.3).** The `OS/2` decoder
   previously surfaced only a handful of fields (weight class, fsSelection,
   typo + x/cap-height). It now decodes the complete field set across
