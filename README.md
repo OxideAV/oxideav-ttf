@@ -253,6 +253,25 @@ kerning, and mark attachment.
   their format id, declared length, and raw block bytes for
   forward-compatibility. `Font::has_dsig()` / `Font::dsig_table()` expose
   the parsed table),
+  `MERG` (merge table, ISO/IEC 14496-22:2019 §5.7.5 — the 10-byte header
+  (`uint16 version == 0`, `uint16 mergeClassCount`, `Offset16
+  mergeDataOffset`, `uint16 classDefCount`, `Offset16
+  offsetToClassDefOffsets`) plus the array of `Offset16` to ClassDef
+  tables and the square `mergeClassCount × mergeClassCount` array of
+  `uint8` merge-entry bit-fields. Glyphs are sorted into merge classes by
+  one or more OFF-layout ClassDef tables (decoded through the shared
+  ClassDef parser; both ClassDefFormat1 and ClassDefFormat2, class 0 the
+  implicit default), and `MergTable::merge_class(gid)` consults each in
+  order. Each ordered `(firstClass, secondClass)` cell decodes through
+  `MergeEntry` into the six defined flags — `MERGE_LTR` / `GROUP_LTR` /
+  `SECOND_IS_SUBORDINATE_LTR` and their RTL siblings — describing whether
+  a renderer should merge or group the pair before antialias filtering.
+  `merge_entry(first, second)` and `merge_entry_for_glyphs(gid1, gid2)`
+  resolve a cell; `version == 0`, the merge-data array, and every
+  ClassDef offset are bounds-checked. The §5.7.5.3 stateful run-processing
+  algorithm that consumes these entries to pick which glyph *sequences*
+  get antialiased together is a renderer concern. `Font::has_merg()` /
+  `Font::merg_table()` expose the parsed table),
 - `name` table: full accessor API beyond family / full name — the
   registered nameID registry (`name_id` constants), typed accessors
   (subfamily, PostScript, version, copyright, trademark, manufacturer,

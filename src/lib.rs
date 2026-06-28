@@ -92,6 +92,7 @@ use crate::tables::{
     ltsh::LtshTable,
     math::{GrowDirection, MathKernCorner, MathTable},
     maxp::MaxpTable,
+    merg::MergTable,
     meta::MetaTable,
     mvar::MvarTable,
     name::NameTable,
@@ -135,6 +136,10 @@ pub use tables::hdmx::{
 pub use tables::hvar::DeltaSetIndexMap;
 pub use tables::kern::HeaderVariant as KernHeaderVariant;
 pub use tables::ltsh::{LTSH_ALWAYS_LINEAR, LTSH_TABLE_TAG, LTSH_VERSION_0};
+pub use tables::merg::{
+    MergeEntry, GROUP_LTR, GROUP_RTL, MERGE_LTR, MERGE_RTL, SECOND_IS_SUBORDINATE_LTR,
+    SECOND_IS_SUBORDINATE_RTL,
+};
 pub use tables::meta::{
     is_valid_meta_tag, script_lang_tags, MetaRecord, ScriptLangTag, META_DATA_MAP_LEN,
     META_HEADER_LEN, META_TABLE_TAG, META_TAG_APPL, META_TAG_BILD, META_TAG_DLNG, META_TAG_SLNG,
@@ -425,6 +430,11 @@ pub struct Font<'a> {
     /// payloads borrow from the on-wire `DSIG` slice — this crate decodes
     /// the table structure but does not verify the signature.
     dsig: Option<DsigTable<'a>>,
+    /// Merge table (`MERG`, ISO/IEC 14496-22:2019 §5.7.5). Optional;
+    /// declares which glyph-class pairs a renderer should merge or group
+    /// before antialias filtering. Copies its ClassDef + merge-entry bytes
+    /// out at parse time, so it carries no lifetime.
+    merg: Option<MergTable>,
     /// Current user-space coordinate vector, one per axis (defaults
     /// to each axis's `default` value when `fvar` is present, empty
     /// vec otherwise). `set_variation_coords` updates this; the
@@ -624,6 +634,9 @@ impl<'a> Font<'a> {
         // §8.x DSIG table — digital signature. Structural decode only; the
         // PKCS#7 block payloads borrow from this slice.
         let dsig = dir.find(b"DSIG", bytes).map(DsigTable::parse).transpose()?;
+        // §5.7.5 MERG table — glyph-merge declarations for antialias
+        // filtering. Copies its bytes out at parse time.
+        let merg = dir.find(b"MERG", bytes).map(MergTable::parse).transpose()?;
         let var_coords = match fvar.as_ref() {
             Some(f) => f.axes().iter().map(|a| a.default).collect(),
             None => Vec::new(),
@@ -678,6 +691,7 @@ impl<'a> Font<'a> {
             math,
             jstf,
             dsig,
+            merg,
             var_coords,
         })
     }
@@ -985,6 +999,20 @@ impl<'a> Font<'a> {
     /// structure but does not verify the signature cryptographically.
     pub fn dsig_table(&self) -> Option<&DsigTable<'a>> {
         self.dsig.as_ref()
+    }
+
+    /// `true` when the font ships a `MERG` table (glyph-merge declarations
+    /// for antialias filtering, ISO/IEC 14496-22:2019 §5.7.5).
+    pub fn has_merg(&self) -> bool {
+        self.merg.is_some()
+    }
+
+    /// Borrow the parsed `MERG` table, when the font publishes one. The
+    /// table maps glyphs to merge classes and gives a per-class-pair
+    /// merge-entry byte; the run-processing algorithm that consumes those
+    /// entries is a renderer concern.
+    pub fn merg_table(&self) -> Option<&MergTable> {
+        self.merg.as_ref()
     }
 
     /// Borrow the parsed `post` table. `None` when the font does not

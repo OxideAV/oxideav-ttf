@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`MERG` merge table (§5.7.5).** New decoder for the glyph-merge table:
+  the header, the array of ClassDef-table offsets, and the square
+  `mergeClassCount²` array of `uint8` merge-entry bit-fields. Glyphs
+  resolve to merge classes through the shared ClassDef parser
+  (ClassDefFormat1/2, class 0 default); each `(firstClass, secondClass)`
+  cell decodes through the new `MergeEntry` type into the six defined
+  flags (`MERGE_LTR` / `GROUP_LTR` / `SECOND_IS_SUBORDINATE_LTR` and RTL
+  siblings). `version == 0`, the merge-data array, and every ClassDef
+  offset are bounds-checked. The §5.7.5.3 run-processing algorithm is left
+  to the renderer. New `Font::has_merg` / `Font::merg_table` and the
+  `MergTable` / `MergeEntry` public types.
+
 - **`DSIG` digital signature table (§8.x).** New structural decoder for
   the digital-signature table: the header (`version`, `numSignatures`,
   `flags`), the `SignatureRecord` array (`format`, `length`, `offset`),
