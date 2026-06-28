@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`kern` table Format 2 — class-based two-dimensional array (§5.7.3).**
+  The legacy `kern` decoder previously handled only Format 0 (explicit
+  pair list). Format 2 — where left and right glyphs map to classes and
+  the kerning value is the array cell at `(leftClass, rightClass)`,
+  addressed through the spec's pre-multiplied class values — is now
+  decoded for the Microsoft / OpenType header variant. Horizontal kerning
+  subtables only; "minimum" and non-horizontal subtables are skipped, and
+  kerning subtables are additive so `KernTable::lookup` sums every matching
+  format-0 pair and format-2 cell. Formats 1 and 3..255 stay reserved per
+  the spec. New `KernTable::format2_subtable_count`.
+
 - **`EBDT` composite glyph bitmaps — formats 8 & 9 (§5.6.2.2.8 /
   §5.6.2.2.9).** Composite (component-data) embedded bitmaps were
   previously skipped (`glyph_gray_bitmap` returned `None`). The new

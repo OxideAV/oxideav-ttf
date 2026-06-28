@@ -244,7 +244,19 @@ kerning, and mark attachment.
   encoding, language, name)` locator tuple). Macintosh non-Roman scripts
   surface their locator + raw bytes but decode to `None` (legacy
   codepage tables not staged).
-- Legacy `kern` table (format 0).
+- Legacy `kern` table (ISO/IEC 14496-22:2019 §5.7.3) — both subtable
+  formats the spec defines for the Microsoft / OpenType header variant:
+  **Format 0** (a sorted, binary-searchable list of explicit
+  `(left, right) → value` pairs) and **Format 2** (the class-based
+  two-dimensional array — left and right glyphs map to classes through
+  per-side class tables, and the kerning value is the array cell at
+  `(leftClass, rightClass)`, addressed through the spec's pre-multiplied
+  class values). Formats 1 and 3..255 are reserved by the spec and
+  skipped, as are "minimum" (floor, not delta) and non-horizontal
+  subtables. Kerning subtables are additive, so `KernTable::lookup` sums
+  every matching format-0 pair and format-2 cell. The Apple `kern` header
+  variant is accepted structurally but its subtable bodies are not decoded
+  (the byte layout is not in the staged spec).
 - `GSUB` LookupType 1 (single substitution: positional forms,
   small-caps, vertical alternates), LookupType 2 (multiple
   substitution — split one input glyph into N), LookupType 3
