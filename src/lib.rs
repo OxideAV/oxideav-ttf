@@ -1316,13 +1316,51 @@ impl<'a> Font<'a> {
     }
 
     /// Per-glyph advance width in font units.
+    ///
+    /// For a composite glyph whose components include one carrying the
+    /// `USE_MY_METRICS` flag (§5.3.4), the advance is taken from that
+    /// component's `hmtx` entry rather than the composite's own — the spec
+    /// uses this to force a composite (e.g. `i`-circumflex) to inherit a
+    /// component's (e.g. dotless-`i`) metrics. The last flagged component
+    /// wins; the chase is depth-bounded.
     pub fn glyph_advance(&self, glyph_id: u16) -> i16 {
-        self.hmtx.advance(glyph_id) as i16
+        let effective = self.metrics_source_glyph(glyph_id);
+        self.hmtx.advance(effective) as i16
     }
 
-    /// Per-glyph left-side bearing in font units.
+    /// Per-glyph left-side bearing in font units. Honours `USE_MY_METRICS`
+    /// the same way as [`Font::glyph_advance`] (the spec forces both `aw`
+    /// and `lsb` to the flagged component's values).
     pub fn glyph_lsb(&self, glyph_id: u16) -> i16 {
-        self.hmtx.lsb(glyph_id)
+        let effective = self.metrics_source_glyph(glyph_id);
+        self.hmtx.lsb(effective)
+    }
+
+    /// Resolve the glyph whose `hmtx` metrics a composite should adopt,
+    /// following the `USE_MY_METRICS` component chain (§5.3.4). Returns
+    /// `glyph_id` itself for simple glyphs, fonts without `glyf`/`loca`, or
+    /// composites where no component sets the flag. The chase is bounded by
+    /// the composite-depth limit and guards against a self-reference.
+    fn metrics_source_glyph(&self, glyph_id: u16) -> u16 {
+        let (loca, glyf) = match (self.loca.as_ref(), self.glyf.as_ref()) {
+            (Some(l), Some(g)) => (l, g),
+            _ => return glyph_id,
+        };
+        let mut current = glyph_id;
+        // Bound the chase: a USE_MY_METRICS component can itself be a
+        // composite that sets the flag, so follow the chain but never more
+        // than a few hops (matching the outline composite-depth guard).
+        for _ in 0..8u8 {
+            let range = match loca.glyph_range(current) {
+                Ok(r) => r,
+                Err(_) => return current,
+            };
+            match glyf.use_my_metrics_glyph(range) {
+                Ok(Some(next)) if next != current => current = next,
+                _ => return current,
+            }
+        }
+        current
     }
 
     /// `true` when the font ships both a `vhea` and `vmtx` table —

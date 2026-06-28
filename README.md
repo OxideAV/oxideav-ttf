@@ -27,7 +27,12 @@ kerning, and mark attachment.
   with `SCALED_COMPONENT_OFFSET` / `UNSCALED_COMPONENT_OFFSET` honoured so
   a scaled offset is transformed into the parent grid while the default /
   unscaled offset is left raw; a reference to an unresolved phantom point
-  degrades to zero-offset placement),
+  degrades to zero-offset placement. The composite `USE_MY_METRICS` flag
+  (§5.3.4) is honoured at the metric layer: `Font::glyph_advance` /
+  `Font::glyph_lsb` take a composite's advance width and side bearing from
+  the flagged component's `hmtx` entry rather than the composite's own —
+  the last flagged component wins, the chase is depth-bounded —
+  via `GlyfTable::use_my_metrics_glyph`),
   `post` (ISO/IEC 14496-22:2019 §5.2.10 — full structural decode of
   v1.0 / v2.0 / v2.5 / v3.0: 32-byte common header with `italicAngle`
   / underline geometry / `isFixedPitch` / four PostScript memory

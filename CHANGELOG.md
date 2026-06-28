@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`USE_MY_METRICS` composite metric inheritance (§5.3.4).**
+  `Font::glyph_advance` and `Font::glyph_lsb` now honour the composite
+  `USE_MY_METRICS` flag: when a composite glyph references a component
+  carrying the flag, the composite's advance width and left side bearing
+  are taken from that component's `hmtx` entry rather than the composite's
+  own (the spec's mechanism for making e.g. `i`-circumflex inherit
+  dotless-`i`'s metrics). The last flagged component wins, and the chase
+  through nested composites is depth-bounded. Outline-only and
+  non-flagged glyphs are unaffected. New `GlyfTable::use_my_metrics_glyph`.
+
 ### Added
 
 - **`fpgm` / `prep` hinting-program raw accessors (§5.3.3).** The `fpgm`

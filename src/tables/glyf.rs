@@ -36,6 +36,12 @@ const C_MORE_COMPONENTS: u16 = 0x0020;
 const C_WE_HAVE_AN_X_AND_Y_SCALE: u16 = 0x0040;
 const C_WE_HAVE_A_TWO_BY_TWO: u16 = 0x0080;
 const C_WE_HAVE_INSTRUCTIONS: u16 = 0x0100;
+/// `USE_MY_METRICS` (bit 9). Does not affect outline *geometry*, but per
+/// §5.3.4 it forces the composite's advance width and side bearings to
+/// equal the referenced component's — surfaced through
+/// [`GlyfTable::use_my_metrics_glyph`] so the `Font` metric accessors can
+/// honour it. When more than one component sets it, the **last** wins.
+const C_USE_MY_METRICS: u16 = 0x0200;
 // 0x0200 USE_MY_METRICS and 0x0400 OVERLAP_COMPOUND do not affect outline
 // geometry. The two offset-interpretation flags below DO: per the `glyf`
 // "Composite glyph description" §, when the offset vector form is used
@@ -155,6 +161,62 @@ impl<'a> GlyfTable<'a> {
             }
         }
         Ok(count)
+    }
+
+    /// For a composite glyph body (`range` covers the whole glyph record),
+    /// return the glyph index of the **last** component carrying the
+    /// `USE_MY_METRICS` flag (§5.3.4) — the component whose `hmtx` advance
+    /// width and side bearings the composite as a whole should adopt.
+    ///
+    /// Returns `Ok(None)` for a simple glyph, an empty glyph, or a
+    /// composite where no component sets the flag (in which case the
+    /// composite uses its own `hmtx` entry). The spec resolves multiple
+    /// flagged components to the last one.
+    pub fn use_my_metrics_glyph(
+        &self,
+        range: core::ops::Range<usize>,
+    ) -> Result<Option<u16>, Error> {
+        let body = self.bytes.get(range).ok_or(Error::BadOffset)?;
+        if body.len() < 10 {
+            return Ok(None);
+        }
+        if read_i16(body, 0)? >= 0 {
+            return Ok(None); // simple glyph
+        }
+        let bytes = &body[10..];
+        let mut off = 0usize;
+        let mut found: Option<u16> = None;
+        loop {
+            if off + 4 > bytes.len() {
+                return Err(Error::BadStructure("composite truncated"));
+            }
+            let flags = read_u16(bytes, off)?;
+            let glyph_index = read_u16(bytes, off + 2)?;
+            off += 4;
+            if flags & C_USE_MY_METRICS != 0 {
+                // Last one wins, so keep overwriting.
+                found = Some(glyph_index);
+            }
+            off += if flags & C_ARG_1_AND_2_ARE_WORDS != 0 {
+                4
+            } else {
+                2
+            };
+            if flags & C_WE_HAVE_A_SCALE != 0 {
+                off += 2;
+            } else if flags & C_WE_HAVE_AN_X_AND_Y_SCALE != 0 {
+                off += 4;
+            } else if flags & C_WE_HAVE_A_TWO_BY_TWO != 0 {
+                off += 8;
+            }
+            if off > bytes.len() {
+                return Err(Error::BadStructure("composite component truncated"));
+            }
+            if flags & C_MORE_COMPONENTS == 0 {
+                break;
+            }
+        }
+        Ok(found)
     }
 
     /// Decode a composite glyph outline with per-component gvar placement
@@ -1076,5 +1138,80 @@ mod tests {
         // point 1 (component 0's point 1 = (105, 0)), with NO 999 shift.
         let b = &out.contours[1].points;
         assert_eq!((b[0].x, b[0].y), (105, 0));
+    }
+
+    /// Build a composite glyph body with two components: glyph 7 (no
+    /// metrics flag) followed by glyph `flagged`, the latter carrying
+    /// `USE_MY_METRICS`. Returns the whole glyph record (header + body).
+    fn build_composite_use_my_metrics(flagged: u16) -> Vec<u8> {
+        let mut g = Vec::new();
+        g.extend_from_slice(&(-1i16).to_be_bytes()); // numberOfContours < 0
+        for _ in 0..4 {
+            g.extend_from_slice(&0i16.to_be_bytes()); // bbox
+        }
+        // Component 0: glyph 7, XY values, more components follow.
+        g.extend_from_slice(&(C_ARGS_ARE_XY_VALUES | C_MORE_COMPONENTS).to_be_bytes());
+        g.extend_from_slice(&7u16.to_be_bytes());
+        g.push(0);
+        g.push(0);
+        // Component 1: `flagged`, USE_MY_METRICS, last component.
+        g.extend_from_slice(&(C_ARGS_ARE_XY_VALUES | C_USE_MY_METRICS).to_be_bytes());
+        g.extend_from_slice(&flagged.to_be_bytes());
+        g.push(0);
+        g.push(0);
+        g
+    }
+
+    #[test]
+    fn use_my_metrics_returns_flagged_component() {
+        let body = build_composite_use_my_metrics(42);
+        let glyf = GlyfTable::new(&body);
+        let g = glyf.use_my_metrics_glyph(0..body.len()).unwrap();
+        assert_eq!(g, Some(42));
+    }
+
+    #[test]
+    fn use_my_metrics_none_without_flag() {
+        // A composite with both components un-flagged.
+        let mut g = Vec::new();
+        g.extend_from_slice(&(-1i16).to_be_bytes());
+        for _ in 0..4 {
+            g.extend_from_slice(&0i16.to_be_bytes());
+        }
+        g.extend_from_slice(&C_ARGS_ARE_XY_VALUES.to_be_bytes()); // no flag, no more
+        g.extend_from_slice(&7u16.to_be_bytes());
+        g.push(0);
+        g.push(0);
+        let glyf = GlyfTable::new(&g);
+        assert_eq!(glyf.use_my_metrics_glyph(0..g.len()).unwrap(), None);
+    }
+
+    #[test]
+    fn use_my_metrics_last_flagged_wins() {
+        // Two flagged components: glyph 5 then glyph 9; the last wins.
+        let mut g = Vec::new();
+        g.extend_from_slice(&(-1i16).to_be_bytes());
+        for _ in 0..4 {
+            g.extend_from_slice(&0i16.to_be_bytes());
+        }
+        g.extend_from_slice(
+            &(C_ARGS_ARE_XY_VALUES | C_USE_MY_METRICS | C_MORE_COMPONENTS).to_be_bytes(),
+        );
+        g.extend_from_slice(&5u16.to_be_bytes());
+        g.push(0);
+        g.push(0);
+        g.extend_from_slice(&(C_ARGS_ARE_XY_VALUES | C_USE_MY_METRICS).to_be_bytes());
+        g.extend_from_slice(&9u16.to_be_bytes());
+        g.push(0);
+        g.push(0);
+        let glyf = GlyfTable::new(&g);
+        assert_eq!(glyf.use_my_metrics_glyph(0..g.len()).unwrap(), Some(9));
+    }
+
+    #[test]
+    fn use_my_metrics_none_for_simple_glyph() {
+        let triangle = build_triangle();
+        let glyf = GlyfTable::new(&triangle);
+        assert_eq!(glyf.use_my_metrics_glyph(0..triangle.len()).unwrap(), None);
     }
 }
