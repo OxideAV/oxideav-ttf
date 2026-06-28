@@ -277,6 +277,25 @@ kerning, and mark attachment.
   algorithm that consumes these entries to pick which glyph *sequences*
   get antialiased together is a renderer concern. `Font::has_merg()` /
   `Font::merg_table()` expose the parsed table),
+  `OS/2` (OS/2 and Windows metrics table, ISO/IEC 14496-22:2019 §5.2.3 —
+  the full field set across versions 0..5: classification (`usWeightClass`
+  / `usWidthClass` / `sFamilyClass` / 10-byte `panose`), the `fsType`
+  embedding-permission word decoded into `embedding_installable()` /
+  `embedding_restricted()` / `embedding_preview_print()` /
+  `embedding_editable()` / `embedding_no_subsetting()` /
+  `embedding_bitmap_only()` predicates, the `fsSelection` style word
+  (`is_bold()` / `is_italic()` / `is_regular()` / `use_typo_metrics()`),
+  the sub/superscript and strikeout metrics, the four `ulUnicodeRange`
+  coverage words, the `achVendID` vendor tag (`vendor_id()` trims to ASCII),
+  `usFirstCharIndex` / `usLastCharIndex`, the typographic + Windows vertical
+  metrics, and the versioned tail — `ulCodePageRange1`/`2` (v1),
+  `sxHeight` / `sCapHeight` / `usDefaultChar` / `usBreakChar` /
+  `usMaxContext` (v2+), and the `usLowerOpticalPointSize` /
+  `usUpperOpticalPointSize` window (v5) — each later-version field
+  surfaced as `Option` so a table shorter than its declared version's full
+  size still decodes the prefix without over-reading. `Font::os2_table()`,
+  `Font::weight_class()`, `Font::width_class()`, and
+  `Font::embedding_installable()` expose it),
 - `name` table: full accessor API beyond family / full name — the
   registered nameID registry (`name_id` constants), typed accessors
   (subfamily, PostScript, version, copyright, trademark, manufacturer,

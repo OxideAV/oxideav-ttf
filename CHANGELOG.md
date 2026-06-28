@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`OS/2` table full field decode (§5.2.3).** The `OS/2` decoder
+  previously surfaced only a handful of fields (weight class, fsSelection,
+  typo + x/cap-height). It now decodes the complete field set across
+  versions 0..5: `xAvgCharWidth`, `usWidthClass`, the `fsType` embedding
+  permissions (with `embedding_installable` / `embedding_restricted` /
+  `embedding_preview_print` / `embedding_editable` / `embedding_no_subsetting`
+  / `embedding_bitmap_only` predicates), the sub/superscript + strikeout
+  metrics, `sFamilyClass`, the 10-byte `panose`, the four `ulUnicodeRange`
+  words, `achVendID` (with `vendor_id()`), `usFirstCharIndex` /
+  `usLastCharIndex`, the Windows vertical metrics, the `fsSelection` style
+  predicates (`is_bold` / `is_italic` / `is_regular` / `use_typo_metrics`),
+  and the versioned tail (`ulCodePageRange1`/`2`, `sxHeight` / `sCapHeight`
+  / `usDefaultChar` / `usBreakChar` / `usMaxContext`, optical-size window),
+  each later-version field as `Option`. New `Font::os2_table` /
+  `Font::width_class` / `Font::embedding_installable`. The previously
+  surfaced fields keep their names, so existing callers are unaffected.
+
+### Added
+
 - **`USE_MY_METRICS` composite metric inheritance (§5.3.4).**
   `Font::glyph_advance` and `Font::glyph_lsb` now honour the composite
   `USE_MY_METRICS` flag: when a composite glyph references a component

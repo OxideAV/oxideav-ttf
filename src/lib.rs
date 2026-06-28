@@ -147,6 +147,11 @@ pub use tables::meta::{
 };
 pub use tables::mvar::ItemVariationStore;
 pub use tables::name::{name_id, platform, NameRecord};
+pub use tables::os2::{
+    FSSELECTION_BOLD, FSSELECTION_ITALIC, FSSELECTION_OBLIQUE, FSSELECTION_REGULAR,
+    FSSELECTION_USE_TYPO_METRICS, FSTYPE_BITMAP_ONLY, FSTYPE_EDITABLE, FSTYPE_NO_SUBSETTING,
+    FSTYPE_PREVIEW_PRINT, FSTYPE_RESTRICTED_LICENSE,
+};
 pub use tables::pclt::{
     PCLT_MAJOR_VERSION, PCLT_STROKE_WEIGHT_RANGE, PCLT_TABLE_LEN, PCLT_TABLE_TAG,
     PCLT_WIDTH_TYPE_RANGE,
@@ -884,6 +889,32 @@ impl<'a> Font<'a> {
     /// `OS/2.usWeightClass` (100..1000), or 400 (Regular) if `OS/2` absent.
     pub fn weight_class(&self) -> u16 {
         self.os2.as_ref().map(|o| o.us_weight_class).unwrap_or(400)
+    }
+
+    /// `OS/2.usWidthClass` (1..9, where 5 = Medium/Normal), or 5 if `OS/2`
+    /// is absent (ISO/IEC 14496-22:2019 §5.2.3).
+    pub fn width_class(&self) -> u16 {
+        self.os2.as_ref().map(|o| o.us_width_class).unwrap_or(5)
+    }
+
+    /// Borrow the parsed `OS/2` table (ISO/IEC 14496-22:2019 §5.2.3), when
+    /// the font publishes one. Exposes the full field set: classification
+    /// (weight / width / PANOSE / family class), `fsType` embedding
+    /// permissions, `fsSelection` style bits, the sub/superscript and
+    /// strikeout metrics, Unicode / code-page coverage ranges, vendor id,
+    /// the typographic / Windows vertical metrics, and (versioned) x-height
+    /// / cap-height / optical-size range.
+    pub fn os2_table(&self) -> Option<&Os2Table> {
+        self.os2.as_ref()
+    }
+
+    /// The `OS/2.fsType` embedding-permission state, distilled to the
+    /// single most-restrictive applicable flag, or `None` when `OS/2` is
+    /// absent. `installable` (no restriction bit) is the permissive
+    /// default. See [`Os2Table`]'s `embedding_*` predicates for the raw
+    /// bits.
+    pub fn embedding_installable(&self) -> Option<bool> {
+        self.os2.as_ref().map(|o| o.embedding_installable())
     }
 
     /// `post.italicAngle` in degrees (negative for forward-slanted).
