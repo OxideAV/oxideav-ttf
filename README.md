@@ -1,5 +1,7 @@
 # oxideav-ttf
 
+[![CI](https://github.com/OxideAV/oxideav-ttf/actions/workflows/ci.yml/badge.svg)](https://github.com/OxideAV/oxideav-ttf/actions/workflows/ci.yml) [![crates.io](https://img.shields.io/crates/v/oxideav-ttf.svg)](https://crates.io/crates/oxideav-ttf) [![docs.rs](https://docs.rs/oxideav-ttf/badge.svg)](https://docs.rs/oxideav-ttf) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 Pure-Rust TrueType font parser for the [oxideav](https://github.com/OxideAV)
 framework. Implements the sfnt container, the core OpenType tables, and a
 coherent GSUB / GPOS shaping engine (`Font::shape`) doing
