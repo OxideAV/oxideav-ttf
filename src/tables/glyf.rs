@@ -464,6 +464,20 @@ fn decode_simple(bytes: &[u8], n_contours: u16, bbox: BBox) -> Result<TtOutline,
         end_pts.push(read_u16(bytes, off)?);
         off += 2;
     }
+    // §5.3.3: endPtsOfContours holds the last point index of each contour
+    // and its entries increase across the array, so the final entry is the
+    // largest index and `numPoints` = last + 1. A malformed font can ship a
+    // non-monotonic array where an earlier endpoint exceeds the last; without
+    // this guard the per-contour carve below would index the coordinate
+    // arrays (sized to `n_points`) out of bounds. Reject a decreasing step so
+    // every endpoint is guaranteed < n_points.
+    for w in end_pts.windows(2) {
+        if w[1] < w[0] {
+            return Err(Error::BadStructure(
+                "simple glyph endPtsOfContours not monotonic",
+            ));
+        }
+    }
     let n_points = (*end_pts.last().unwrap() as usize) + 1;
     // instructionLength (u16) + that many bytes of bytecode.
     let inst_len = read_u16(bytes, off)? as usize;
@@ -611,6 +625,40 @@ mod tests {
         assert_eq!(out.contours[0].points[2].x, 50);
         assert_eq!(out.contours[0].points[2].y, 100);
         assert!(out.contours[0].points.iter().all(|p| p.on_curve));
+    }
+
+    /// §5.3.3: endPtsOfContours entries increase across the array, so the
+    /// last is the largest point index and `numPoints = last + 1`. A
+    /// malformed font can ship a non-monotonic array where an earlier
+    /// contour's endpoint exceeds the final one; `numPoints` then
+    /// under-counts and the per-contour carve would index the coordinate
+    /// arrays out of bounds. The decoder must reject it rather than panic.
+    #[test]
+    fn rejects_non_monotonic_end_pts() {
+        // 2-contour simple glyph. endPtsOfContours = [33, 5]: the final
+        // entry (5) sizes the point arrays to 6, but contour 0 claims to
+        // end at point 33 -> would read xs[33] out of a 6-element Vec.
+        let mut g = Vec::new();
+        g.extend_from_slice(&2i16.to_be_bytes()); // numberOfContours
+        g.extend_from_slice(&0i16.to_be_bytes()); // xMin
+        g.extend_from_slice(&0i16.to_be_bytes()); // yMin
+        g.extend_from_slice(&0i16.to_be_bytes()); // xMax
+        g.extend_from_slice(&0i16.to_be_bytes()); // yMax
+        g.extend_from_slice(&33u16.to_be_bytes()); // endPts[0]
+        g.extend_from_slice(&5u16.to_be_bytes()); // endPts[1] < endPts[0]
+        g.extend_from_slice(&0u16.to_be_bytes()); // instructionLength
+                                                  // (guard fires before any flags/coords are consulted)
+
+        let mut loca_bytes = Vec::new();
+        loca_bytes.extend_from_slice(&0u32.to_be_bytes());
+        loca_bytes.extend_from_slice(&(g.len() as u32).to_be_bytes());
+        let loca = LocaTable::parse(&loca_bytes, 1, 1).unwrap();
+        let glyf = GlyfTable::new(&g);
+        let r = glyf.glyph_outline(0..g.len(), &loca, 0);
+        assert!(
+            matches!(r, Err(Error::BadStructure(_))),
+            "non-monotonic endPtsOfContours must be rejected, got {r:?}"
+        );
     }
 
     #[test]
