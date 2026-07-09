@@ -1124,9 +1124,28 @@ unwrapped transparently at both the sub-table and lookup level. Every
 base cmap subtable format (0, 2, 4, 6, 8, 10, 12, 13) plus the
 format-14 UVS sidecar is decoded.
 
+## Robustness
+
+A font file is fully attacker-controlled, so every table decode and every
+public accessor bottoms out in a typed `Result` / `Option` — never an
+out-of-bounds index, integer overflow, or unbounded recursion. All
+`(offset, length)` records are bounds-checked against the file, untrusted
+counts are validated against the available byte budget before allocating,
+composite-glyph resolution is depth-bounded (`MAX_COMPOSITE_DEPTH`), and
+`sbix` `'dupe'` chains are cycle-checked. `tests/hostile_input.rs` is a
+fixed-seed hardening harness that mutates the bundled fixtures three ways —
+prefix truncation, blind multi-byte flips, and structure-aware corruption
+confined to a single table body (leaving the sfnt header + directory intact
+so `from_bytes` reaches every parser) — then drives the eager parse path
+plus a broad accessor battery (outlines, bitmaps, shaping, kerning,
+variable instances with out-of-range / NaN coordinates, metrics / baseline
+/ math lookups) under each mutant, asserting no thread ever unwinds. It
+reproduces deterministically and caught a `glyf` `endPtsOfContours`
+out-of-bounds read (a non-monotonic array under-counted `numPoints`, now
+rejected per §5.3.3).
+
 ## Not yet supported
 
-- CFF / Type 2 charstrings — belongs in a sibling `oxideav-otf` crate.
 - Bidi, Arabic shaping, Indic conjuncts, and other complex contextual
   shaping beyond the GSUB/GPOS lookup coverage above.
 - TrueType bytecode *execution* (modern anti-aliasing at ≥ 16 px does not
