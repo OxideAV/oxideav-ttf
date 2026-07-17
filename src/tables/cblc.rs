@@ -69,6 +69,8 @@ use crate::Error;
 /// CBDT slice using `image_data_offset .. image_data_offset + data_len`
 /// to pull the per-glyph entry, then decodes that entry per `image_format`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub struct CblcEntry {
     /// `imageFormat` from the IndexSubHeader — 17, 18 or 19 for PNG.
     pub image_format: u16,
@@ -164,6 +166,8 @@ const SBIT_LINE_METRICS_LEN: usize = 12;
 /// Parsed CBLC table. Stores the original byte slice + the strike records;
 /// per-glyph resolution walks the IndexSubtableList lazily.
 #[derive(Debug, Clone)]
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub struct CblcTable<'a> {
     bytes: &'a [u8],
     strikes: Vec<StrikeRecord>,

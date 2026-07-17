@@ -176,6 +176,8 @@ pub struct GposFeature {
 }
 
 #[derive(Debug, Clone)]
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub struct GposTable<'a> {
     bytes: &'a [u8],
     script_list_off: u32,

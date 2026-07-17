@@ -39,6 +39,8 @@ use crate::parser::{read_i16, read_u16, read_u32};
 use crate::Error;
 
 #[derive(Debug, Clone)]
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub struct KernTable<'a> {
     /// All format-0 pair lists collected at parse time, sorted by
     /// `(left << 16 | right)` for binary search.

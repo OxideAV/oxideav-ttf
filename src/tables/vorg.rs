@@ -70,6 +70,8 @@ pub struct VertOriginEntry {
 /// table is small (8 bytes + 4 per override; for the common all-glyphs
 /// -default case `metrics` is empty), so the allocation is negligible.
 #[derive(Debug, Clone)]
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub struct VorgTable {
     /// `majorVersion` field — `VORG_MAJOR_VERSION` (= 1) per spec.
     pub major_version: u16,

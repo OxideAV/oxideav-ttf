@@ -110,6 +110,8 @@ impl<'a> SbixGlyph<'a> {
 
 /// Parsed sbix table walker.
 #[derive(Debug, Clone)]
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub struct SbixTable<'a> {
     bytes: &'a [u8],
     /// Number of strikes (deduplicated against `numGlyphs` for the

@@ -88,6 +88,8 @@ pub const VHEA_VERSION_1_1: u32 = 0x0001_1000;
 /// set to 0"). The [`Self::version_raw`] accessor lets a caller
 /// distinguish the two.
 #[derive(Debug, Clone, Copy)]
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub struct VheaTable {
     /// Raw version Fixed (`0x00010000` or `0x00011000`).
     version_raw: u32,

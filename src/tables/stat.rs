@@ -240,6 +240,8 @@ impl AxisValue {
 
 /// Parsed STAT table (§7.3.7).
 #[derive(Debug, Clone)]
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub struct StatTable {
     major_version: u16,
     minor_version: u16,

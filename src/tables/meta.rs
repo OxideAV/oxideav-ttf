@@ -107,10 +107,14 @@ pub const META_VERSION_1: u32 = 1;
 
 /// Length in bytes of the fixed `meta` header (§5.7.6.1 "Metadata
 /// header"). 4 × `uint32` fields.
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub const META_HEADER_LEN: usize = 16;
 
 /// Length in bytes of one `DataMap` record (§5.7.6.1). `Tag` +
 /// `Offset32` + `uint32` = 12 bytes.
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub const META_DATA_MAP_LEN: usize = 12;
 
 /// Four-byte ASCII tag identifying this table in the sfnt directory.
@@ -168,6 +172,8 @@ impl<'a> MetaRecord<'a> {
 /// borrows into the on-wire bytes so the parser does not copy any
 /// of the (potentially large) payload data.
 #[derive(Debug, Clone)]
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub struct MetaTable<'a> {
     version: u32,
     flags: u32,

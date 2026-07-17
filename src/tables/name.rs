@@ -104,6 +104,8 @@ pub struct NameRecord {
 }
 
 #[derive(Debug, Clone)]
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub struct NameTable<'a> {
     bytes: &'a [u8],
     /// `count` and `stringOffset` for the format-0/1 record table.

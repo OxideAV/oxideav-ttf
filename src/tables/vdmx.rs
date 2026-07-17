@@ -125,21 +125,31 @@ pub const VDMX_VERSION_1: u16 = 1;
 
 /// Header byte count: `version` (2) + `numRecs` (2) + `numRatios` (2)
 /// = 6 bytes per §5.7.8.
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub const VDMX_HEADER_LEN: usize = 6;
 
 /// One RatioRange record byte count: `bCharSet` + `xRatio` +
 /// `yStartRatio` + `yEndRatio` = 4 bytes per §5.7.8.
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub const VDMX_RATIO_RECORD_LEN: usize = 4;
 
 /// One Offset16 entry byte count following the ratio array.
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub const VDMX_OFFSET_LEN: usize = 2;
 
 /// VDMX group header byte count: `recs` (2) + `startsz` (1) + `endsz`
 /// (1) = 4 bytes per §5.7.8.
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub const VDMX_GROUP_HEADER_LEN: usize = 4;
 
 /// One vTable record byte count: `yPelHeight` (2) + `yMax` (2) +
 /// `yMin` (2) = 6 bytes per §5.7.8.
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub const VDMX_VTABLE_RECORD_LEN: usize = 6;
 
 /// RatioRange record from the `VDMX` ratio array (§5.7.8).
@@ -279,6 +289,8 @@ impl VdmxGroup {
 /// `ratio_group_index` per-ratio mapping points back into the
 /// canonicalised `groups` vector.
 #[derive(Debug, Clone)]
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub struct VdmxTable {
     version: u16,
     num_recs: u16,

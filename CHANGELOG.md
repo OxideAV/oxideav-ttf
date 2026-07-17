@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Internal public surface marked `#[doc(hidden)]`.** The internal table
+  parsers (`XxxTable` structs and parse-tree types), the sfnt walker
+  (`parser`), wholly-internal table modules (gvar / IUP / variation-store
+  plumbing, glyf, cmap, ...), and structural layout constants are now
+  `#[doc(hidden)]`: they remain `pub` for tests/fuzz but are no longer part
+  of the stable semver-checked API. The stable surface -- `Font` and its
+  documented methods, `Error`, the outline / shaping / collection / AGL
+  types, and the curated crate-root re-exports -- is unchanged.
+
 - **`hhea` + `maxp` full field decode (§5.2.4 / §5.2.5).** `hhea` now
   decodes the min left / right side-bearing extremes, `xMaxExtent`, the
   caret-slope rise / run / offset (with `caret_is_vertical()`), and

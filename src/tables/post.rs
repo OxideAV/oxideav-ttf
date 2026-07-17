@@ -57,6 +57,8 @@ use crate::Error;
 pub const POST_TABLE_TAG: [u8; 4] = *b"post";
 
 /// Fixed 32-byte common header length.
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub const POST_HEADER_LEN: usize = 32;
 
 /// Version 1.0 (`0x00010000`). All names come from the standard
@@ -375,6 +377,8 @@ pub fn standard_mac_glyph_name(index: u16) -> Option<&'static str> {
 /// Parsed `post` table. The common header is always populated;
 /// `format` carries the version-dependent trailing data.
 #[derive(Debug, Clone)]
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub struct PostTable {
     /// Raw `Version16Dot16` from the header. Preserved verbatim so
     /// callers that want to introspect the exact published version

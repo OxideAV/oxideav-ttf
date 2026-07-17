@@ -51,6 +51,8 @@
 pub mod agl;
 pub mod collection;
 pub mod outline;
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub mod parser;
 pub mod shape;
 pub mod tables;
@@ -110,6 +112,9 @@ use crate::tables::{
 };
 
 pub use outline::{BBox, Contour, Point, TtOutline};
+// internal — exposed for tests/fuzz; not part of the stable API (the
+// stable BASE surface is the `Font::base_*` accessor family)
+#[doc(hidden)]
 pub use tables::base::{
     AxisTable as BaseAxisTable, BaseCoord, BaseLangSysRecord, BaseScriptRecord, BaseScriptTable,
     BaseValuesTable, FeatMinMaxRecord, MinMaxTable as BaseMinMaxTable, BASE_MAJOR_VERSION,
@@ -118,6 +123,8 @@ pub use tables::base::{
 pub use tables::cbdt::ColorBitmap;
 pub use tables::cblc::{BigGlyphMetrics, SmallGlyphMetrics};
 pub use tables::colr::ColorLayer;
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub use tables::device::DeviceOrVariationIndex;
 pub use tables::dsig::{Signature as DsigSignature, DSIG_BLOCK_FORMAT_PKCS7, DSIG_VERSION};
 pub use tables::ebdt::{CompositeBitmap, EbdtComponent, GrayBitmap};
@@ -130,14 +137,17 @@ pub use tables::gasp::{
 };
 pub use tables::gpos::{CursiveAttachment, GposFeature, PosRecord, PosValue};
 pub use tables::gsub::GsubFeature;
-pub use tables::hdmx::{
-    HdmxRecord, HDMX_HEADER_LEN, HDMX_RECORD_HEADER_LEN, HDMX_TABLE_TAG, HDMX_VERSION_0,
-};
+pub use tables::hdmx::{HdmxRecord, HDMX_TABLE_TAG, HDMX_VERSION_0};
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
+pub use tables::hdmx::{HDMX_HEADER_LEN, HDMX_RECORD_HEADER_LEN};
 pub use tables::head::{
     HEAD_FLAG_BASELINE_AT_Y0, HEAD_FLAG_CLEARTYPE_OPTIMIZED, HEAD_FLAG_CONVERTED,
     HEAD_FLAG_INSTRUCTIONS_ALTER_ADVANCE, HEAD_FLAG_LAST_RESORT, HEAD_FLAG_LOSSLESS,
     MAC_STYLE_BOLD, MAC_STYLE_CONDENSED, MAC_STYLE_EXTENDED, MAC_STYLE_ITALIC,
 };
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub use tables::hvar::DeltaSetIndexMap;
 pub use tables::kern::HeaderVariant as KernHeaderVariant;
 pub use tables::ltsh::{LTSH_ALWAYS_LINEAR, LTSH_TABLE_TAG, LTSH_VERSION_0};
@@ -146,10 +156,14 @@ pub use tables::merg::{
     SECOND_IS_SUBORDINATE_RTL,
 };
 pub use tables::meta::{
-    is_valid_meta_tag, script_lang_tags, MetaRecord, ScriptLangTag, META_DATA_MAP_LEN,
-    META_HEADER_LEN, META_TABLE_TAG, META_TAG_APPL, META_TAG_BILD, META_TAG_DLNG, META_TAG_SLNG,
-    META_VERSION_1,
+    is_valid_meta_tag, script_lang_tags, MetaRecord, ScriptLangTag, META_TABLE_TAG, META_TAG_APPL,
+    META_TAG_BILD, META_TAG_DLNG, META_TAG_SLNG, META_VERSION_1,
 };
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
+pub use tables::meta::{META_DATA_MAP_LEN, META_HEADER_LEN};
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub use tables::mvar::ItemVariationStore;
 pub use tables::name::{name_id, platform, NameRecord};
 pub use tables::os2::{
@@ -158,14 +172,19 @@ pub use tables::os2::{
     FSTYPE_PREVIEW_PRINT, FSTYPE_RESTRICTED_LICENSE,
 };
 pub use tables::pclt::{
-    PCLT_MAJOR_VERSION, PCLT_STROKE_WEIGHT_RANGE, PCLT_TABLE_LEN, PCLT_TABLE_TAG,
-    PCLT_WIDTH_TYPE_RANGE,
+    PCLT_MAJOR_VERSION, PCLT_STROKE_WEIGHT_RANGE, PCLT_TABLE_TAG, PCLT_WIDTH_TYPE_RANGE,
 };
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
+pub use tables::pclt::PCLT_TABLE_LEN;
 pub use tables::post::{
-    standard_mac_glyph_name, GlyphNameRef, PostFormat, PostV20, PostV25, POST_HEADER_LEN,
-    POST_TABLE_TAG, POST_VERSION_10, POST_VERSION_20, POST_VERSION_25, POST_VERSION_30,
+    standard_mac_glyph_name, GlyphNameRef, PostFormat, PostV20, PostV25, POST_TABLE_TAG,
+    POST_VERSION_10, POST_VERSION_20, POST_VERSION_25, POST_VERSION_30,
     RECOMMENDED_GLYPH_NAME_MAX_LEN, STANDARD_MAC_GLYPH_COUNT, STANDARD_MAC_GLYPH_NAMES,
 };
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
+pub use tables::post::POST_HEADER_LEN;
 pub use tables::sbix::{SbixGlyph, MAX_DUPE_DEPTH as SBIX_MAX_DUPE_DEPTH};
 pub use tables::stat::{
     AxisRecord as StatAxisRecord, AxisValue as StatAxisValue,
@@ -174,14 +193,19 @@ pub use tables::stat::{
     RANGE_MAX_POS_INFINITY as STAT_RANGE_MAX_POS_INFINITY,
     RANGE_MIN_NEG_INFINITY as STAT_RANGE_MIN_NEG_INFINITY,
 };
-pub use tables::svg::{
-    SvgDocument, SVG_DOCUMENT_RECORD_LEN, SVG_GZIP_MAGIC, SVG_HEADER_LEN, SVG_TABLE_TAG,
-    SVG_VERSION_0,
-};
+pub use tables::svg::{SvgDocument, SVG_GZIP_MAGIC, SVG_TABLE_TAG, SVG_VERSION_0};
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
+pub use tables::svg::{SVG_DOCUMENT_RECORD_LEN, SVG_HEADER_LEN};
 pub use tables::vdmx::{
-    RatioRange as VdmxRatioRange, VdmxGroup, VdmxVTableRecord, VDMX_GROUP_HEADER_LEN,
-    VDMX_HEADER_LEN, VDMX_OFFSET_LEN, VDMX_RATIO_RECORD_LEN, VDMX_TABLE_TAG, VDMX_VERSION_0,
-    VDMX_VERSION_1, VDMX_VTABLE_RECORD_LEN,
+    RatioRange as VdmxRatioRange, VdmxGroup, VdmxVTableRecord, VDMX_TABLE_TAG, VDMX_VERSION_0,
+    VDMX_VERSION_1,
+};
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
+pub use tables::vdmx::{
+    VDMX_GROUP_HEADER_LEN, VDMX_HEADER_LEN, VDMX_OFFSET_LEN, VDMX_RATIO_RECORD_LEN,
+    VDMX_VTABLE_RECORD_LEN,
 };
 pub use tables::vhea::{VHEA_VERSION_1_0, VHEA_VERSION_1_1};
 pub use tables::vorg::{VertOriginEntry, VORG_MAJOR_VERSION, VORG_MINOR_VERSION};

@@ -129,6 +129,8 @@ pub struct CompositeBitmap {
 
 /// Parsed `EBDT` table.
 #[derive(Debug, Clone)]
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub struct EbdtTable<'a> {
     bytes: &'a [u8],
 }

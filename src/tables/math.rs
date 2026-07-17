@@ -58,6 +58,8 @@ pub const MATH_TABLE_TAG: [u8; 4] = *b"MATH";
 /// [`MathValueRecord::resolved_value`] to fold in the variable-font delta
 /// at a given instance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub struct MathValueRecord {
     /// The X or Y value in font design units.
     pub value: i16,
@@ -102,6 +104,8 @@ impl MathValueRecord {
 /// Parsed `MATH` table — a set of validated sub-table offsets into the
 /// borrowed table slice.
 #[derive(Debug, Clone)]
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub struct MathTable<'a> {
     data: &'a [u8],
     constants_off: usize,
@@ -189,6 +193,8 @@ impl<'a> MathTable<'a> {
 ///   ...  (the remaining 51 MathValueRecord fields, 4 bytes each)
 /// ```
 #[derive(Debug, Clone, Copy)]
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub struct MathConstants<'a> {
     data: &'a [u8],
     base: usize,
@@ -325,6 +331,8 @@ impl<'a> MathConstants<'a> {
 
 /// Per-glyph math positioning data.
 #[derive(Debug, Clone, Copy)]
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub struct MathGlyphInfo<'a> {
     data: &'a [u8],
     base: usize,
@@ -534,6 +542,8 @@ pub enum GrowDirection {
 
 /// One ready-made stretchy variant (§6.3.6.2.11 MathGlyphVariantRecord).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub struct GlyphVariant {
     /// Glyph ID of the variant.
     pub glyph: u16,
@@ -543,6 +553,8 @@ pub struct GlyphVariant {
 
 /// One part of an assembled stretchy glyph (§6.3.6.2.12 GlyphPartRecord).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub struct GlyphPart {
     pub glyph: u16,
     pub start_connector_length: u16,
@@ -561,6 +573,8 @@ impl GlyphPart {
 
 /// Stretchy / assembled glyph variants.
 #[derive(Debug, Clone, Copy)]
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub struct MathVariants<'a> {
     data: &'a [u8],
     base: usize,

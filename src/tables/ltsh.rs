@@ -86,6 +86,8 @@ pub const LTSH_VERSION_0: u16 = 0;
 /// length the header declares (subject to the slice carrying enough
 /// bytes).
 #[derive(Debug, Clone)]
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub struct LtshTable {
     version: u16,
     y_pels: Vec<u8>,

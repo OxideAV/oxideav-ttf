@@ -90,6 +90,8 @@ impl MergeEntry {
 
 /// Parsed `MERG` table.
 #[derive(Debug, Clone)]
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub struct MergTable {
     merge_class_count: usize,
     /// The flattened `mergeClassCount × mergeClassCount` merge-entry array,

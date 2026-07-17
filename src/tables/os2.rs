@@ -63,6 +63,8 @@ pub const FSSELECTION_WWS: u16 = 0x0100;
 pub const FSSELECTION_OBLIQUE: u16 = 0x0200;
 
 #[derive(Debug, Clone, Copy)]
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub struct Os2Table {
     pub version: u16,
     pub x_avg_char_width: i16,

@@ -63,6 +63,8 @@ pub struct ColorLayer {
 
 /// Parsed COLR table (v0 walker).
 #[derive(Debug, Clone)]
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub struct ColrTable<'a> {
     bytes: &'a [u8],
     /// Number of `BaseGlyphRecord`s (always v0-array-shaped).

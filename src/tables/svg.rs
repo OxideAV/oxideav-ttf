@@ -89,10 +89,14 @@ pub const SVG_VERSION_0: u16 = 0;
 
 /// Length in bytes of the fixed SVG table header (§5.5.1): `uint16`
 /// version + `Offset32` documentListOffset + `uint32` reserved.
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub const SVG_HEADER_LEN: usize = 10;
 
 /// Length in bytes of one `SVGDocumentRecord` (§5.5.1): two `uint16`
 /// glyph IDs + `Offset32` + `uint32` = 12 bytes.
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub const SVG_DOCUMENT_RECORD_LEN: usize = 12;
 
 /// The three-byte gzip member header that opens a gzip-encoded SVG
@@ -143,6 +147,8 @@ impl<'a> SvgDocument<'a> {
 /// Document payloads are kept as borrows into the on-wire bytes so the
 /// parser copies none of the (potentially large) SVG markup.
 #[derive(Debug, Clone)]
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub struct SvgTable<'a> {
     version: u16,
     documents: Vec<SvgDocument<'a>>,

@@ -138,6 +138,8 @@ impl BitmapScale {
 /// Parsed `EBSC` table — the version header plus the array of
 /// `BitmapScale` redirection records.
 #[derive(Debug, Clone)]
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub struct EbscTable {
     minor_version: u16,
     scales: Vec<BitmapScale>,

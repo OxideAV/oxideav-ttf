@@ -88,6 +88,8 @@ impl<'a> Signature<'a> {
 
 /// Parsed `DSIG` table.
 #[derive(Debug, Clone)]
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub struct DsigTable<'a> {
     version: u32,
     flags: u16,

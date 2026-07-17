@@ -89,12 +89,16 @@ pub const HDMX_VERSION_0: u16 = 0;
 /// Header byte count: 2 (`pixelSize`) + 2 (`maxWidth`) is wrong — the
 /// header itself is just `version` (2) + `numRecords` (2) +
 /// `sizeDeviceRecord` (4) = 8 bytes per §5.7.2.
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub const HDMX_HEADER_LEN: usize = 8;
 
 /// Per-record header: `pixelSize` (1 byte) + `maxWidth` (1 byte). The
 /// remaining `numGlyphs` bytes of the record are the per-glyph
 /// `widths[]` array, followed by long-alignment padding up to
 /// `sizeDeviceRecord`.
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub const HDMX_RECORD_HEADER_LEN: usize = 2;
 
 /// One device record from the `hdmx` array — a single ppem snapshot of
@@ -152,6 +156,8 @@ impl HdmxRecord {
 /// recorded size) or returns `None` (when the requested ppem is not
 /// in the table — there is no §5.7.2 "round down" rule).
 #[derive(Debug, Clone)]
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub struct HdmxTable {
     version: u16,
     size_device_record: i32,

@@ -80,6 +80,8 @@ pub struct GsubFeature {
 }
 
 #[derive(Debug, Clone)]
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub struct GsubTable<'a> {
     bytes: &'a [u8],
     script_list_off: u32,

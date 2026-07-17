@@ -112,6 +112,8 @@ pub const PCLT_TABLE_TAG: u32 = 0x5043_4C54;
 /// Fixed on-wire length of the `PCLT` table (§5.7.7 layout): 20 bytes
 /// of version + number + metric/word fields, 16 + 8 + 6 bytes of
 /// fixed-size strings, and 4 trailing classification/pad bytes.
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub const PCLT_TABLE_LEN: usize = 54;
 
 /// The only spec-defined major version (`1`); §5.7.7: "The current
@@ -129,6 +131,8 @@ pub const PCLT_WIDTH_TYPE_RANGE: core::ops::RangeInclusive<i8> = -5..=5;
 /// Parsed `PCLT` table (§5.7.7). All fields are fixed-size and copied
 /// out of the on-wire slice, so the struct carries no lifetime.
 #[derive(Debug, Clone)]
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub struct PcltTable {
     major_version: u16,
     minor_version: u16,

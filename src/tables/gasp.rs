@@ -135,6 +135,8 @@ impl GaspRange {
 
 /// Parsed `gasp` table.
 #[derive(Debug, Clone)]
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub struct GaspTable {
     version: u16,
     ranges: Vec<GaspRange>,

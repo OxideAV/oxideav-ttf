@@ -32,6 +32,8 @@ pub const MAC_STYLE_CONDENSED: u16 = 0x0020;
 pub const MAC_STYLE_EXTENDED: u16 = 0x0040;
 
 #[derive(Debug, Clone, Copy)]
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub struct HeadTable {
     /// `fontRevision` as a 16.16 fixed-point value (the table's `Fixed`
     /// version field for the font designer's revision number).

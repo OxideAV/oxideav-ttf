@@ -54,6 +54,8 @@ pub struct ColorBitmap<'a> {
 
 /// Parsed CBDT table.
 #[derive(Debug, Clone)]
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub struct CbdtTable<'a> {
     bytes: &'a [u8],
 }
