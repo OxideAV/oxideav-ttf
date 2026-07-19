@@ -561,9 +561,32 @@ kerning, and mark attachment.
   Contrast"), and per-entry UI labels applied across all palettes
   (`Font::cpal_palette_entry_label` → a `name`-table ID, e.g. "Outline"
   / "Fill"); both label accessors map the `0xFFFF` "no label" sentinel
-  to `None`. COLR **v1** paint graphs (gradients / transforms /
-  composites) remain out of scope (docs gap — the paint-graph spec is
-  not in the docs tree).
+  to `None`. COLR **v1** paint graphs are fully decoded (staged
+  paint-graph reference, OpenType 1.9.1): the v1 header's
+  BaseGlyphList / LayerList / ClipList / varIndexMap /
+  ItemVariationStore offsets and all 32 Paint formats — solid fills,
+  linear / radial / sweep gradients (ColorLine / VarColorLine stop
+  lists with the post-instance stop sort, alpha clamp, Extend enum,
+  and the sweep gradients' +1.0 angle bias vs. the unbiased rotate /
+  skew angles), `PaintGlyph` outline-clip nodes, `PaintColrGlyph`
+  graph reuse, the transform family (general 2×3 Affine2x3,
+  translate, all four scale wire forms, rotate, skew — around-centre
+  and uniform variants folded into one resolved variant each, with
+  `Font::color_paint_format` recovering the wire form), and
+  `PaintComposite` with the 28-value CompositeMode enum plus its
+  boundedness helper. Decode is node-by-node —
+  `Font::color_paint_root(gid)` resolves the BaseGlyphList root
+  `PaintRef` and `Font::color_paint(ref)` decodes one node at the
+  **current variation instance**, folding every `PaintVar*` form's
+  `varIndexBase` deltas (identity mapping, last-entry clamp, and the
+  `0xFFFFFFFF` / `0xFFFF:0xFFFF` no-data sentinels) through the
+  COLR-embedded DeltaSetIndexMap + ItemVariationStore, so callers own
+  traversal depth / cycle policy against hostile graphs.
+  `Font::color_clip_box(gid)` resolves the ClipList (ClipBox formats
+  1 + 2, the variable form rounding *outward* per the spec). An
+  OpenType 1.9 "format 1" varIndexMap — defined only in the unstaged
+  `otvarcommonformats` chapter — degrades to zero deltas behind
+  `Font::colr_var_index_map_unsupported()`.
 - `SVG ` table (ISO/IEC 14496-22:2019/Amd.1:2020 §5.5.1) — the fourth
   colour-glyph mechanism, carrying per-glyph-range SVG 1.1 vector
   documents (an alternative to `COLR`/`CPAL`, `CBDT`/`CBLC`, and `sbix`).
@@ -782,6 +805,22 @@ kerning, and mark attachment.
   saturated varied entry. (CVTs feed TrueType bytecode hinting, which
   this crate does not execute; the varied values are surfaced for a
   downstream interpreter.)
+- `avar` **versions 1 and 2** (staged avar v2 reference — the working
+  spec behind the OFF amendment). `Font::normalised_coords` runs the
+  full three-stage pipeline: default fvar normalisation, per-axis v1
+  piecewise-linear segment-map bending, then the v2 **cross-axis
+  delta stage** — an `axisIndexMap` (`DeltaSetIndexMap`, identity
+  when absent) routes each fvar axis to a delta set in the avar-
+  embedded `ItemVariationStore`, region scalars are computed against
+  the stage-2 *intermediate* vector, and each axis's interpolated
+  F2DOT14-unit delta is rounded and added in F2DOT14 integer space
+  before the ±1.0 clamp (the reference's `v += round(delta)`
+  algorithm — self-referencing axes and designspace warping included).
+  The bent vector feeds every downstream variation consumer (gvar,
+  CFF2 `blend`, HVAR / VVAR / MVAR, GPOS / GDEF VariationIndex,
+  FeatureVariations, COLR v1). A v2 table without a `varStore` is
+  stage-2-only; unknown future major versions fall back to identity
+  per the reference's version-fallback note.
 
 The companion [`oxideav-scribe`](https://github.com/OxideAV/oxideav-scribe)
 crate consumes the outlines + shaping output to rasterise text to RGBA
@@ -1042,7 +1081,8 @@ let _ = font.lookup_variation('\u{1F600}', '\u{FE0F}'); // grinning face + VS-16
 
 // Colour glyphs — four families covered:
 //
-//   COLR/CPAL: vector layer stack (Microsoft Segoe UI Emoji, Twemoji-Mozilla, …)
+//   COLR/CPAL: v0 vector layer stack + v1 paint graph (gradients,
+//              transforms, composites)
 //   CBDT/CBLC: PNG-payload bitmap strikes (Noto Color Emoji and friends)
 //   sbix:      Apple-style PNG/JPEG bitmap strikes (Apple Color Emoji)
 //   SVG :      SVG 1.1 vector documents (per-glyph-range; Twitter Twemoji SVG, …)
@@ -1051,6 +1091,37 @@ if font.has_color_layers() {
     for layer in font.color_layers(gid_a) {
         let rgba = font.cpal_color(0, layer.palette_index); // Option<[u8;4]>
         let _ = (layer.layer_glyph_id, rgba);
+    }
+}
+
+// COLR v1 paint graph — preferred over the v0 layer stack for the
+// same base glyph. Decode is node-by-node at the current variation
+// instance; the caller owns traversal (bound depth / track visited
+// PaintRefs — a hostile font can tie a cycle).
+use oxideav_ttf::Paint;
+if font.has_colr_v1() {
+    if let Some(root) = font.color_paint_root(gid_a) {
+        let _ = font.color_clip_box(gid_a); // Option<ClipBox>, outward-rounded
+        match font.color_paint(root) {
+            Some(Paint::ColrLayers { layers }) => {
+                for layer_ref in layers {
+                    let _ = font.color_paint(layer_ref); // bottom-up z-order
+                }
+            }
+            Some(Paint::Glyph { paint, glyph_id }) => {
+                // Clip to `glyph_id`'s outline, then render `paint`.
+                let _ = (paint, glyph_id);
+            }
+            Some(Paint::LinearGradient { color_line, .. }) => {
+                for stop in &color_line.stops {
+                    // stop_offset sorted ascending; alpha pre-clamped.
+                    let _ = font.cpal_color(0, stop.palette_index);
+                }
+            }
+            other => {
+                let _ = other; // Solid / gradients / transforms / Composite
+            }
+        }
     }
 }
 if font.has_color_bitmaps() {
@@ -1139,10 +1210,13 @@ confined to a single table body (leaving the sfnt header + directory intact
 so `from_bytes` reaches every parser) — then drives the eager parse path
 plus a broad accessor battery (outlines, bitmaps, shaping, kerning,
 variable instances with out-of-range / NaN coordinates, metrics / baseline
-/ math lookups) under each mutant, asserting no thread ever unwinds. It
-reproduces deterministically and caught a `glyf` `endPtsOfContours`
-out-of-bounds read (a non-monotonic array under-counted `numPoints`, now
-rejected per §5.3.3).
+/ math lookups, COLR v1 paint decode + clip boxes) under each mutant,
+asserting no thread ever unwinds. A fifth in-memory fixture variant grafts
+a synthetic COLR v1 paint graph onto InterVariable and swaps its `avar`
+for a version-2 table so the corruption passes also reach those decoders
+(no bundled fixture ships either). It reproduces deterministically and
+caught a `glyf` `endPtsOfContours` out-of-bounds read (a non-monotonic
+array under-counted `numPoints`, now rejected per §5.3.3).
 
 ## Not yet supported
 
@@ -1155,17 +1229,17 @@ rejected per §5.3.3).
   font-program / `prep` control-value-program bytecode through
   `Font::fpgm_program()` / `Font::prep_program()` (with
   `Font::has_hinting_program()` gating). The bytes are never executed.
-- COLR **v1** paint graph (gradients, transforms, composites) — only
-  the v0 flat layer stack is supported.
-- avar **v2** delta-set index map (variable-axis remap). avar v2 is an
-  OpenType 1.9 (post-2020) addition that is **not present in the
-  in-tree spec** (`docs/text/opentype/`, whose Amd1 stops at the 2020
-  colour-font update) — blocked on a docs update, not on
-  implementation effort. The GPOS / GSUB FeatureVariations paths honour
-  the current normalised instance but neither runs the avar v2 remap.
 - The `STAT` format-2 overlapping-range tie-break (§7.3.7.3) is left to
   caller policy; the full document-order record array is exposed
   unchanged.
+- The OpenType 1.9 "format 1" `DeltaSetIndexMap` layout (32-bit
+  `mapCount`), the `LONG_WORDS` ItemVariationData delta flavour, and
+  the rest of the `otvarcommonformats` chapter are **not staged** —
+  the "format 0" map is byte-identical to the staged ISO/IEC
+  14496-22:2019 §7.3.5.2 layout and decodes everywhere, while a
+  format-1 map in COLR v1 / avar v2 degrades to
+  no-variation behind `Font::colr_var_index_map_unsupported()` /
+  `Font::avar_axis_index_map_unsupported()`.
 
 ## Test fixtures
 
