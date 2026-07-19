@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **COLR version-1 paint graph decode.** The COLR parser now decodes the
+  v1 header (BaseGlyphList / LayerList / ClipList / varIndexMap /
+  ItemVariationStore offsets) and all 32 Paint table formats — solid
+  fills, linear / radial / sweep gradients (with ColorLine /
+  VarColorLine stop lists, the sweep +1.0 angle bias, and the Extend
+  enum), glyph-outline clip nodes, PaintColrGlyph reuse, the full
+  transform family (general 2×3, translate, the four scale forms,
+  rotate, skew — around-centre and uniform variants folded), and
+  PaintComposite with the 28-value CompositeMode enum (plus its
+  boundedness table). Every `PaintVar*` twin resolves its
+  `varIndexBase` delta-set indices through the embedded
+  DeltaSetIndexMap / ItemVariationStore pair — identity mapping,
+  last-entry clamp, and the `0xFFFFFFFF` / `0xFFFF:0xFFFF` no-data
+  sentinels all per the staged reference — and folds the deltas into
+  the same resolved `Paint` variant as its static twin. ClipBox
+  formats 1 and 2 resolve per glyph with the format-2 outward rounding
+  rule. The decode surface is node-by-node
+  (`ColrTable::base_glyph_paint` → `PaintRef` → `ColrTable::paint`) so
+  callers own traversal depth / cycle policy. An OpenType 1.9
+  "format 1" DeltaSetIndexMap (defined only in the unstaged
+  `otvarcommonformats` chapter) degrades to zero deltas and is flagged
+  via `var_index_map_unsupported()`.
+
 ### Changed
 
 - **Internal public surface marked `#[doc(hidden)]`.** The internal table
