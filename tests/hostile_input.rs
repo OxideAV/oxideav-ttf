@@ -16,6 +16,11 @@
 //!    bytes are flipped only inside one table body per iteration, driving
 //!    corrupt-but-in-range data deep into each individual decoder.
 //!
+//! Besides the four bundled fixtures, a fifth in-memory variant grafts a
+//! synthetic COLR v1 paint graph onto InterVariable and swaps its `avar`
+//! for a version-2 table, so the corruption passes also reach the paint
+//! graph, ClipList, embedded IVS, and avar2 cross-axis decoders.
+//!
 //! The seed is fixed, so a regression reproduces deterministically. This
 //! harness caught the `glyf` non-monotonic-endPtsOfContours OOB.
 
@@ -28,7 +33,7 @@ static SITES: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
 
 fn fixtures() -> Vec<(&'static str, Vec<u8>)> {
     let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/");
-    [
+    let mut out: Vec<(&'static str, Vec<u8>)> = [
         "DejaVuSans.ttf",
         "DejaVuSansMono.ttf",
         "InterVariable.ttf",
@@ -36,7 +41,135 @@ fn fixtures() -> Vec<(&'static str, Vec<u8>)> {
     ]
     .iter()
     .map(|n| (*n, std::fs::read(format!("{dir}{n}")).unwrap()))
-    .collect()
+    .collect();
+    // A fifth, in-memory variant: InterVariable with a synthetic COLR
+    // v1 paint graph grafted on and its avar swapped for a version-2
+    // table — no bundled fixture ships either, so the structure-aware
+    // corruption pass would otherwise never reach those decoders.
+    let inter = out
+        .iter()
+        .find(|(n, _)| *n == "InterVariable.ttf")
+        .map(|(_, b)| b.clone())
+        .unwrap();
+    out.push(("InterVariable+colr1+avar2", graft_colr1_avar2(&inter)));
+    out
+}
+
+/// Append a small synthetic COLR v1 table (base glyph 2 → PaintVarSolid
+/// with an embedded single-region IVS + a variable clip box) and
+/// repoint `avar` at a synthetic version-2 body with a cross-axis
+/// store. Layouts follow the staged COLR / avar-v2 references.
+fn graft_colr1_avar2(font: &[u8]) -> Vec<u8> {
+    let be16 = |x: u16| x.to_be_bytes();
+    let num_tables = u16::from_be_bytes([font[4], font[5]]);
+    let dir_end = 12 + num_tables as usize * 16;
+
+    // COLR body. Fixed offsets: header 34 | IVS 34..68 | ClipList
+    // 68..93 | BGL 93..103 | PaintVarSolid 103..112.
+    let mut colr = Vec::new();
+    colr.extend_from_slice(&be16(1)); // version
+    colr.extend_from_slice(&[0u8; 12]); // empty v0 arrays
+    colr.extend_from_slice(&93u32.to_be_bytes()); // baseGlyphListOffset
+    colr.extend_from_slice(&0u32.to_be_bytes()); // layerListOffset
+    colr.extend_from_slice(&68u32.to_be_bytes()); // clipListOffset
+    colr.extend_from_slice(&0u32.to_be_bytes()); // varIndexMapOffset
+    colr.extend_from_slice(&34u32.to_be_bytes()); // itemVariationStoreOffset
+    debug_assert_eq!(colr.len(), 34);
+    // IVS: 1 axis, 1 region (0, +1, +1), 2 int16 rows.
+    colr.extend_from_slice(&be16(1));
+    colr.extend_from_slice(&12u32.to_be_bytes());
+    colr.extend_from_slice(&be16(1));
+    colr.extend_from_slice(&22u32.to_be_bytes());
+    colr.extend_from_slice(&be16(1));
+    colr.extend_from_slice(&be16(1));
+    colr.extend_from_slice(&0i16.to_be_bytes());
+    colr.extend_from_slice(&16384i16.to_be_bytes());
+    colr.extend_from_slice(&16384i16.to_be_bytes());
+    colr.extend_from_slice(&be16(2)); // itemCount
+    colr.extend_from_slice(&be16(1)); // shortDeltaCount
+    colr.extend_from_slice(&be16(1)); // regionIndexCount
+    colr.extend_from_slice(&be16(0));
+    colr.extend_from_slice(&8192i16.to_be_bytes());
+    colr.extend_from_slice(&(-50i16).to_be_bytes());
+    debug_assert_eq!(colr.len(), 68);
+    // ClipList: 1 clip over gid 2, ClipBoxFormat 2 at +12.
+    colr.push(1);
+    colr.extend_from_slice(&1u32.to_be_bytes());
+    colr.extend_from_slice(&be16(2));
+    colr.extend_from_slice(&be16(2));
+    colr.extend_from_slice(&12u32.to_be_bytes()[1..4]);
+    colr.push(2);
+    for v in [0i16, -10, 100, 200] {
+        colr.extend_from_slice(&v.to_be_bytes());
+    }
+    colr.extend_from_slice(&0u32.to_be_bytes()); // varIndexBase
+    debug_assert_eq!(colr.len(), 93);
+    // BaseGlyphList: gid 2 → paint at BGL+10.
+    colr.extend_from_slice(&1u32.to_be_bytes());
+    colr.extend_from_slice(&be16(2));
+    colr.extend_from_slice(&10u32.to_be_bytes());
+    // PaintVarSolid.
+    colr.push(3);
+    colr.extend_from_slice(&be16(0));
+    colr.extend_from_slice(&8192i16.to_be_bytes());
+    colr.extend_from_slice(&0u32.to_be_bytes());
+
+    // avar v2 body: no segment maps, identity axisIndexMap, one
+    // 2-axis store (region peaks on axis 0, rows +8192 / −8192).
+    let mut avar2 = Vec::new();
+    avar2.extend_from_slice(&be16(2));
+    avar2.extend_from_slice(&be16(0));
+    avar2.extend_from_slice(&be16(0));
+    avar2.extend_from_slice(&be16(0)); // axisSegmentMapCount
+    avar2.extend_from_slice(&0u32.to_be_bytes()); // axisIndexMapOffset
+    avar2.extend_from_slice(&16u32.to_be_bytes()); // varStoreOffset
+    avar2.extend_from_slice(&be16(1));
+    avar2.extend_from_slice(&12u32.to_be_bytes());
+    avar2.extend_from_slice(&be16(1));
+    avar2.extend_from_slice(&28u32.to_be_bytes());
+    avar2.extend_from_slice(&be16(2)); // axisCount
+    avar2.extend_from_slice(&be16(1)); // regionCount
+    for peak in [16384i16, 0] {
+        avar2.extend_from_slice(&0i16.to_be_bytes());
+        avar2.extend_from_slice(&peak.to_be_bytes());
+        avar2.extend_from_slice(&peak.to_be_bytes());
+    }
+    avar2.extend_from_slice(&be16(2));
+    avar2.extend_from_slice(&be16(1));
+    avar2.extend_from_slice(&be16(1));
+    avar2.extend_from_slice(&be16(0));
+    avar2.extend_from_slice(&8192i16.to_be_bytes());
+    avar2.extend_from_slice(&(-8192i16).to_be_bytes());
+
+    // Rebuild: directory grows by one record for COLR; avar repoints
+    // at its new body appended after the COLR body.
+    let mut out = Vec::with_capacity(font.len() + 16 + colr.len() + avar2.len());
+    out.extend_from_slice(&font[0..4]);
+    out.extend_from_slice(&(num_tables + 1).to_be_bytes());
+    out.extend_from_slice(&font[6..12]);
+    let colr_off = (font.len() + 16) as u32;
+    let avar_off = colr_off + colr.len() as u32;
+    for i in 0..num_tables as usize {
+        let rec = 12 + i * 16;
+        out.extend_from_slice(&font[rec..rec + 8]);
+        if &font[rec..rec + 4] == b"avar" {
+            out.extend_from_slice(&avar_off.to_be_bytes());
+            out.extend_from_slice(&(avar2.len() as u32).to_be_bytes());
+        } else {
+            let off =
+                u32::from_be_bytes([font[rec + 8], font[rec + 9], font[rec + 10], font[rec + 11]]);
+            out.extend_from_slice(&(off + 16).to_be_bytes());
+            out.extend_from_slice(&font[rec + 12..rec + 16]);
+        }
+    }
+    out.extend_from_slice(b"COLR");
+    out.extend_from_slice(&0u32.to_be_bytes());
+    out.extend_from_slice(&colr_off.to_be_bytes());
+    out.extend_from_slice(&(colr.len() as u32).to_be_bytes());
+    out.extend_from_slice(&font[dir_end..]);
+    out.extend_from_slice(&colr);
+    out.extend_from_slice(&avar2);
+    out
 }
 
 /// Drive the parse path plus a broad accessor battery. Every call must
