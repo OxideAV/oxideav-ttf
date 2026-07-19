@@ -122,7 +122,9 @@ pub use tables::base::{
 };
 pub use tables::cbdt::ColorBitmap;
 pub use tables::cblc::{BigGlyphMetrics, SmallGlyphMetrics};
-pub use tables::colr::ColorLayer;
+pub use tables::colr::{
+    Affine2x3, ClipBox, ColorLayer, ColorLine, ColorStop, CompositeMode, Extend, Paint, PaintRef,
+};
 // internal — exposed for tests/fuzz; not part of the stable API
 #[doc(hidden)]
 pub use tables::device::DeviceOrVariationIndex;
@@ -2969,12 +2971,12 @@ impl<'a> Font<'a> {
     /// "color" variant, and so on). Returns `false` for plain
     /// outline-only fonts and for CBDT-only colour-emoji fonts.
     ///
-    /// Only **COLR version 0** (flat palette-indexed layer stack) is
-    /// supported; v1 (paint graph with gradients/transforms) and v2/v3
-    /// (variable-COLR) are accepted at parse time but the v0
-    /// `BaseGlyphRecord` array is the only thing
-    /// [`Font::color_layers`] returns. v1 paint graphs are out of
-    /// scope for this crate.
+    /// Both COLR versions are decoded: the v0 flat layer stack through
+    /// [`Font::color_layers`], and the v1 paint graph through
+    /// [`Font::color_paint_root`] / [`Font::color_paint`]. The spec
+    /// prefers a v1 paint graph over a v0 layer stack for the same
+    /// base glyph, so check [`Font::color_paint_root`] first when
+    /// [`Font::has_colr_v1`] is set.
     pub fn has_color_layers(&self) -> bool {
         self.colr.is_some() && self.cpal.is_some()
     }
@@ -2993,6 +2995,78 @@ impl<'a> Font<'a> {
             Some(colr) => colr.layers(glyph_id),
             None => Vec::new(),
         }
+    }
+
+    // ---- COLR v1 paint graph ---------------------------------------------
+
+    /// `true` if this font's `COLR` table carries a version-1
+    /// BaseGlyphList — i.e. at least one glyph is defined as a paint
+    /// graph (gradients / transforms / composites) rather than, or in
+    /// addition to, a v0 flat layer stack.
+    pub fn has_colr_v1(&self) -> bool {
+        self.colr
+            .as_ref()
+            .map(|c| c.has_paint_graph())
+            .unwrap_or(false)
+    }
+
+    /// Resolve `glyph_id` to the root [`PaintRef`] of its COLR v1
+    /// colour-glyph graph (a binary search over the BaseGlyphList).
+    /// `None` when the font has no v1 COLR data or the glyph has no
+    /// paint record — fall back to [`Font::color_layers`] then, per
+    /// the spec's v1-over-v0 preference order.
+    pub fn color_paint_root(&self, glyph_id: u16) -> Option<PaintRef> {
+        self.colr.as_ref()?.base_glyph_paint(glyph_id)
+    }
+
+    /// Decode one Paint node of a COLR v1 graph **at the current
+    /// variation instance** (set with [`Font::set_variation_coords`] /
+    /// [`Font::set_axis_value`]; static fonts and the default instance
+    /// resolve identically). Every `PaintVar*` wire form folds its
+    /// deltas into the same resolved [`Paint`] variant as its static
+    /// twin.
+    ///
+    /// Child paints are surfaced as further [`PaintRef`]s: the caller
+    /// owns traversal and **must bound depth / track visited refs** —
+    /// the spec requires the graph to be acyclic, but a hostile font
+    /// can tie a loop (e.g. through `PaintColrGlyph`).
+    ///
+    /// Returns `None` for an unrecognised paint format (the spec's
+    /// forward-compatibility rule is to ignore it) or a malformed
+    /// node.
+    pub fn color_paint(&self, paint: PaintRef) -> Option<Paint> {
+        let coords = self.normalised_coords();
+        self.colr.as_ref()?.paint(paint, &coords)
+    }
+
+    /// The raw wire `format` byte of the Paint table at `paint` —
+    /// distinguishes e.g. the four scale wire forms that
+    /// [`Font::color_paint`] folds into [`Paint::Scale`], and a
+    /// `PaintVar*` from its static twin.
+    pub fn color_paint_format(&self, paint: PaintRef) -> Option<u8> {
+        self.colr.as_ref()?.paint_format(paint)
+    }
+
+    /// The precomputed COLR v1 clip box covering `glyph_id`, resolved
+    /// at the current variation instance. Variable clip boxes
+    /// (ClipBoxFormat 2) round *outward* per the spec so the box only
+    /// ever expands. `None` when the font has no ClipList or no clip
+    /// record covers the glyph — compute the bound from the graph
+    /// then.
+    pub fn color_clip_box(&self, glyph_id: u16) -> Option<ClipBox> {
+        let coords = self.normalised_coords();
+        self.colr.as_ref()?.clip_box(glyph_id, &coords)
+    }
+
+    /// `true` when the COLR table ships a varIndexMap in the OpenType
+    /// 1.9 "format 1" layout, which is outside the staged spec
+    /// chapters: the paint graph still decodes but every variation
+    /// delta resolves to 0 (default-instance values).
+    pub fn colr_var_index_map_unsupported(&self) -> bool {
+        self.colr
+            .as_ref()
+            .map(|c| c.var_index_map_unsupported())
+            .unwrap_or(false)
     }
 
     /// Resolve a single CPAL colour by `(palette_index, color_index)`.

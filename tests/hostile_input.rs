@@ -51,6 +51,15 @@ fn exercise(bytes: &[u8]) {
         let _ = f.glyph_name(gid);
         let _ = f.glyph_outline(gid);
         let _ = f.color_layers(gid);
+        let _ = f.color_clip_box(gid);
+        if let Some(root) = f.color_paint_root(gid) {
+            // One decode step per node class — traversal depth is the
+            // caller's job, so a single hop suffices here.
+            if let Some(paint) = f.color_paint(root) {
+                let _ = f.color_paint_format(root);
+                drop(paint);
+            }
+        }
         let _ = f.svg_document(gid);
         let _ = f.glyph_color_bitmap(gid, 32);
         let _ = f.glyph_gray_bitmap(gid, 16);
