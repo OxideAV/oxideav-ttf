@@ -216,6 +216,47 @@ fn font_resolves_variable_clip_box() {
 }
 
 #[test]
+fn effective_color_applies_alpha_multiplication_and_boundedness_reports() {
+    // Graft a CPAL v0 alongside the COLR: 1 palette × 2 entries.
+    // Records are BGRA on the wire.
+    let (bytes, gid, _, _) = load_grafted();
+    let mut cpal: Vec<u8> = Vec::new();
+    cpal.extend_from_slice(&0u16.to_be_bytes()); // version
+    cpal.extend_from_slice(&2u16.to_be_bytes()); // numPaletteEntries
+    cpal.extend_from_slice(&1u16.to_be_bytes()); // numPalettes
+    cpal.extend_from_slice(&2u16.to_be_bytes()); // numColorRecords
+    cpal.extend_from_slice(&14u32.to_be_bytes()); // colorRecordsArrayOffset
+    cpal.extend_from_slice(&0u16.to_be_bytes()); // colorRecordIndices[0]
+    cpal.extend_from_slice(&[10, 20, 30, 200]); // entry 0 (BGRA)
+    cpal.extend_from_slice(&[1, 2, 3, 255]); // entry 1
+    let bytes = graft_table(&bytes, *b"CPAL", &cpal);
+    let font = Font::from_bytes(&bytes).expect("parse grafted font");
+
+    // The spec's alpha-multiplication rule: COLR alpha scales the CPAL
+    // entry's alpha channel; RGB passes through (RGBA order out).
+    assert_eq!(
+        font.colr_effective_color(0, 0, 1.0),
+        Some([30, 20, 10, 200])
+    );
+    assert_eq!(
+        font.colr_effective_color(0, 0, 0.5),
+        Some([30, 20, 10, 100])
+    );
+    assert_eq!(font.colr_effective_color(0, 1, 0.0), Some([3, 2, 1, 0]));
+    // Out-of-range COLR alpha clamps before multiplying.
+    assert_eq!(font.colr_effective_color(0, 1, 7.5), Some([3, 2, 1, 255]));
+    // The 0xFFFF foreground sentinel and out-of-range indices miss.
+    assert_eq!(font.colr_effective_color(0, 0xFFFF, 1.0), None);
+    assert_eq!(font.colr_effective_color(0, 2, 1.0), None);
+    assert_eq!(font.colr_effective_color(9, 0, 1.0), None);
+
+    // Boundedness (§9): the grafted glyph's root is a bare solid fill
+    // — decodes fine but paints an unbounded region.
+    assert_eq!(font.color_glyph_is_bounded(gid), Some(false));
+    assert_eq!(font.color_glyph_is_bounded(gid.wrapping_add(1)), None);
+}
+
+#[test]
 fn fonts_without_colr_v1_report_absence() {
     let dejavu = std::fs::read(concat!(
         env!("CARGO_MANIFEST_DIR"),

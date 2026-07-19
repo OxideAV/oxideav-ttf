@@ -448,6 +448,15 @@ pub enum Paint {
 /// anyway; the cap just bounds allocation before that check bites).
 const MAX_V1_RECORDS: u32 = 1 << 20;
 
+/// Path-depth cap for the boundedness analysis. The spec caps nothing,
+/// but a legitimate paint graph nests a few dozen levels at most.
+const BOUNDEDNESS_MAX_DEPTH: usize = 64;
+
+/// Total node-visit budget for the boundedness analysis: shared
+/// sub-graphs (diamonds) re-evaluate on every path, so an adversarial
+/// DAG could otherwise cost exponential work.
+const BOUNDEDNESS_BUDGET: u32 = 4096;
+
 /// Parsed COLR table (v0 layer stacks + the v1 paint graph).
 #[derive(Debug, Clone)]
 // internal — exposed for tests/fuzz; not part of the stable API
@@ -866,6 +875,105 @@ impl<'a> ColrTable<'a> {
             None => ((index >> 16) as u16, (index & 0xFFFF) as u16),
         };
         ivs.delta(outer, inner, coords).unwrap_or(0.0)
+    }
+
+    // ---- v1: boundedness ---------------------------------------------------
+
+    /// Whether the colour glyph rooted at `glyph_id` is *bounded* — a
+    /// well-formedness requirement for version-1 colour glyphs (staged
+    /// reference §9: "A version-1 color glyph definition must be
+    /// bounded"). `Some(false)` means the graph decodes but paints an
+    /// unbounded region (e.g. a bare gradient with no `PaintGlyph`
+    /// clip); `None` means the graph is not well-formed (missing base
+    /// glyph, undecodable node, a cycle, or an adversarially-deep /
+    /// -wide graph that exhausts the analysis budget).
+    pub fn color_glyph_is_bounded(&self, glyph_id: u16) -> Option<bool> {
+        let root = self.base_glyph_paint(glyph_id)?;
+        self.paint_is_bounded(root)
+    }
+
+    /// [`Self::color_glyph_is_bounded`] for an arbitrary sub-graph
+    /// root.
+    pub fn paint_is_bounded(&self, paint: PaintRef) -> Option<bool> {
+        let mut path = Vec::new();
+        let mut budget = BOUNDEDNESS_BUDGET;
+        self.bounded_inner(paint, &mut path, &mut budget)
+    }
+
+    fn bounded_inner(
+        &self,
+        paint: PaintRef,
+        path: &mut Vec<u32>,
+        budget: &mut u32,
+    ) -> Option<bool> {
+        if *budget == 0 || path.len() >= BOUNDEDNESS_MAX_DEPTH {
+            return None;
+        }
+        *budget -= 1;
+        if path.contains(&paint.0) {
+            // A cycle is not a DAG: the glyph is not well-formed.
+            return None;
+        }
+        path.push(paint.0);
+        // Boundedness is structural — modes, shapes, and graph edges
+        // don't move with variation deltas — so the default instance
+        // suffices.
+        let result = match self.paint(paint, &[])? {
+            // The union of bounded regions is bounded; an empty layer
+            // slice paints nothing (bounded).
+            Paint::ColrLayers { layers } => {
+                let mut all = true;
+                for layer in layers {
+                    match self.bounded_inner(layer, path, budget) {
+                        Some(b) => all &= b,
+                        None => {
+                            path.pop();
+                            return None;
+                        }
+                    }
+                }
+                Some(all)
+            }
+            // Fills cover the whole clip region: unbounded on their
+            // own.
+            Paint::Solid { .. }
+            | Paint::LinearGradient { .. }
+            | Paint::RadialGradient { .. }
+            | Paint::SweepGradient { .. } => Some(false),
+            // §9: PaintGlyph is inherently bounded (the child fill is
+            // clipped to the outline).
+            Paint::Glyph { .. } => Some(true),
+            // Reuse: bounded iff the referenced glyph's graph is.
+            // A missing BaseGlyphPaintRecord is not well-formed.
+            Paint::ColrGlyph { glyph_id } => {
+                let root = self.base_glyph_paint(glyph_id);
+                match root {
+                    Some(root) => self.bounded_inner(root, path, budget),
+                    None => None,
+                }
+            }
+            // An affine image of a bounded region is bounded.
+            Paint::Transform { paint, .. }
+            | Paint::Translate { paint, .. }
+            | Paint::Scale { paint, .. }
+            | Paint::Rotate { paint, .. }
+            | Paint::Skew { paint, .. } => self.bounded_inner(paint, path, budget),
+            // The §6 per-mode table via CompositeMode::is_bounded.
+            Paint::Composite {
+                source,
+                mode,
+                backdrop,
+            } => {
+                let s = self.bounded_inner(source, path, budget);
+                let b = self.bounded_inner(backdrop, path, budget);
+                match (s, b) {
+                    (Some(s), Some(b)) => Some(mode.is_bounded(s, b)),
+                    _ => None,
+                }
+            }
+        };
+        path.pop();
+        result
     }
 
     // ---- v1: paint decode ---------------------------------------------------

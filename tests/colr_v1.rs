@@ -1041,6 +1041,115 @@ fn format1_var_index_map_degrades_to_static() {
     assert!(approx(alpha, 0.5), "delta suppressed, static value");
 }
 
+/// Boundedness analysis (staged reference §9 + the §6 composite-mode
+/// table) over the main synthetic graph.
+#[test]
+fn boundedness_of_main_graph() {
+    let t = build_main_table();
+    let colr = ColrTable::parse(&t.bytes).expect("parse");
+    // A PaintGlyph clips its fill: inherently bounded — and so is any
+    // transform stack above one.
+    assert_eq!(colr.paint_is_bounded(PaintRef(t.p_glyph)), Some(true));
+    assert_eq!(colr.paint_is_bounded(PaintRef(t.p_translate)), Some(true));
+    // Bare fills are unbounded, transforms of them too.
+    assert_eq!(colr.paint_is_bounded(PaintRef(t.p_solid)), Some(false));
+    assert_eq!(colr.paint_is_bounded(PaintRef(t.p_var_solid)), Some(false));
+    assert_eq!(colr.paint_is_bounded(PaintRef(t.p_lin_grad)), Some(false));
+    assert_eq!(colr.paint_is_bounded(PaintRef(t.p_sweep)), Some(false));
+    assert_eq!(colr.paint_is_bounded(PaintRef(t.p_transform)), Some(false));
+    assert_eq!(colr.paint_is_bounded(PaintRef(t.p_scale16)), Some(false));
+    assert_eq!(colr.paint_is_bounded(PaintRef(t.p_scale23)), Some(false));
+    assert_eq!(colr.paint_is_bounded(PaintRef(t.p_rotate26)), Some(false));
+    assert_eq!(colr.paint_is_bounded(PaintRef(t.p_skew28)), Some(false));
+    // gid 5's layer slice mixes a bounded PaintGlyph with an unbounded
+    // gradient: not bounded overall. gid 11 reuses gid 5's graph.
+    assert_eq!(colr.color_glyph_is_bounded(5), Some(false));
+    assert_eq!(colr.color_glyph_is_bounded(11), Some(false));
+    // gid 9: Plus needs both sides bounded; both are fills.
+    assert_eq!(colr.color_glyph_is_bounded(9), Some(false));
+    assert_eq!(colr.paint_is_bounded(PaintRef(t.p_composite)), Some(false));
+    // gid 13 is the unrecognised-format probe: not well-formed.
+    assert_eq!(colr.color_glyph_is_bounded(13), None);
+    // No paint record at all.
+    assert_eq!(colr.color_glyph_is_bounded(4), None);
+}
+
+/// Composite-mode boundedness through real graphs, plus cycle and
+/// dangling-reference rejection.
+#[test]
+fn boundedness_composites_cycles_and_dangling_refs() {
+    let mut b = B::default();
+    b.u16(1);
+    b.u16(0);
+    b.u32(0);
+    b.u32(0);
+    b.u16(0);
+    let bgl_slot = b.slot32();
+    b.u32(0);
+    b.u32(0);
+    b.u32(0);
+    b.u32(0);
+    let bgl = b.len() as u32;
+    b.u32(4);
+    let mut slots = Vec::new();
+    for gid in [1u16, 2, 3, 4] {
+        b.u16(gid);
+        slots.push(b.slot32());
+    }
+    b.patch32(bgl_slot, bgl);
+
+    // gid 1: PaintColrGlyph(1) — a self-cycle.
+    let p_cycle = b.len() as u32;
+    b.u8(11);
+    b.u16(1);
+    // gid 2: PaintColrGlyph(99) — dangling base-glyph reference.
+    let p_dangling = b.len() as u32;
+    b.u8(11);
+    b.u16(99);
+    // gid 3: Composite(SrcIn, source = PaintGlyph -> Solid, backdrop =
+    // Solid): SrcIn is bounded iff either side is.
+    let p_src_in = b.len() as u32;
+    b.u8(32);
+    let src_slot = b.slot24();
+    b.u8(5); // COMPOSITE_SRC_IN
+    let back_slot = b.slot24();
+    // gid 4: Composite(Clear, Solid, Solid): always bounded.
+    let p_clear = b.len() as u32;
+    b.u8(32);
+    let clear_src_slot = b.slot24();
+    b.u8(0); // COMPOSITE_CLEAR
+    let clear_back_slot = b.slot24();
+    // Shared leaves.
+    let p_glyph = b.len() as u32;
+    b.u8(10);
+    let glyph_child_slot = b.slot24();
+    b.u16(33);
+    let p_solid = b.len() as u32;
+    b.u8(2);
+    b.u16(0);
+    b.i16(16384);
+
+    b.patch24(src_slot, p_glyph - p_src_in);
+    b.patch24(back_slot, p_solid - p_src_in);
+    b.patch24(clear_src_slot, p_solid - p_clear);
+    b.patch24(clear_back_slot, p_solid - p_clear);
+    b.patch24(glyph_child_slot, p_solid - p_glyph);
+    for (slot, target) in slots.iter().zip([p_cycle, p_dangling, p_src_in, p_clear]) {
+        b.patch32(*slot, target - bgl);
+    }
+
+    let colr = ColrTable::parse(&b.v).expect("parse");
+    assert_eq!(colr.color_glyph_is_bounded(1), None, "self-cycle");
+    assert_eq!(colr.color_glyph_is_bounded(2), None, "dangling ref");
+    assert_eq!(colr.color_glyph_is_bounded(3), Some(true), "SrcIn either");
+    assert_eq!(colr.color_glyph_is_bounded(4), Some(true), "Clear always");
+    // The decode surface itself stays total on the cyclic node.
+    assert!(matches!(
+        colr.paint(PaintRef(p_cycle), &[]),
+        Some(Paint::ColrGlyph { glyph_id: 1 })
+    ));
+}
+
 /// Deterministic hostile-input slice for the v1 structures: prefix
 /// truncations and blind byte flips of the synthetic table must never
 /// panic — parse either fails cleanly or yields a table whose paint /

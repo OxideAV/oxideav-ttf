@@ -48,6 +48,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `otvarcommonformats` chapter) degrades to zero deltas and is flagged
   via `var_index_map_unsupported()`.
 
+- **COLR v1 well-formedness + colour resolution helpers.**
+  `Font::color_glyph_is_bounded(gid)` implements the spec's
+  boundedness requirement for version-1 colour glyphs (fills are
+  unbounded, `PaintGlyph` is inherently bounded, transforms and layer
+  unions inherit, `PaintComposite` follows the per-mode table) with a
+  cycle-rejecting, budget-capped graph walk — `Some(false)` = decodes
+  but unbounded, `None` = not well-formed (cycle, dangling
+  `PaintColrGlyph`, undecodable node). `Font::colr_effective_color`
+  applies the spec's alpha-multiplication rule (the COLR alpha,
+  clamped, scales the CPAL entry's alpha channel) and maps the
+  `0xFFFF` foreground sentinel to `None`.
+
 ### Changed
 
 - **Internal public surface marked `#[doc(hidden)]`.** The internal table

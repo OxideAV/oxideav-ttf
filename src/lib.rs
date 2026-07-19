@@ -3069,6 +3069,45 @@ impl<'a> Font<'a> {
             .unwrap_or(false)
     }
 
+    /// Whether the COLR v1 colour glyph rooted at `glyph_id` is
+    /// *bounded* — a well-formedness requirement (staged reference §9:
+    /// "A version-1 color glyph definition must be bounded";
+    /// `PaintGlyph` is inherently bounded and `PaintComposite` follows
+    /// the per-mode §6 table). `Some(false)` = the graph decodes but
+    /// paints an unbounded region; `None` = not well-formed (no paint
+    /// record, an undecodable node, a cycle, or an adversarial graph
+    /// that exhausts the bounded analysis budget). Renderers should
+    /// refuse `Some(false)` / `None` glyphs or clip them to
+    /// [`Font::color_clip_box`].
+    pub fn color_glyph_is_bounded(&self, glyph_id: u16) -> Option<bool> {
+        self.colr.as_ref()?.color_glyph_is_bounded(glyph_id)
+    }
+
+    /// Resolve a COLR colour reference — a `(palette entry, alpha)`
+    /// pair from a [`Paint::Solid`] or a
+    /// [`tables::colr::ColorStop`] — against CPAL palette
+    /// `palette_index`, applying the spec's alpha-multiplication rule:
+    /// the COLR alpha (clamped to `[0, 1]`) scales the CPAL entry's
+    /// own alpha channel. RGB channels pass through untouched.
+    ///
+    /// Returns `None` for the `0xFFFF` "text foreground" sentinel (the
+    /// caller substitutes its own foreground colour and applies
+    /// `alpha` to it), for a missing `CPAL` table, or for an
+    /// out-of-range index.
+    pub fn colr_effective_color(
+        &self,
+        palette_index: u16,
+        entry_index: u16,
+        alpha: f32,
+    ) -> Option<[u8; 4]> {
+        if entry_index == 0xFFFF {
+            return None;
+        }
+        let [r, g, b, a] = self.cpal_color(palette_index, entry_index)?;
+        let scaled = (a as f32 * alpha.clamp(0.0, 1.0)).round().clamp(0.0, 255.0) as u8;
+        Some([r, g, b, scaled])
+    }
+
     /// Resolve a single CPAL colour by `(palette_index, color_index)`.
     /// Returns `[r, g, b, a]` (the byte order swizzled out of CPAL's
     /// on-disk BGRA) or `None` when either index is out of range or the
