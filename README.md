@@ -583,9 +583,14 @@ kerning, and mark attachment.
   COLR-embedded DeltaSetIndexMap + ItemVariationStore, so callers own
   traversal depth / cycle policy against hostile graphs.
   `Font::color_clip_box(gid)` resolves the ClipList (ClipBox formats
-  1 + 2, the variable form rounding *outward* per the spec). An
-  OpenType 1.9 "format 1" varIndexMap — defined only in the unstaged
-  `otvarcommonformats` chapter — degrades to zero deltas behind
+  1 + 2, the variable form rounding *outward* per the spec).
+  `Font::color_glyph_is_bounded(gid)` validates the §9 boundedness
+  requirement (cycle-rejecting, budget-capped walk; `None` = not
+  well-formed), and `Font::colr_effective_color` applies the COLR ×
+  CPAL alpha-multiplication rule with the `0xFFFF` foreground
+  sentinel mapped to `None`. An OpenType 1.9 "format 1" varIndexMap —
+  defined only in the unstaged `otvarcommonformats` chapter —
+  degrades to zero deltas behind
   `Font::colr_var_index_map_unsupported()`.
 - `SVG ` table (ISO/IEC 14496-22:2019/Amd.1:2020 §5.5.1) — the fourth
   colour-glyph mechanism, carrying per-glyph-range SVG 1.1 vector

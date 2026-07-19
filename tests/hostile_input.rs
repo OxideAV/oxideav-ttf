@@ -185,6 +185,7 @@ fn exercise(bytes: &[u8]) {
         let _ = f.glyph_outline(gid);
         let _ = f.color_layers(gid);
         let _ = f.color_clip_box(gid);
+        let _ = f.color_glyph_is_bounded(gid);
         if let Some(root) = f.color_paint_root(gid) {
             // One decode step per node class — traversal depth is the
             // caller's job, so a single hop suffices here.
@@ -313,11 +314,18 @@ fn no_panic_on_mutated_fonts() {
 
     // Iteration budgets are deliberately modest so the test stays a few
     // seconds in a debug CI build while still exercising every parser and
-    // reproducing deterministically. Raise these locally (or run under a
-    // dedicated fuzzer) for a deeper campaign.
+    // reproducing deterministically. `OXIDEAV_TTF_HOSTILE_SCALE=<n>`
+    // multiplies every budget for a deeper local campaign (still
+    // deterministic — the PRNG stream is a strict prefix extension).
+    let scale: u64 = std::env::var("OXIDEAV_TTF_HOSTILE_SCALE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1)
+        .clamp(1, 1_000);
     for (_name, base) in fixtures() {
-        // 1. Truncation at every ~1/120th prefix.
-        let step = (base.len() / 120).max(1);
+        // 1. Truncation at every ~1/120th prefix (1/(120·scale) when
+        //    scaled up).
+        let step = (base.len() / (120 * scale as usize)).max(1);
         for len in (0..base.len()).step_by(step) {
             let slice = &base[..len];
             let _ = catch_unwind(AssertUnwindSafe(|| exercise(slice)));
@@ -326,7 +334,7 @@ fn no_panic_on_mutated_fonts() {
         // 2. Blind multi-byte flips anywhere in the file (mostly stress the
         //    sfnt header + directory walker; most mutants fail fast).
         let mut state = 0x1234_5678_9abc_def0u64;
-        for _ in 0..600u64 {
+        for _ in 0..600u64 * scale {
             let mut m = base.clone();
             let nflips = 1 + (rng(&mut state) % 6) as usize;
             for _ in 0..nflips {
@@ -345,7 +353,7 @@ fn no_panic_on_mutated_fonts() {
             .filter(|&(_, len)| len > 0)
             .collect();
         if !regions.is_empty() {
-            for _ in 0..1_500u64 {
+            for _ in 0..1_500u64 * scale {
                 let (off, len) = regions[(rng(&mut state) as usize) % regions.len()];
                 let mut m = base.clone();
                 let nflips = 1 + (rng(&mut state) % 8) as usize;
