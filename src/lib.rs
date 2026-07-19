@@ -3305,7 +3305,7 @@ impl<'a> Font<'a> {
             Some(f) => f.axes(),
             None => return Vec::new(),
         };
-        let mut out = Vec::with_capacity(axes.len());
+        let mut initial = Vec::with_capacity(axes.len());
         for (i, axis) in axes.iter().enumerate() {
             let v = self.var_coords.get(i).copied().unwrap_or(axis.default);
             let n = if (v - axis.default).abs() < f32::EPSILON {
@@ -3321,13 +3321,26 @@ impl<'a> Font<'a> {
             } else {
                 ((v - axis.default) / (axis.max - axis.default)).clamp(0.0, 1.0)
             };
-            let n = match self.avar.as_ref() {
-                Some(a) => a.remap_normalised(i, n),
-                None => n,
-            };
-            out.push(n);
+            initial.push(n);
         }
-        out
+        // avar stages 2 + 3: per-axis segment-map bending, then — for
+        // an avar version-2 table — the cross-axis delta application
+        // against the intermediate vector (staged v2 reference §4).
+        match self.avar.as_ref() {
+            Some(a) => a.remap_vector(&initial),
+            None => initial,
+        }
+    }
+
+    /// `true` when the font's `avar` table is version 2 and ships an
+    /// `axisIndexMap` in the OpenType 1.9 "format 1" layout, which is
+    /// outside the staged spec chapters: the cross-axis delta stage is
+    /// skipped for the whole table (the v1 segment maps still apply).
+    pub fn avar_axis_index_map_unsupported(&self) -> bool {
+        self.avar
+            .as_ref()
+            .map(|a| a.axis_index_map_unsupported())
+            .unwrap_or(false)
     }
 
     // ---- Control Value Table (cvt) + CVT variations (cvar) ---------------

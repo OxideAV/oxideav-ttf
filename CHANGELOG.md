@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **avar version 2 — cross-axis coordinate remapping.** The `avar`
+  parser now decodes the v2 header (segment maps + the trailing
+  `axisIndexMap` / `varStore` offsets) and `Font::normalised_coords`
+  runs the staged reference's full three-stage pipeline: default
+  normalisation, per-axis v1 segment-map bending, then the v2
+  cross-axis delta stage — region scalars computed against the
+  *intermediate* vector, per-axis F2DOT14-unit deltas (routed through
+  the `axisIndexMap`, identity when absent) rounded and added in
+  F2DOT14 integer space, and each result clamped to `[-1, +1]` before
+  driving gvar / CFF2 / every ItemVariationStore consumer downstream.
+  Self-referencing axes and delta-driven clamping behave per the
+  reference algorithm; a v2 table without a `varStore` degrades to
+  stage 2, and an unknown future major version falls back to identity.
+  A format-1 `axisIndexMap` (unstaged `otvarcommonformats` layout)
+  skips stage 3 behind `Font::avar_axis_index_map_unsupported()`.
+
 - **COLR version-1 paint graph decode.** The COLR parser now decodes the
   v1 header (BaseGlyphList / LayerList / ClipList / varIndexMap /
   ItemVariationStore offsets) and all 32 Paint table formats — solid
