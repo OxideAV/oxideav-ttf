@@ -589,7 +589,12 @@ fn infer_region_deltas(
     for (i, &p) in referenced.iter().enumerate() {
         let pi = p as usize;
         if pi < total_points {
-            delta[pi] = (dxs[i] as f64, dys[i] as f64);
+            // The packed point-number list may legally repeat a point
+            // number; the common-formats chapter mandates that all of
+            // its deltas "be applied cumulatively to the given point",
+            // so accumulate rather than overwrite.
+            delta[pi].0 += dxs[i] as f64;
+            delta[pi].1 += dys[i] as f64;
             has[pi] = true;
         }
     }
@@ -1300,6 +1305,32 @@ mod tests {
         assert_eq!(out[0], (28, -62));
         assert_eq!(out[2], (-42, -57));
         assert_eq!(out[1], (11, -57)); // 10.5 → 11
+    }
+
+    #[test]
+    fn repeated_point_numbers_accumulate_cumulatively() {
+        // The packed point-number encoding can legally repeat a point
+        // number (a zero diff inside a run); the common-formats
+        // chapter mandates that all of its deltas apply cumulatively.
+        // Point 0 appears twice: net delta (10+5, -8-2) = (15, -10).
+        let raw = build_partial_points_glyph(&[0, 0, 2], &[10, 5, -42], &[-8, -2, -57]);
+        let g = GvarTable::parse(&raw).expect("parse");
+        let info = SimpleOutlineInfo {
+            points: vec![(0, 0), (1, 10), (4, 8)],
+            contour_ends: vec![2],
+        };
+        // IUP path: explicit points accumulate, P1 is inferred from
+        // the *net* neighbour deltas. X: x=1 in [0,4] → 15 + 0.25 ×
+        // (−42 − 15) = 0.75 → 1. Y: y=10 outside [0,8] → nearer
+        // neighbour (y=8, P2) → −57.
+        let out = g.glyph_deltas_iup(0, &info, &[1.0]).expect("iup");
+        assert_eq!(out[0], (15, -10));
+        assert_eq!(out[2], (-42, -57));
+        assert_eq!(out[1], (1, -57));
+        // Legacy explicit-points path accumulates identically.
+        let legacy = g.glyph_deltas(0, 3, &[1.0]).expect("legacy");
+        assert_eq!(legacy[0], (15, -10));
+        assert_eq!(legacy[2], (-42, -57));
     }
 
     #[test]

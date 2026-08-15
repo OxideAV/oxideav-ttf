@@ -54,6 +54,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   real wire varIndexMap / LONG_WORDS / 44-axis fvar data under the
   structure-aware corruption pass.
 
+### Fixed
+
+- **`gvar` repeated point numbers now accumulate in the IUP path.**
+  The packed point-number encoding can legally repeat a point number
+  (a zero diff inside a run), and the common-formats chapter mandates
+  that all of its deltas "be applied cumulatively to the given
+  point". The legacy explicit-points path already accumulated, but
+  `glyph_deltas_iup` overwrote the earlier delta with the later one,
+  losing the first contribution and inferring neighbours from the
+  wrong net delta. Both paths now agree; a unit test pins the
+  cumulative semantics on both.
+
 - **avar version 2 — cross-axis coordinate remapping.** The `avar`
   parser now decodes the v2 header (segment maps + the trailing
   `axisIndexMap` / `varStore` offsets) and `Font::normalised_coords`
