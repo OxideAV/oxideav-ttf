@@ -9,6 +9,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **OFF common-formats variation-data completion: `DeltaSetIndexMap`
+  format 1, `LONG_WORDS` deltas, NULL subtable offsets.** The chapter
+  the earlier "not staged" degradations pointed at is now staged, and
+  the whole surface is implemented. The shared `DeltaSetIndexMap`
+  parser (HVAR / VVAR / COLR varIndexMap / avar v2 axisIndexMap)
+  decodes both defined formats — format 0 (16-bit `mapCount`,
+  byte-identical to the pre-subdivision ISO/IEC 14496-22:2019
+  §7.3.5.2 single-`uint16 entryFormat` layout) and format 1 (32-bit
+  `mapCount`) — with the `format` byte validated, the entryFormat
+  reserved bits (0xC0) enforced, and a new
+  `DeltaSetIndexMap::format()` accessor. The shared
+  `ItemVariationStore` decoder now honours the `wordDeltaCount`
+  `LONG_WORDS` flag (0x8000): delta-set rows mix int32 + int16
+  instead of int16 + int8, the representation the chapter reserves
+  for 32-bit-variable top-level tables (currently COLR). NULL
+  `itemVariationDataOffsets` entries now parse as "no variation data
+  for this outer index" instead of rejecting the store, and the
+  `regionCount` reserved high bit is enforced (must be < 32,768,
+  replacing the old ad-hoc 4096 cap). The
+  `Font::colr_var_index_map_unsupported()` /
+  `Font::avar_axis_index_map_unsupported()` degradations now fire
+  only for maps with an unrecognised *future* format byte (or
+  malformed maps), not for format 1.
+
+- **Variable COLR v1 conformance fixture + end-to-end suite.** The
+  staged Google Fonts color-fonts variable test font
+  (`tests/fixtures/test_glyphs-glyf_colr_1_variable.ttf`,
+  Apache-2.0) is bundled: 44 purpose-named design axes each drive one
+  paint parameter (sweep angles, scale/rotate/skew centres, gradient
+  geometry, transform matrix cells, clip boxes, alpha), and its wire
+  `ItemVariationStore` ships a `LONG_WORDS` subtable — before this
+  round the *whole font* failed `Font::from_bytes` (the flag bit
+  read as an impossible word-delta count). The new
+  `tests/colr_v1_variable.rs` suite proves: every base-glyph paint
+  graph decodes with zero undecodable nodes at the default instance
+  and with all 44 axes at both extremes; ≥ ¼ of the graphs move at
+  the axis extremes (delta routing through the varIndexMap and
+  LONG_WORDS store); the boundedness analysis completes on every
+  base glyph and flags exactly the fixture's deliberate
+  `PaintColrGlyph` cycle pair as not-well-formed; variable clip
+  boxes track the clip axes; and gvar/HVAR coexist at the extremes.
+  The fixture also joins the hostile-input mutation battery, putting
+  real wire varIndexMap / LONG_WORDS / 44-axis fvar data under the
+  structure-aware corruption pass.
+
 - **avar version 2 — cross-axis coordinate remapping.** The `avar`
   parser now decodes the v2 header (segment maps + the trailing
   `axisIndexMap` / `varStore` offsets) and `Font::normalised_coords`

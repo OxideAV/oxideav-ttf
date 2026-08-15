@@ -3058,10 +3058,14 @@ impl<'a> Font<'a> {
         self.colr.as_ref()?.clip_box(glyph_id, &coords)
     }
 
-    /// `true` when the COLR table ships a varIndexMap in the OpenType
-    /// 1.9 "format 1" layout, which is outside the staged spec
-    /// chapters: the paint graph still decodes but every variation
-    /// delta resolves to 0 (default-instance values).
+    /// `true` when the COLR table ships a varIndexMap that does not
+    /// decode — an unrecognised future format byte, reserved
+    /// entryFormat bits, or a truncated map. Both defined
+    /// `DeltaSetIndexMap` formats (0 and 1, per the staged OFF
+    /// common-formats chapter) decode, so this only fires on
+    /// malformed or future-format maps: the paint graph still decodes
+    /// but every variation delta resolves to 0 (default-instance
+    /// values).
     pub fn colr_var_index_map_unsupported(&self) -> bool {
         self.colr
             .as_ref()
@@ -3372,9 +3376,13 @@ impl<'a> Font<'a> {
     }
 
     /// `true` when the font's `avar` table is version 2 and ships an
-    /// `axisIndexMap` in the OpenType 1.9 "format 1" layout, which is
-    /// outside the staged spec chapters: the cross-axis delta stage is
-    /// skipped for the whole table (the v1 segment maps still apply).
+    /// `axisIndexMap` that does not decode — an unrecognised future
+    /// format byte, reserved entryFormat bits, or a truncated map.
+    /// Both defined `DeltaSetIndexMap` formats (0 and 1, per the
+    /// staged OFF common-formats chapter) decode, so this only fires
+    /// on malformed or future-format maps: the cross-axis delta stage
+    /// is skipped for the whole table (the v1 segment maps still
+    /// apply).
     pub fn avar_axis_index_map_unsupported(&self) -> bool {
         self.avar
             .as_ref()

@@ -67,14 +67,15 @@
 //! UFWORD fields in font units) — the same convention the staged avar
 //! v2 reference states explicitly for its F2DOT14 deltas.
 //!
-//! The `DeltaSetIndexMap` decoder shared with `HVAR` implements the
-//! staged ISO/IEC 14496-22:2019 §7.3.5.2 layout, which is
-//! byte-identical to the OpenType 1.9 "format 0" map (leading
-//! `format = 0` byte + `entryFormat` byte read as the zero-high-byte
-//! `uint16 entryFormat`). The 1.9 "format 1" map (32-bit `mapCount`)
-//! is defined only in the OpenType `otvarcommonformats` chapter, which
-//! is **not staged** — a font shipping one still parses, but its
-//! variation deltas resolve to 0 and
+//! The `DeltaSetIndexMap` decoder shared with `HVAR` implements both
+//! formats from the staged OFF common-formats chapter: format 0
+//! (16-bit `mapCount`, byte-identical to the ISO/IEC 14496-22:2019
+//! §7.3.5.2 layout) and format 1 (32-bit `mapCount`). The embedded
+//! `ItemVariationStore` also honours the chapter's `LONG_WORDS`
+//! `wordDeltaCount` flag — the int32 + int16 delta representation the
+//! chapter reserves for 32-bit-variable top-level tables, currently
+//! COLR only. A map with an unrecognised future format byte still
+//! parses the font, but its variation deltas resolve to 0 and
 //! [`ColrTable::var_index_map_unsupported`] reports the degradation.
 
 use crate::parser::{read_i16, read_u16, read_u24, read_u32, read_u8};
@@ -479,11 +480,11 @@ pub struct ColrTable<'a> {
     /// v1 ClipList: `(startGlyphID, endGlyphID, absolute ClipBox
     /// offset)`, wire order (sorted ascending by startGlyphID).
     clip_records: Vec<(u16, u16, u32)>,
-    /// v1 DeltaSetIndexMap (format 0 — the staged §7.3.5.2 layout).
+    /// v1 DeltaSetIndexMap (format 0 or 1).
     var_index_map: Option<DeltaSetIndexMap>,
-    /// A varIndexMap was present but not decodable against the staged
-    /// layout (an OpenType 1.9 format-1 map); variation deltas
-    /// degrade to 0.
+    /// A varIndexMap was present but not decodable (an unrecognised
+    /// future format byte, reserved entryFormat bits, or a truncated
+    /// map); variation deltas degrade to 0.
     var_index_map_unsupported: bool,
     /// v1 ItemVariationStore.
     ivs: Option<ItemVariationStore>,
@@ -654,11 +655,10 @@ impl<'a> ColrTable<'a> {
             if var_index_map_off >= bytes.len() {
                 return Err(Error::BadOffset);
             }
-            // The shared decoder implements the staged §7.3.5.2 layout
-            // == OpenType 1.9 map format 0. A format-1 map trips the
-            // reserved-bit check (its leading 0x01 format byte lands
-            // in the entryFormat high byte); degrade to no-variation
-            // rather than rejecting the font, and flag it.
+            // The shared decoder implements both defined map formats
+            // (0 and 1). An unrecognised future format / malformed
+            // map degrades to no-variation rather than rejecting the
+            // font, and is flagged.
             match DeltaSetIndexMap::parse(&bytes[var_index_map_off..]) {
                 Ok(map) => self.var_index_map = Some(map),
                 Err(_) => self.var_index_map_unsupported = true,
@@ -780,9 +780,12 @@ impl<'a> ColrTable<'a> {
         self.layer_list.len() as u32
     }
 
-    /// A varIndexMap is present but uses the OpenType 1.9 format-1
-    /// layout, which the staged spec chapters do not define — all
-    /// variation deltas resolve to 0 for this font.
+    /// A varIndexMap is present but does not decode — an
+    /// unrecognised format byte (a future revision), reserved
+    /// entryFormat bits, or a truncated map. Both defined formats
+    /// (0 and 1) decode, so this only fires on malformed or
+    /// future-format maps — all variation deltas resolve to 0 for
+    /// such a font.
     pub fn var_index_map_unsupported(&self) -> bool {
         self.var_index_map_unsupported
     }

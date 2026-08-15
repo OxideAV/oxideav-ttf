@@ -16,7 +16,9 @@
 //!    bytes are flipped only inside one table body per iteration, driving
 //!    corrupt-but-in-range data deep into each individual decoder.
 //!
-//! Besides the four bundled fixtures, a fifth in-memory variant grafts a
+//! Besides the five bundled fixtures (the variable COLR v1 conformance
+//! font carries a real varIndexMap + a LONG_WORDS ItemVariationStore +
+//! a 44-axis fvar on the wire), a sixth in-memory variant grafts a
 //! synthetic COLR v1 paint graph onto InterVariable and swaps its `avar`
 //! for a version-2 table, so the corruption passes also reach the paint
 //! graph, ClipList, embedded IVS, and avar2 cross-axis decoders.
@@ -38,11 +40,12 @@ fn fixtures() -> Vec<(&'static str, Vec<u8>)> {
         "DejaVuSansMono.ttf",
         "InterVariable.ttf",
         "NotoSansArabic-Regular.ttf",
+        "test_glyphs-glyf_colr_1_variable.ttf",
     ]
     .iter()
     .map(|n| (*n, std::fs::read(format!("{dir}{n}")).unwrap()))
     .collect();
-    // A fifth, in-memory variant: InterVariable with a synthetic COLR
+    // A sixth, in-memory variant: InterVariable with a synthetic COLR
     // v1 paint graph grafted on and its avar swapped for a version-2
     // table — no bundled fixture ships either, so the structure-aware
     // corruption pass would otherwise never reach those decoders.

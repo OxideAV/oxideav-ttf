@@ -60,12 +60,14 @@
 //!   2 / 4*positionMapCount / AxisValueMap{ fromCoord: F2DOT14, toCoord: F2DOT14 }
 //! ```
 //!
-//! The `DeltaSetIndexMap` decoder implements the staged ISO/IEC
-//! 14496-22:2019 §7.3.5.2 layout (byte-identical to the OpenType 1.9
-//! "format 0" map); a format-1 map — defined only in the unstaged
-//! `otvarcommonformats` chapter — is flagged via
+//! The `DeltaSetIndexMap` decoder implements both formats from the
+//! staged OFF common-formats chapter — format 0 (16-bit `mapCount`,
+//! byte-identical to the ISO/IEC 14496-22:2019 §7.3.5.2 layout) and
+//! format 1 (32-bit `mapCount`). A map with an unrecognised format
+//! byte (a future revision) is flagged via
 //! [`AvarTable::axis_index_map_unsupported`] and stage 3 is skipped
-//! for the whole table (v1 segment maps still apply).
+//! for the whole table (v1 segment maps still apply), matching the
+//! reference's version-fallback posture.
 
 use crate::parser::{read_i16, read_u16, read_u32};
 use crate::tables::hvar::DeltaSetIndexMap;
@@ -86,9 +88,9 @@ pub struct AvarTable {
     /// v2 `axisIndexMap`: fvar axis index → variation-store delta-set
     /// index. `None` = identity mapping.
     axis_index_map: Option<DeltaSetIndexMap>,
-    /// An `axisIndexMap` was present but not decodable against the
-    /// staged layout (an OpenType 1.9 format-1 map); stage 3 is
-    /// skipped entirely.
+    /// An `axisIndexMap` was present but not decodable (an
+    /// unrecognised future format byte, reserved entryFormat bits, or
+    /// a truncated map); stage 3 is skipped entirely.
     axis_index_map_unsupported: bool,
     /// v2 `varStore`: the per-axis delta sets, in F2DOT14 units.
     var_store: Option<ItemVariationStore>,
@@ -159,9 +161,10 @@ impl AvarTable {
                 if axis_index_map_off >= bytes.len() {
                     return Err(Error::BadOffset);
                 }
-                // Format-0 maps decode through the shared staged-layout
-                // parser; a 1.9 format-1 map trips its reserved-bit
-                // check → degrade to v1-only behaviour and flag it.
+                // Both defined map formats (0 and 1) decode through
+                // the shared parser; an unrecognised future format /
+                // malformed map degrades to v1-only behaviour and is
+                // flagged.
                 match DeltaSetIndexMap::parse(&bytes[axis_index_map_off..]) {
                     Ok(map) => table.axis_index_map = Some(map),
                     Err(_) => table.axis_index_map_unsupported = true,
@@ -263,10 +266,12 @@ impl AvarTable {
         self.var_store.is_some() && !self.axis_index_map_unsupported
     }
 
-    /// An `axisIndexMap` was present but uses the OpenType 1.9
-    /// "format 1" layout, which is outside the staged spec chapters:
-    /// stage 3 is skipped for the whole table (v1 segment maps still
-    /// apply).
+    /// An `axisIndexMap` was present but does not decode — an
+    /// unrecognised format byte (a future revision), reserved
+    /// entryFormat bits, or a truncated map. Both defined formats
+    /// (0 and 1) decode, so this only fires on malformed or
+    /// future-format maps; stage 3 is skipped for the whole table
+    /// (v1 segment maps still apply).
     pub fn axis_index_map_unsupported(&self) -> bool {
         self.axis_index_map_unsupported
     }
@@ -508,11 +513,32 @@ mod tests {
     }
 
     #[test]
-    fn avar_v2_format1_axis_index_map_degrades_to_v1() {
-        // A 1.9 format-1 DeltaSetIndexMap (leading 0x01 format byte)
-        // is outside the staged layouts: stage 3 is skipped, the
-        // degradation is flagged, and stage 2 still applies.
-        let map: Vec<u8> = vec![0x01, 0x00, 0, 0, 0, 1, 0, 0, 0, 0];
+    fn avar_v2_format1_axis_index_map_routes_stage3() {
+        // A format-1 DeltaSetIndexMap (leading 0x01 format byte,
+        // 32-bit mapCount) decodes through the shared parser and
+        // drives stage 3 exactly like a format-0 map. entryFormat
+        // 0x00 → 1-byte entries, 1 inner bit; the single entry (0,0)
+        // routes both axes (the second by last-entry clamping) to
+        // delta row 0 = −8192 (−0.5 in F2DOT14).
+        let map: Vec<u8> = vec![0x01, 0x00, 0, 0, 0, 1, 0x00];
+        let b = build_v2(1, &[-8192, 0], Some(&map));
+        let a = AvarTable::parse(&b).expect("parse");
+        assert!(!a.axis_index_map_unsupported());
+        assert!(a.has_cross_axis_mapping());
+        // Region peaks on axis 1; at [0.5, 1.0] the scalar is 1, so
+        // both axes shift by −0.5.
+        let out = a.remap_vector(&[0.5, 1.0]);
+        assert!((out[0] - 0.0).abs() < 1e-4, "{out:?}");
+        assert!((out[1] - 0.5).abs() < 1e-4, "{out:?}");
+    }
+
+    #[test]
+    fn avar_v2_unknown_map_format_degrades_to_v1() {
+        // An unrecognised DeltaSetIndexMap format byte (a future
+        // revision) is outside the staged layouts: stage 3 is
+        // skipped, the degradation is flagged, and stage 2 still
+        // applies.
+        let map: Vec<u8> = vec![0x02, 0x00, 0, 1, 0x00];
         let b = build_v2(1, &[-8192, 0], Some(&map));
         let a = AvarTable::parse(&b).expect("parse");
         assert!(a.axis_index_map_unsupported());

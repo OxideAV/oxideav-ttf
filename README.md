@@ -588,10 +588,19 @@ kerning, and mark attachment.
   requirement (cycle-rejecting, budget-capped walk; `None` = not
   well-formed), and `Font::colr_effective_color` applies the COLR ×
   CPAL alpha-multiplication rule with the `0xFFFF` foreground
-  sentinel mapped to `None`. An OpenType 1.9 "format 1" varIndexMap —
-  defined only in the unstaged `otvarcommonformats` chapter —
-  degrades to zero deltas behind
-  `Font::colr_var_index_map_unsupported()`.
+  sentinel mapped to `None`. Both `DeltaSetIndexMap` formats from the
+  staged OFF common-formats chapter decode (format 0 with its 16-bit
+  `mapCount` — byte-identical to the pre-subdivision ISO/IEC
+  14496-22:2019 §7.3.5.2 layout — and format 1 with its 32-bit
+  `mapCount`), and the embedded `ItemVariationStore` honours the
+  chapter's `LONG_WORDS` `wordDeltaCount` flag (int32 + int16 delta
+  rows — the representation reserved for 32-bit-variable top-level
+  tables, currently COLR only) plus NULL `itemVariationDataOffsets`
+  entries ("no variation for this outer index"). A varIndexMap with
+  an unrecognised future format byte degrades to zero deltas behind
+  `Font::colr_var_index_map_unsupported()`. Validated end-to-end
+  against the bundled variable COLR v1 conformance fixture (44
+  paint-parameter axes; its wire IVS ships a LONG_WORDS subtable).
 - `SVG ` table (ISO/IEC 14496-22:2019/Amd.1:2020 §5.5.1) — the fourth
   colour-glyph mechanism, carrying per-glyph-range SVG 1.1 vector
   documents (an alternative to `COLR`/`CPAL`, `CBDT`/`CBLC`, and `sbix`).
@@ -719,7 +728,9 @@ kerning, and mark attachment.
   interpolated advance-width adjustment for `glyph_id` at the current
   variation coordinates, and `Font::lsb_variation_delta(gid)` /
   `Font::rsb_variation_delta(gid)` cover the optional side-bearing
-  mappings. The optional `DeltaSetIndexMap` sub-table (§7.3.5.2) is
+  mappings. The optional `DeltaSetIndexMap` sub-table (§7.3.5.2; both
+  formats of the staged OFF common-formats chapter — 0 with 16-bit
+  and 1 with 32-bit `mapCount`) is
   decoded for all four supported entry sizes (1 / 2 / 3 / 4 bytes per
   entry, 1..16 inner-index bits) with the §7.3.5.2 "glyph IDs beyond
   mapCount-1 use the last entry" clamp; when `advanceWidthMappingOffset`
@@ -814,8 +825,9 @@ kerning, and mark attachment.
   spec behind the OFF amendment). `Font::normalised_coords` runs the
   full three-stage pipeline: default fvar normalisation, per-axis v1
   piecewise-linear segment-map bending, then the v2 **cross-axis
-  delta stage** — an `axisIndexMap` (`DeltaSetIndexMap`, identity
-  when absent) routes each fvar axis to a delta set in the avar-
+  delta stage** — an `axisIndexMap` (`DeltaSetIndexMap`, either
+  defined format, identity when absent) routes each fvar axis to a
+  delta set in the avar-
   embedded `ItemVariationStore`, region scalars are computed against
   the stage-2 *intermediate* vector, and each axis's interpolated
   F2DOT14-unit delta is rounded and added in F2DOT14 integer space
@@ -1216,10 +1228,12 @@ so `from_bytes` reaches every parser) — then drives the eager parse path
 plus a broad accessor battery (outlines, bitmaps, shaping, kerning,
 variable instances with out-of-range / NaN coordinates, metrics / baseline
 / math lookups, COLR v1 paint decode + clip boxes) under each mutant,
-asserting no thread ever unwinds. A fifth in-memory fixture variant grafts
-a synthetic COLR v1 paint graph onto InterVariable and swaps its `avar`
-for a version-2 table so the corruption passes also reach those decoders
-(no bundled fixture ships either). It reproduces deterministically and
+asserting no thread ever unwinds. The battery includes the bundled
+variable COLR v1 conformance fixture (real wire varIndexMap +
+`LONG_WORDS` ItemVariationStore + 44-axis fvar/gvar/HVAR), and an
+in-memory fixture variant grafts a synthetic COLR v1 paint graph onto
+InterVariable and swaps its `avar` for a version-2 table so the
+corruption passes also reach those decoders. It reproduces deterministically and
 caught a `glyf` `endPtsOfContours` out-of-bounds read (a non-monotonic
 array under-counted `numPoints`, now rejected per §5.3.3).
 
@@ -1237,14 +1251,14 @@ array under-counted `numPoints`, now rejected per §5.3.3).
 - The `STAT` format-2 overlapping-range tie-break (§7.3.7.3) is left to
   caller policy; the full document-order record array is exposed
   unchanged.
-- The OpenType 1.9 "format 1" `DeltaSetIndexMap` layout (32-bit
-  `mapCount`), the `LONG_WORDS` ItemVariationData delta flavour, and
-  the rest of the `otvarcommonformats` chapter are **not staged** —
-  the "format 0" map is byte-identical to the staged ISO/IEC
-  14496-22:2019 §7.3.5.2 layout and decodes everywhere, while a
-  format-1 map in COLR v1 / avar v2 degrades to
+- A `DeltaSetIndexMap` with an unrecognised *future* format byte
+  (both defined formats — 0 with 16-bit `mapCount`, 1 with 32-bit
+  `mapCount` — decode per the staged OFF common-formats chapter, as
+  do `LONG_WORDS` ItemVariationData rows and NULL
+  `itemVariationDataOffsets` entries): COLR v1 / avar v2 degrade to
   no-variation behind `Font::colr_var_index_map_unsupported()` /
-  `Font::avar_axis_index_map_unsupported()`.
+  `Font::avar_axis_index_map_unsupported()` rather than rejecting
+  the font.
 
 ## Test fixtures
 
@@ -1258,6 +1272,13 @@ array under-counted `numPoints`, now rejected per §5.3.3).
   2022 (used to exercise GSUB feature-tagged single substitution
   for the `arab` script's positional joining forms) under the SIL
   Open Font License 1.1 (see `tests/fixtures/NOTO-ARABIC-OFL-LICENSE.txt`).
+- `tests/fixtures/test_glyphs-glyf_colr_1_variable.ttf` is the
+  Google Fonts color-fonts project's variable COLR v1 test font
+  (staged in the workspace docs as black-box comparison material) —
+  a purpose-built conformance-style font whose 44 design axes each
+  drive one paint-graph parameter, with a wire `LONG_WORDS`
+  ItemVariationStore — under the Apache License 2.0
+  (see `tests/fixtures/COLOR-FONTS-APACHE-LICENSE.txt`).
 
 ## License
 

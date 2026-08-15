@@ -87,7 +87,7 @@
 //! first 8 bytes preserved per the spec note in §7.3.6.1) parses
 //! correctly; the trailing bytes are ignored.
 
-use crate::parser::{read_i16, read_i8, read_u16, read_u32};
+use crate::parser::{read_i16, read_i32, read_i8, read_u16, read_u32};
 use crate::Error;
 
 /// One region axis as a `(start, peak, end)` triple in F2DOT14 (decoded
@@ -104,8 +104,10 @@ const MAX_VALUE_RECORDS: u16 = 2048;
 /// Bound on the IVS subtable count. The spec allows up to 65 536;
 /// fonts in practice ship 1.
 const MAX_IVD_SUBTABLES: u16 = 4096;
-/// Bound on per-IVS region count.
-const MAX_REGIONS: u16 = 4096;
+/// Bound on per-IVS region count. The staged common-formats chapter
+/// caps `regionCount` below 32,768 ("must be less than 32,768" —
+/// the high-order bit is reserved and must be cleared).
+const MAX_REGIONS: u16 = 0x7FFF;
 
 /// Parsed MVAR table.
 #[derive(Debug, Clone)]
@@ -132,16 +134,39 @@ pub struct ItemVariationStore {
     subtables: Vec<ItemVariationData>,
 }
 
+/// `wordDeltaCount` flag: "word" deltas are long (`int32`) and the
+/// short deltas `int16`, instead of `int16` + `int8`. Per the staged
+/// common-formats chapter this is only meaningful for top-level
+/// tables carrying variable 32-bit values (currently COLR).
+const LONG_WORDS_FLAG: u16 = 0x8000;
+/// `wordDeltaCount` mask for the count of "word"-representation
+/// deltas leading each delta-set row.
+const WORD_DELTA_COUNT_MASK: u16 = 0x7FFF;
+
 #[derive(Debug, Clone)]
 struct ItemVariationData {
     /// Indices into the parent `ItemVariationStore::regions` array,
     /// one per column of `delta_sets`.
     region_indexes: Vec<u16>,
     /// `delta_sets[row][col]` — the dense delta matrix. The split
-    /// between the leading `int16` columns and the trailing `int8`
-    /// columns from `shortDeltaCount` is consumed at parse time;
-    /// widened values are stored as `i32`.
+    /// between the leading "word" columns and the trailing "short"
+    /// columns from `wordDeltaCount` (`int16`+`int8`, or
+    /// `int32`+`int16` under the `LONG_WORDS` flag) is consumed at
+    /// parse time; widened values are stored as `i32`.
     delta_sets: Vec<Vec<i32>>,
+}
+
+impl ItemVariationData {
+    /// A placeholder for a NULL `itemVariationDataOffsets` entry —
+    /// the staged chapter's "there is no item variation data subtable
+    /// for that index" case. Any inner index against it resolves to
+    /// no variation.
+    fn null() -> Self {
+        Self {
+            region_indexes: Vec::new(),
+            delta_sets: Vec::new(),
+        }
+    }
 }
 
 impl MvarTable {
@@ -275,7 +300,14 @@ impl ItemVariationStore {
         for i in 0..ivd_count as usize {
             let off = off_base + i * 4;
             let sub_off = read_u32(bytes, off)? as usize;
-            if sub_off == 0 || sub_off > bytes.len() {
+            if sub_off == 0 {
+                // A NULL offset means "no item variation data subtable
+                // for that index" per the staged chapter; items using
+                // this outer index have no variation.
+                subtables.push(ItemVariationData::null());
+                continue;
+            }
+            if sub_off > bytes.len() {
                 return Err(Error::BadOffset);
             }
             subtables.push(ItemVariationData::parse(
@@ -368,7 +400,9 @@ fn parse_region_list(bytes: &[u8]) -> Result<Vec<Region>, Error> {
     let axis_count = read_u16(bytes, 0)?;
     let region_count = read_u16(bytes, 2)?;
     if region_count > MAX_REGIONS {
-        return Err(Error::BadStructure("IVS regionCount exceeds cap"));
+        // The high-order bit of regionCount is reserved and must be
+        // cleared (regionCount < 32,768).
+        return Err(Error::BadStructure("IVS regionCount reserved bit set"));
     }
     let stride = (axis_count as usize)
         .checked_mul(6)
@@ -402,13 +436,19 @@ impl ItemVariationData {
             return Err(Error::UnexpectedEof);
         }
         let item_count = read_u16(bytes, 0)?;
-        let short_delta_count = read_u16(bytes, 2)?;
+        let word_delta_count = read_u16(bytes, 2)?;
         let region_index_count = read_u16(bytes, 4)?;
+        // The wordDeltaCount field packs the LONG_WORDS flag (high
+        // bit) with the count of leading "word"-representation deltas
+        // per row. Without the flag rows mix int16 + int8; with it
+        // they mix int32 + int16.
+        let long_words = word_delta_count & LONG_WORDS_FLAG != 0;
+        let word_count = word_delta_count & WORD_DELTA_COUNT_MASK;
         // No explicit row/column cap is needed beyond the u16 width:
         // the trailing bounds check on `total` against `bytes.len()`
         // already rejects oversized matrices.
-        if short_delta_count > region_index_count {
-            return Err(Error::BadStructure("shortDeltaCount > regionIndexCount"));
+        if word_count > region_index_count {
+            return Err(Error::BadStructure("wordDeltaCount > regionIndexCount"));
         }
         let region_index_bytes = (region_index_count as usize)
             .checked_mul(2)
@@ -428,9 +468,12 @@ impl ItemVariationData {
             region_indexes.push(idx);
         }
 
-        let row_size = (short_delta_count as usize)
-            .checked_mul(2)
-            .and_then(|n| n.checked_add((region_index_count - short_delta_count) as usize))
+        // Per-row byte length: regionIndexCount + wordCount short
+        // units, doubled under LONG_WORDS ("2 x that amount").
+        let unit = if long_words { 2usize } else { 1 };
+        let row_size = (region_index_count as usize)
+            .checked_add(word_count as usize)
+            .and_then(|n| n.checked_mul(unit))
             .ok_or(Error::BadOffset)?;
         let total = (item_count as usize)
             .checked_mul(row_size)
@@ -444,12 +487,23 @@ impl ItemVariationData {
         for r in 0..item_count as usize {
             let row_start = header_end + r * row_size;
             let mut row = Vec::with_capacity(region_index_count as usize);
-            for c in 0..short_delta_count as usize {
-                row.push(read_i16(bytes, row_start + c * 2)? as i32);
+            let word_bytes = 2 * unit;
+            for c in 0..word_count as usize {
+                let off = row_start + c * word_bytes;
+                row.push(if long_words {
+                    read_i32(bytes, off)?
+                } else {
+                    read_i16(bytes, off)? as i32
+                });
             }
-            let i8_base = row_start + (short_delta_count as usize) * 2;
-            for c in 0..(region_index_count - short_delta_count) as usize {
-                row.push(read_i8(bytes, i8_base + c)? as i32);
+            let short_base = row_start + (word_count as usize) * word_bytes;
+            for c in 0..(region_index_count - word_count) as usize {
+                let off = short_base + c * unit;
+                row.push(if long_words {
+                    read_i16(bytes, off)? as i32
+                } else {
+                    read_i8(bytes, off)? as i32
+                });
             }
             delta_sets.push(row);
         }
@@ -719,6 +773,121 @@ mod tests {
         let mut b = build_single_axis_mvar();
         let ivd = 20 + 22;
         b[ivd + 6..ivd + 8].copy_from_slice(&5u16.to_be_bytes());
+        assert!(matches!(MvarTable::parse(&b), Err(Error::BadStructure(_))));
+    }
+
+    /// Build a standalone single-axis IVS blob with `region_count`
+    /// identical rising-edge regions (peak +1) and one IVD subtable
+    /// whose header + row bytes are supplied verbatim.
+    fn build_ivs_blob(region_count: u16, ivd_body: &[u8]) -> Vec<u8> {
+        let mut b = Vec::new();
+        b.extend_from_slice(&1u16.to_be_bytes()); // format
+        b.extend_from_slice(&12u32.to_be_bytes()); // vrlOff
+        b.extend_from_slice(&1u16.to_be_bytes()); // ivdCount
+        let ivd_off = 12 + 4 + region_count as u32 * 6;
+        b.extend_from_slice(&ivd_off.to_be_bytes()); // ivdOffsets[0]
+        b.extend_from_slice(&1u16.to_be_bytes()); // axisCount
+        b.extend_from_slice(&region_count.to_be_bytes()); // regionCount
+        for _ in 0..region_count {
+            b.extend_from_slice(&0i16.to_be_bytes()); // start
+            b.extend_from_slice(&16384i16.to_be_bytes()); // peak
+            b.extend_from_slice(&16384i16.to_be_bytes()); // end
+        }
+        b.extend_from_slice(ivd_body);
+        b
+    }
+
+    #[test]
+    fn long_words_flag_decodes_int32_deltas() {
+        // wordDeltaCount = 0x8001 (LONG_WORDS | 1): one int32 word
+        // delta, no shorts. The value exceeds the int16 range to
+        // prove the widened read.
+        let mut ivd = Vec::new();
+        ivd.extend_from_slice(&1u16.to_be_bytes()); // itemCount
+        ivd.extend_from_slice(&0x8001u16.to_be_bytes()); // wordDeltaCount
+        ivd.extend_from_slice(&1u16.to_be_bytes()); // regionIndexCount
+        ivd.extend_from_slice(&0u16.to_be_bytes()); // regionIndexes[0]
+        ivd.extend_from_slice(&100_000i32.to_be_bytes()); // row[0][0]
+        let blob = build_ivs_blob(1, &ivd);
+        let ivs = ItemVariationStore::parse(&blob).expect("parse");
+        let d = ivs.delta(0, 0, &[1.0]).expect("delta");
+        assert!((d - 100_000.0).abs() < 1e-3, "got {d}");
+        // Half-scalar interpolation still applies to long deltas.
+        let d = ivs.delta(0, 0, &[0.5]).expect("delta");
+        assert!((d - 50_000.0).abs() < 1e-3, "got {d}");
+    }
+
+    #[test]
+    fn long_words_flag_mixes_int32_and_int16() {
+        // Two regions; wordDeltaCount = LONG_WORDS | 1 → row is one
+        // int32 followed by one int16.
+        let mut ivd = Vec::new();
+        ivd.extend_from_slice(&1u16.to_be_bytes()); // itemCount
+        ivd.extend_from_slice(&0x8001u16.to_be_bytes()); // wordDeltaCount
+        ivd.extend_from_slice(&2u16.to_be_bytes()); // regionIndexCount
+        ivd.extend_from_slice(&0u16.to_be_bytes()); // regionIndexes[0]
+        ivd.extend_from_slice(&1u16.to_be_bytes()); // regionIndexes[1]
+        ivd.extend_from_slice(&70_000i32.to_be_bytes()); // word delta
+        ivd.extend_from_slice(&(-300i16).to_be_bytes()); // short delta
+        let blob = build_ivs_blob(2, &ivd);
+        let ivs = ItemVariationStore::parse(&blob).expect("parse");
+        // Both regions peak at +1 on the sole axis: both scalars 1.
+        let d = ivs.delta(0, 0, &[1.0]).expect("delta");
+        assert!((d - 69_700.0).abs() < 1e-3, "got {d}");
+    }
+
+    #[test]
+    fn word_count_exceeding_region_count_rejected() {
+        // wordDeltaCount = LONG_WORDS | 2 with regionIndexCount = 1:
+        // the masked count (2) must be <= regionIndexCount.
+        let mut ivd = Vec::new();
+        ivd.extend_from_slice(&1u16.to_be_bytes());
+        ivd.extend_from_slice(&0x8002u16.to_be_bytes());
+        ivd.extend_from_slice(&1u16.to_be_bytes());
+        ivd.extend_from_slice(&0u16.to_be_bytes());
+        ivd.extend_from_slice(&[0u8; 8]);
+        let blob = build_ivs_blob(1, &ivd);
+        assert!(matches!(
+            ItemVariationStore::parse(&blob),
+            Err(Error::BadStructure(_))
+        ));
+    }
+
+    #[test]
+    fn null_ivd_offset_means_no_variation() {
+        // ivdCount = 2 with offsets[1] = NULL: the store parses, and
+        // any inner index against outer 1 resolves to no variation.
+        let mut b = Vec::new();
+        b.extend_from_slice(&1u16.to_be_bytes()); // format
+        b.extend_from_slice(&16u32.to_be_bytes()); // vrlOff
+        b.extend_from_slice(&2u16.to_be_bytes()); // ivdCount
+        b.extend_from_slice(&26u32.to_be_bytes()); // ivdOffsets[0]
+        b.extend_from_slice(&0u32.to_be_bytes()); // ivdOffsets[1] = NULL
+        b.extend_from_slice(&1u16.to_be_bytes()); // axisCount
+        b.extend_from_slice(&1u16.to_be_bytes()); // regionCount
+        b.extend_from_slice(&0i16.to_be_bytes());
+        b.extend_from_slice(&16384i16.to_be_bytes());
+        b.extend_from_slice(&16384i16.to_be_bytes());
+        // IVD 0 at offset 26: one int16 delta of -100.
+        b.extend_from_slice(&1u16.to_be_bytes()); // itemCount
+        b.extend_from_slice(&1u16.to_be_bytes()); // wordDeltaCount
+        b.extend_from_slice(&1u16.to_be_bytes()); // regionIndexCount
+        b.extend_from_slice(&0u16.to_be_bytes()); // regionIndexes[0]
+        b.extend_from_slice(&(-100i16).to_be_bytes());
+        let ivs = ItemVariationStore::parse(&b).expect("parse");
+        assert_eq!(ivs.subtable_count(), 2);
+        assert!(ivs.delta(0, 0, &[1.0]).is_some());
+        assert!(ivs.delta(1, 0, &[1.0]).is_none(), "NULL subtable");
+        assert_eq!(ivs.region_index_count(1), Some(0));
+    }
+
+    #[test]
+    fn region_count_reserved_bit_rejected() {
+        // regionCount with the reserved high-order bit set must be
+        // rejected (regionCount < 32,768).
+        let mut b = build_single_axis_mvar();
+        let rl = 20 + 12;
+        b[rl + 2..rl + 4].copy_from_slice(&0x8001u16.to_be_bytes());
         assert!(matches!(MvarTable::parse(&b), Err(Error::BadStructure(_))));
     }
 }

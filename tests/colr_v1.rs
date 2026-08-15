@@ -995,11 +995,11 @@ fn var_index_map_routing_clamp_and_no_data_sentinel() {
     }
 }
 
-/// An OpenType 1.9 format-1 DeltaSetIndexMap (leading 0x01 format
-/// byte) is outside the staged layouts: the table still parses, the
-/// degradation is flagged, and variation deltas resolve to 0.
+/// A format-1 DeltaSetIndexMap (leading 0x01 format byte, 32-bit
+/// mapCount) decodes through the shared parser and routes variation
+/// deltas exactly like a format-0 map.
 #[test]
-fn format1_var_index_map_degrades_to_static() {
+fn format1_var_index_map_routes_deltas() {
     let mut b = B::default();
     b.u16(1);
     b.u16(0);
@@ -1013,12 +1013,67 @@ fn format1_var_index_map_degrades_to_static() {
     let ivs_slot = b.slot32();
     let ivs = push_ivs(&mut b, &[8192]);
     b.patch32(ivs_slot, ivs);
-    // Format-1 map: format byte 1, entryFormat 0x00, uint32 mapCount.
+    // Format-1 map: format byte 1, entryFormat 0x00 (1-byte entries,
+    // 1 inner bit), uint32 mapCount = 1, one entry (0, 0).
     let map = b.len() as u32;
     b.u8(1);
     b.u8(0x00);
     b.u32(1);
+    b.u8(0x00);
+    b.patch32(map_slot, map);
+    let bgl = b.len() as u32;
+    b.u32(1);
+    b.u16(1);
+    let slot = b.slot32();
+    b.patch32(bgl_slot, bgl);
+    let p = b.len() as u32;
+    b.u8(3);
+    b.u16(0);
+    b.i16(8192);
     b.u32(0);
+    b.patch32(slot, p - bgl);
+
+    let colr = ColrTable::parse(&b.v).expect("parse");
+    assert!(!colr.var_index_map_unsupported());
+    // At the region peak the map entry (0,0) selects delta row 0 =
+    // +8192 (+0.5): alpha 0.5 + 0.5 = 1.0.
+    let Some(Paint::Solid { alpha, .. }) = colr.paint(colr.base_glyph_paint(1).unwrap(), &[1.0])
+    else {
+        panic!("expected Solid");
+    };
+    assert!(approx(alpha, 1.0), "format-1 map delta applied: {alpha}");
+    // Static at the default instance.
+    let Some(Paint::Solid { alpha, .. }) = colr.paint(colr.base_glyph_paint(1).unwrap(), &[])
+    else {
+        panic!("expected Solid");
+    };
+    assert!(approx(alpha, 0.5));
+}
+
+/// A varIndexMap with an unrecognised future format byte still
+/// parses the font; the degradation is flagged, and variation deltas
+/// resolve to 0.
+#[test]
+fn unknown_format_var_index_map_degrades_to_static() {
+    let mut b = B::default();
+    b.u16(1);
+    b.u16(0);
+    b.u32(0);
+    b.u32(0);
+    b.u16(0);
+    let bgl_slot = b.slot32();
+    b.u32(0);
+    b.u32(0);
+    let map_slot = b.slot32();
+    let ivs_slot = b.slot32();
+    let ivs = push_ivs(&mut b, &[8192]);
+    b.patch32(ivs_slot, ivs);
+    // Unknown map format byte 2.
+    let map = b.len() as u32;
+    b.u8(2);
+    b.u8(0x00);
+    b.u32(1);
+    b.u8(0x00);
     b.patch32(map_slot, map);
     let bgl = b.len() as u32;
     b.u32(1);

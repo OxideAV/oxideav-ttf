@@ -25,22 +25,33 @@
 //!  16  / 4 / rsbMappingOffset             (relative to HVAR start, or 0)
 //! ```
 //!
-//! ## DeltaSetIndexMap layout (§7.3.5.2)
+//! ## DeltaSetIndexMap layout (staged OFF common-formats chapter)
+//!
+//! Two formats are defined — format 0 with a 16-bit `mapCount` and
+//! format 1 with a 32-bit `mapCount`:
 //!
 //! ```text
-//!   0 / 2 / entryFormat        (packed: 4 bits inner-bit-count-minus-1,
+//!   0 / 1 / format             (0 or 1)
+//!   1 / 1 / entryFormat        (packed: 4 bits inner-bit-count-minus-1,
 //!                                       2 bits entry-size-in-bytes-minus-1,
-//!                                       10 bits reserved)
-//!   2 / 2 / mapCount
-//!   4 / N / mapData[mapCount * entrySize]
+//!                                       2 bits reserved)
+//!   2 / 2 / mapCount           (format 0)   — or —
+//!   2 / 4 / mapCount           (format 1)
+//!   . / N / mapData[mapCount * entrySize]
 //! ```
+//!
+//! The chapter's compatibility note records that earlier revisions
+//! (including the ISO/IEC 14496-22:2019 §7.3.5.2 layout) defined a
+//! single 16-bit `entryFormat` field whose reserved high-order byte
+//! was zero — byte-identical to format 0 above, so both decode
+//! through one parser.
 //!
 //! Each packed entry, decoded as a big-endian integer of `entrySize`
 //! bytes (1..=4), splits into `(outerIndex, innerIndex)`:
 //!
 //! ```text
-//!   innerBits  = (entryFormat & 0x000F) + 1
-//!   entrySize  = ((entryFormat & 0x0030) >> 4) + 1
+//!   innerBits  = (entryFormat & 0x0F) + 1
+//!   entrySize  = ((entryFormat & 0x30) >> 4) + 1
 //!   outerIndex = entry >> innerBits
 //!   innerIndex = entry & ((1 << innerBits) - 1)
 //! ```
@@ -57,16 +68,18 @@
 //! a mapping table (otherwise the table cannot disambiguate which
 //! glyphs carry side-bearing variations).
 
-use crate::parser::{read_u16, read_u32};
+use crate::parser::{read_u16, read_u32, read_u8};
 use crate::tables::mvar::ItemVariationStore;
 use crate::Error;
 
-/// Reserved bits in `entryFormat`. Per §7.3.5.2 the high 10 bits are
-/// reserved and must be zero; a non-zero value flags a malformed or
-/// future-version map.
-const ENTRY_FORMAT_RESERVED_MASK: u16 = 0xFFC0;
-const ENTRY_FORMAT_INNER_BITS_MASK: u16 = 0x000F;
-const ENTRY_FORMAT_SIZE_MASK: u16 = 0x0030;
+/// Reserved bits in the (8-bit) `entryFormat` field. Per the staged
+/// common-formats chapter bits 0xC0 are reserved and must be zero; a
+/// non-zero value flags a malformed or future-revision map.
+const ENTRY_FORMAT_RESERVED_MASK: u8 = 0xC0;
+/// `INNER_INDEX_BIT_COUNT_MASK` — count of inner-index bits minus 1.
+const ENTRY_FORMAT_INNER_BITS_MASK: u8 = 0x0F;
+/// `MAP_ENTRY_SIZE_MASK` — entry size in bytes minus 1.
+const ENTRY_FORMAT_SIZE_MASK: u8 = 0x30;
 
 /// Parsed HVAR table.
 #[derive(Debug, Clone)]
@@ -86,6 +99,8 @@ pub struct HvarTable {
 /// entries as `(outer, inner)` pairs of `u16` for efficient lookup.
 #[derive(Debug, Clone)]
 pub struct DeltaSetIndexMap {
+    /// The wire format (0 = 16-bit `mapCount`, 1 = 32-bit `mapCount`).
+    format: u8,
     entries: Vec<(u16, u16)>,
 }
 
@@ -225,39 +240,47 @@ fn resolve_with_map(glyph_id: u16, map: &DeltaSetIndexMap) -> (u16, u16) {
 
 impl DeltaSetIndexMap {
     /// Parse a `DeltaSetIndexMap` from `bytes` (offset 0 at the
-    /// entryFormat field). Validates entryFormat reserved bits and
-    /// bounds-checks the trailing `mapData` array.
+    /// leading `format` byte). Both defined formats decode: format 0
+    /// (16-bit `mapCount` — byte-identical to the pre-subdivision
+    /// single-`uint16`-`entryFormat` layout of ISO/IEC 14496-22:2019
+    /// §7.3.5.2, whose reserved high byte was zero) and format 1
+    /// (32-bit `mapCount`). Validates the `format` byte and the
+    /// entryFormat reserved bits, and bounds-checks the trailing
+    /// `mapData` array.
     pub fn parse(bytes: &[u8]) -> Result<Self, Error> {
         if bytes.len() < 4 {
             return Err(Error::UnexpectedEof);
         }
-        let entry_format = read_u16(bytes, 0)?;
-        let map_count = read_u16(bytes, 2)?;
+        let format = read_u8(bytes, 0)?;
+        let entry_format = read_u8(bytes, 1)?;
+        let (map_count, header_len) = match format {
+            0 => (read_u16(bytes, 2)? as usize, 4usize),
+            1 => (read_u32(bytes, 2)? as usize, 6usize),
+            _ => {
+                return Err(Error::BadStructure("DeltaSetIndexMap: unrecognised format"));
+            }
+        };
 
         if entry_format & ENTRY_FORMAT_RESERVED_MASK != 0 {
             return Err(Error::BadStructure(
-                "HVAR DeltaSetIndexMap entryFormat reserved bits set",
+                "DeltaSetIndexMap entryFormat reserved bits set",
             ));
         }
-        let inner_bits = (entry_format & ENTRY_FORMAT_INNER_BITS_MASK) + 1;
+        let inner_bits = u32::from(entry_format & ENTRY_FORMAT_INNER_BITS_MASK) + 1;
         let entry_size = (((entry_format & ENTRY_FORMAT_SIZE_MASK) >> 4) + 1) as usize;
         debug_assert!((1..=4).contains(&entry_size));
 
-        let need = 4usize
-            .checked_add(
-                (map_count as usize)
-                    .checked_mul(entry_size)
-                    .ok_or(Error::BadOffset)?,
-            )
+        let need = header_len
+            .checked_add(map_count.checked_mul(entry_size).ok_or(Error::BadOffset)?)
             .ok_or(Error::BadOffset)?;
         if need > bytes.len() {
             return Err(Error::UnexpectedEof);
         }
 
         let inner_mask: u32 = (1u32 << inner_bits) - 1;
-        let mut entries = Vec::with_capacity(map_count as usize);
-        for i in 0..map_count as usize {
-            let off = 4 + i * entry_size;
+        let mut entries = Vec::with_capacity(map_count);
+        for i in 0..map_count {
+            let off = header_len + i * entry_size;
             let mut raw: u32 = 0;
             for b in &bytes[off..off + entry_size] {
                 raw = (raw << 8) | *b as u32;
@@ -266,7 +289,13 @@ impl DeltaSetIndexMap {
             let inner = (raw & inner_mask) as u16;
             entries.push((outer, inner));
         }
-        Ok(Self { entries })
+        Ok(Self { format, entries })
+    }
+
+    /// The map's wire format: 0 (16-bit `mapCount`) or 1 (32-bit
+    /// `mapCount`).
+    pub fn format(&self) -> u8 {
+        self.format
     }
 
     /// Number of glyph-ID entries in the map.
@@ -441,15 +470,74 @@ mod tests {
 
     #[test]
     fn entry_format_reserved_bits_rejected() {
-        // Build a tiny map and tamper with entryFormat.
+        // Build a tiny format-0 map and set a reserved entryFormat
+        // bit (0xC0 mask).
         let mut data = vec![0u8; 4 + 2];
-        data[0..2].copy_from_slice(&0x4013u16.to_be_bytes()); // reserved bit set
+        data[0] = 0x00; // format 0
+        data[1] = 0x40 | 0x13; // reserved bit + 2-byte entries
         data[2..4].copy_from_slice(&1u16.to_be_bytes());
         // Trailing entry data = 2 bytes, fine.
         assert!(matches!(
             DeltaSetIndexMap::parse(&data),
             Err(Error::BadStructure(_))
         ));
+    }
+
+    #[test]
+    fn unrecognised_map_format_rejected() {
+        // A future format byte (2) must be rejected, not misread.
+        let mut data = vec![0u8; 4 + 2];
+        data[0] = 0x02;
+        data[1] = 0x13;
+        data[2..4].copy_from_slice(&1u16.to_be_bytes());
+        assert!(matches!(
+            DeltaSetIndexMap::parse(&data),
+            Err(Error::BadStructure(_))
+        ));
+    }
+
+    #[test]
+    fn format1_map_decodes_with_u32_count() {
+        // Format 1: uint8 format, uint8 entryFormat, uint32 mapCount.
+        // entryFormat 0x13 → 2-byte entries, 4 inner bits.
+        let mut data = Vec::new();
+        data.push(0x01);
+        data.push(0x13);
+        data.extend_from_slice(&3u32.to_be_bytes());
+        // Entries: raw >> 4 = outer, raw & 0xF = inner.
+        for raw in [0x0012u16, 0x0034, 0x00A7] {
+            data.extend_from_slice(&raw.to_be_bytes());
+        }
+        let m = DeltaSetIndexMap::parse(&data).expect("parse");
+        assert_eq!(m.format(), 1);
+        assert_eq!(m.len(), 3);
+        assert_eq!(m.entries()[0], (0x1, 0x2));
+        assert_eq!(m.entries()[1], (0x3, 0x4));
+        assert_eq!(m.entries()[2], (0xA, 0x7));
+    }
+
+    #[test]
+    fn format1_map_truncated_rejected() {
+        // Format-1 header claims more entries than the data supplies.
+        let mut data = Vec::new();
+        data.push(0x01);
+        data.push(0x13);
+        data.extend_from_slice(&4u32.to_be_bytes());
+        data.extend_from_slice(&[0u8; 6]); // only 3 of 4 entries
+        assert!(matches!(
+            DeltaSetIndexMap::parse(&data),
+            Err(Error::UnexpectedEof)
+        ));
+    }
+
+    #[test]
+    fn format0_map_reports_format_zero() {
+        let mut data = vec![0u8; 4 + 2];
+        data[1] = 0x13;
+        data[2..4].copy_from_slice(&1u16.to_be_bytes());
+        let m = DeltaSetIndexMap::parse(&data).expect("parse");
+        assert_eq!(m.format(), 0);
+        assert_eq!(m.len(), 1);
     }
 
     #[test]
