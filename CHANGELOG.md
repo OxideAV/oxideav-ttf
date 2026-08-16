@@ -7,6 +7,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.8](https://github.com/OxideAV/oxideav-ttf/compare/v0.1.7...v0.1.8) - 2026-08-15
+
+### Other
+
+- repeated point numbers accumulate cumulatively in the IUP path
+- OFF common-formats variation-data completion: DeltaSetIndexMap format 1, LONG_WORDS deltas, NULL subtable offsets
+- env-scalable budgets; scale-100 release campaign clean
+- boundedness validator + effective-colour resolution
+- document COLR v1 paint-graph + avar v2 support; drop both from the gaps list
+- corrupt the COLR v1 + avar v2 decoders too
+- implement version 2 — cross-axis remap via axisIndexMap + varStore
+- Font-level v1 paint-graph accessors at the live variation instance
+- decode the version-1 paint graph (all 32 Paint formats + variation scheme)
+- doc(hidden) the internal public surface for semver-checks
+- ttf README: document hostile-input hardening; drop stale CFF gap
+- add deterministic hostile-input hardening harness
+- ttf glyf: reject non-monotonic endPtsOfContours (OOB fix, §5.3.3)
+- add CI / crates.io / docs.rs / MIT-license badges
+- ttf hhea + maxp: full field decode (§5.2.4 / §5.2.5)
+- ttf head: full field decode (§5.2.1)
+- ttf OS/2: full field decode across versions 0..5 (§5.2.3)
+- ttf glyf: honour composite USE_MY_METRICS for advance/LSB (§5.3.4)
+- expose fpgm / prep hinting programs raw (§5.3.3)
+- ttf MERG: merge table structural decode (§5.7.5)
+- ttf DSIG: digital signature table structural decode (§8.x)
+- ttf kern: Format 2 — class-based two-dimensional array (§5.7.3)
+- ttf EBDT: composite glyph bitmaps — formats 8 & 9 (§5.6.2.2.8/9)
+- ttf README: document MATH variable-font value resolution (§6.3.6.2.1)
+- ttf MATH: Font-level variation accessors for MATH values
+- ttf MATH: variable-font MathValueRecord resolution (§6.3.6.2.1)
+- variable-font BASE baseline coordinates — BaseCoordFormat3 VariationIndex resolution
+- README — document variable-font GPOS/GDEF VariationIndex resolution
+- CFF2 variable-glyph blend interpolation test + doc correction
+- variable-font GPOS mark-to-ligature — AnchorFormat3 VariationIndex resolution
+- Font-level variable-font GPOS/GDEF accessors threading the active instance
+- variable-font GDEF ligature carets — CaretValueFormat3 VariationIndex resolution
+- variable-font GPOS kerning — PairPos xAdvance VariationIndex resolution
+- variable-font GPOS attachment — AnchorFormat3 VariationIndex resolution
+- variable-font GPOS — Device/VariationIndex decoder + LookupType-1 variation path
+- CFF reverse glyph-name lookup + iteration
+- CFF glyph-name resolution — charset SID -> PostScript name
+- CFF2 per-instance variation — blend interpolates at any instance
+- CFF2 table — variable PostScript outlines (default instance)
+- JSTF table — justification suggestions (§6.3.5)
+- MATH table — mathematical typesetting parameters (§6.3.6)
+- CFF table — Type 2 charstring interpreter for PostScript outlines
+- mark-attachment scans honour the lookupFlag skip filter
+- shaper honours full lookupFlag skip filter on multi-glyph matches
+- unified lookupFlag skip predicate (§2) + markFilteringSet accessors
+- fused varied-metric accessors (HVAR/VVAR + base hmtx/vmtx)
+- cvar CVT-variations table + cvt Control Value Table access
+- CPAL v1 palette + entry label arrays (ISO/IEC 14496-22 §5.7.11)
+- ergonomic variation-instance API (set axis by tag, named instances)
+- inferred-delta (IUP) interpolation for simple variable glyphs
+- reverse glyph-name lookup (name -> gid) across all versions
+- honour GSUB/GPOS lookupFlag (IGNORE_MARKS-aware ligation)
+- OpenType GSUB/GPOS shaping pipeline (Font::shape integration capstone)
+- SVG table (§5.5.1 Amd.1:2020): per-glyph-range vector colour-glyph documents
+- gvar composite-glyph variation (§7.3.4.3 component+phantom-point model)
+- resolve StandardMac glyph names via 258-name table (#1277 closed)
+- decode EBSC embedded bitmap scaling table (ISO/IEC 14496-22:2019 §5.6.4)
+- ScriptList/FeatureList walker + v1.1 FeatureVariations wiring
+- refresh to current status, drop per-round changelog cruft
+
 ### Added
 
 - **OFF common-formats variation-data completion: `DeltaSetIndexMap`
