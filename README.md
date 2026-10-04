@@ -1197,6 +1197,7 @@ if vfont.is_variable() {
     let bold = vfont.glyph_outline(vfont.glyph_index('A').unwrap())?;
     let _ = bold; // gvar-deltad + IUP-completed outline at this instance
 }
+# Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
 ## Shaping coverage
