@@ -29,8 +29,8 @@
 //! We accept versions 1.0 AND 2.0; the version-2-only DSIG (digital
 //! signature) trailer is ignored — we never validate signatures.
 
-use crate::parser::{read_u16, read_u32};
 use crate::Error;
+use crate::parser::{read_u16, read_u32};
 
 /// Magic four-byte tag that identifies the TTC container.
 pub const TTC_MAGIC: u32 = 0x7474_6366; // 'ttcf' (big-endian)

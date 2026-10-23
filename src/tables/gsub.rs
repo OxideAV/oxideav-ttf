@@ -46,9 +46,9 @@
 //! §"Common Table Formats" (ScriptList / FeatureList / LookupList),
 //! Apple TrueType Reference §"GSUB", ISO/IEC 14496-22 §6 (OFF).
 
+use crate::Error;
 use crate::parser::{read_u16, read_u32};
 use crate::tables::gdef::{class_def_lookup, coverage_lookup, lookup_table_slice};
-use crate::Error;
 
 const LOOKUP_SINGLE_SUBST: u16 = 1;
 const LOOKUP_MULTIPLE_SUBST: u16 = 2;
@@ -163,10 +163,11 @@ impl<'a> GsubTable<'a> {
             }
             let mut kind = read_u16(lookup, 0).ok()?;
             let sub_count = read_u16(lookup, 4).ok()?;
-            if kind == LOOKUP_EXTENSION_SUBST && sub_count > 0 {
-                if let Some(t) = peek_extension_type(lookup) {
-                    kind = t;
-                }
+            if kind == LOOKUP_EXTENSION_SUBST
+                && sub_count > 0
+                && let Some(t) = peek_extension_type(lookup)
+            {
+                kind = t;
             }
             Some((i, kind, sub_count))
         })
@@ -424,14 +425,14 @@ impl<'a> GsubTable<'a> {
             ];
             // §6.2.9 substitution: if this feature index is overridden,
             // use the alternate feature's lookup-index list directly.
-            if let Some(s) = subst {
-                if let Some(idxs) = s.lookup_indices_for_feature(fi) {
-                    into.push(GsubFeature {
-                        tag,
-                        lookup_indices: idxs,
-                    });
-                    return;
-                }
+            if let Some(s) = subst
+                && let Some(idxs) = s.lookup_indices_for_feature(fi)
+            {
+                into.push(GsubFeature {
+                    tag,
+                    lookup_indices: idxs,
+                });
+                return;
             }
             let foff = match read_u16(feature_list, r + 4) {
                 Ok(v) => v as usize,
@@ -972,10 +973,10 @@ impl<'a> GsubTable<'a> {
             };
             // ExtensionSubst (LookupType 7) at the nested-lookup
             // top-level: peek at the first sub-table's effective type.
-            if nested_kind == LOOKUP_EXTENSION_SUBST {
-                if let Some(t) = peek_extension_type(lookup) {
-                    nested_kind = t;
-                }
+            if nested_kind == LOOKUP_EXTENSION_SUBST
+                && let Some(t) = peek_extension_type(lookup)
+            {
+                nested_kind = t;
             }
             match nested_kind {
                 LOOKUP_SINGLE_SUBST => {
@@ -988,22 +989,22 @@ impl<'a> GsubTable<'a> {
                     let tail = &out[phys..];
                     if let Some((lig_glyph, consumed)) =
                         self.apply_lookup_type_4(rec.lookup_index, tail)
+                        && consumed >= 1
+                        && phys + consumed <= out.len()
                     {
-                        if consumed >= 1 && phys + consumed <= out.len() {
-                            // Replace `consumed` glyphs at `phys` with
-                            // a single ligature glyph.
-                            out.splice(phys..phys + consumed, std::iter::once(lig_glyph));
-                            // Collapse the consumed logical indices
-                            // and shift later positions left.
-                            let removed = consumed - 1;
-                            // Mark consumed logical slots None.
-                            for slot in logical_to_phys.iter_mut().skip(seq_idx + 1) {
-                                if let Some(p) = *slot {
-                                    if p < phys + consumed {
-                                        *slot = None;
-                                    } else {
-                                        *slot = Some(p - removed);
-                                    }
+                        // Replace `consumed` glyphs at `phys` with
+                        // a single ligature glyph.
+                        out.splice(phys..phys + consumed, std::iter::once(lig_glyph));
+                        // Collapse the consumed logical indices
+                        // and shift later positions left.
+                        let removed = consumed - 1;
+                        // Mark consumed logical slots None.
+                        for slot in logical_to_phys.iter_mut().skip(seq_idx + 1) {
+                            if let Some(p) = *slot {
+                                if p < phys + consumed {
+                                    *slot = None;
+                                } else {
+                                    *slot = Some(p - removed);
                                 }
                             }
                         }
@@ -2187,8 +2188,8 @@ mod tests {
         cov1.extend_from_slice(&22u16.to_be_bytes());
         let mut sub1 = Vec::new();
         sub1.extend_from_slice(&2u16.to_be_bytes()); // format
-                                                     // header is 6 bytes (format + cov + count); we put coverage AFTER the
-                                                     // substitute-array. substituteGlyphIDs[3] = 6 bytes.
+        // header is 6 bytes (format + cov + count); we put coverage AFTER the
+        // substitute-array. substituteGlyphIDs[3] = 6 bytes.
         let cov1_off_in_sub1: u16 = 6 + 6; // = 12
         sub1.extend_from_slice(&cov1_off_in_sub1.to_be_bytes());
         sub1.extend_from_slice(&3u16.to_be_bytes()); // glyphCount
@@ -2480,7 +2481,7 @@ mod tests {
         rule.extend_from_slice(&1u16.to_be_bytes()); // backtrackGlyphCount
         rule.extend_from_slice(&1u16.to_be_bytes()); // backtrack[0] = gid 1
         rule.extend_from_slice(&1u16.to_be_bytes()); // inputGlyphCount = 1
-                                                     // (no extra inputs)
+        // (no extra inputs)
         rule.extend_from_slice(&1u16.to_be_bytes()); // lookaheadGlyphCount
         rule.extend_from_slice(&99u16.to_be_bytes()); // lookahead[0]
         rule.extend_from_slice(&1u16.to_be_bytes()); // substCount
@@ -2708,7 +2709,7 @@ mod tests {
         bt_cd.extend_from_slice(&1u16.to_be_bytes()); // startGlyph
         bt_cd.extend_from_slice(&1u16.to_be_bytes()); // count
         bt_cd.extend_from_slice(&2u16.to_be_bytes()); // class
-                                                      // in: gid 10 → class 1
+        // in: gid 10 → class 1
         let mut in_cd = Vec::new();
         in_cd.extend_from_slice(&1u16.to_be_bytes());
         in_cd.extend_from_slice(&10u16.to_be_bytes());
@@ -3005,7 +3006,7 @@ mod tests {
         lookup.extend_from_slice(&1u16.to_be_bytes()); // subTableCount
         lookup.extend_from_slice(&10u16.to_be_bytes()); // subtableOffsets[0]
         lookup.extend_from_slice(&3u16.to_be_bytes()); // markFilteringSet
-                                                       // pad to the subtable offset (10) with two dummy bytes.
+        // pad to the subtable offset (10) with two dummy bytes.
         lookup.extend_from_slice(&[0u8, 0u8]);
 
         let mut lookup_list = Vec::new();

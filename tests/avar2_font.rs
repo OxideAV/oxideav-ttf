@@ -123,10 +123,11 @@ fn avar1_fixture_behaviour_is_unchanged() {
     let inter = fixture();
     let mut font = Font::from_bytes(&inter).expect("parse fixture");
     assert!(!font.avar_axis_index_map_unsupported());
-    assert!(font
-        .normalised_coords()
-        .iter()
-        .all(|c| c.abs() < f32::EPSILON));
+    assert!(
+        font.normalised_coords()
+            .iter()
+            .all(|c| c.abs() < f32::EPSILON)
+    );
     let axes = font.variation_axes();
     let wght = axes.iter().position(|a| &a.tag == b"wght").unwrap();
     let wght_max = axes[wght].max;

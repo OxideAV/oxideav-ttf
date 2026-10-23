@@ -29,7 +29,7 @@
 //! correct number of trailing mask bytes. Hint geometry is not used for
 //! outline reconstruction, so the stem values are counted and discarded.
 
-use super::{subr_bias, Index};
+use super::{Index, subr_bias};
 use crate::outline::{Contour, Point, TtOutline};
 use crate::parser::read_u8;
 

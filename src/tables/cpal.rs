@@ -47,8 +47,8 @@
 //! +3  alpha  uint8   (0 = transparent, 255 = opaque, NOT pre-multiplied)
 //! ```
 
-use crate::parser::{read_u16, read_u32};
 use crate::Error;
+use crate::parser::{read_u16, read_u32};
 
 /// Decoded CPAL v0/v1 header. Colour records are decoded lazily by
 /// [`CpalTable::color`] / [`CpalTable::palette`] — we only validate
@@ -400,8 +400,8 @@ mod tests {
         bytes[16..20].copy_from_slice(&(types_off as u32).to_be_bytes()); // paletteTypesOffset
         bytes[20..24].copy_from_slice(&0u32.to_be_bytes()); // labels = absent
         bytes[24..28].copy_from_slice(&0u32.to_be_bytes()); // entry labels = absent
-                                                            // colour records — leave zeroed (we don't read them in this test)
-                                                            // paletteTypes
+        // colour records — leave zeroed (we don't read them in this test)
+        // paletteTypes
         bytes[types_off..types_off + 4].copy_from_slice(&0x0001u32.to_be_bytes()); // light
         bytes[types_off + 4..types_off + 8].copy_from_slice(&0x0002u32.to_be_bytes()); // dark
         bytes

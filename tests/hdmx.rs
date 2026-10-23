@@ -60,7 +60,7 @@ fn build_minimal_sfnt(tables: &[(&[u8; 4], Vec<u8>)]) -> Vec<u8> {
     for (tag, payload) in tables {
         records.push((*tag, payload_offset as u32, payload.len() as u32));
         payload_offset += payload.len();
-        while payload_offset % 4 != 0 {
+        while !payload_offset.is_multiple_of(4) {
             payload_offset += 1;
         }
     }

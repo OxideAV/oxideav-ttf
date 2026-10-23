@@ -70,8 +70,8 @@
 //! reach `Font::metric_variation_delta(tag)` to fold the MVAR
 //! contribution into the value before use.
 
-use crate::parser::{read_i16, read_u16, read_u32};
 use crate::Error;
+use crate::parser::{read_i16, read_u16, read_u32};
 
 /// `vhea` version 1.0 marker (Fixed `0x00010000`).
 pub const VHEA_VERSION_1_0: u32 = 0x0001_0000;
@@ -212,8 +212,8 @@ mod tests {
         b[18..20].copy_from_slice(&(0i16).to_be_bytes()); // caretSlopeRise
         b[20..22].copy_from_slice(&(1i16).to_be_bytes()); // caretSlopeRun
         b[22..24].copy_from_slice(&(0i16).to_be_bytes()); // caretOffset
-                                                          // 24..32: 4 reserved int16 already zero.
-                                                          // 32..34: metricDataFormat already zero.
+        // 24..32: 4 reserved int16 already zero.
+        // 32..34: metricDataFormat already zero.
         b[34..36].copy_from_slice(&num_metrics.to_be_bytes());
         b
     }

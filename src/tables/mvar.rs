@@ -87,8 +87,8 @@
 //! first 8 bytes preserved per the spec note in §7.3.6.1) parses
 //! correctly; the trailing bytes are ignored.
 
-use crate::parser::{read_i16, read_i32, read_i8, read_u16, read_u32};
 use crate::Error;
+use crate::parser::{read_i8, read_i16, read_i32, read_u16, read_u32};
 
 /// One region axis as a `(start, peak, end)` triple in F2DOT14 (decoded
 /// to f32). One per variation axis declared in `fvar`.
@@ -581,7 +581,7 @@ mod tests {
 
         // MVAR header
         b[0..2].copy_from_slice(&1u16.to_be_bytes()); // major
-                                                      // minor / reserved = 0
+        // minor / reserved = 0
         b[6..8].copy_from_slice(&8u16.to_be_bytes()); // valueRecordSize
         b[8..10].copy_from_slice(&1u16.to_be_bytes()); // valueRecordCount
         b[10..12].copy_from_slice(&20u16.to_be_bytes()); // ivsOffset
@@ -602,7 +602,7 @@ mod tests {
         let rl = ivs + 12;
         b[rl..rl + 2].copy_from_slice(&1u16.to_be_bytes()); // axisCount
         b[rl + 2..rl + 4].copy_from_slice(&1u16.to_be_bytes()); // regionCount
-                                                                // axis 0: start=0, peak=16384 (=+1), end=16384
+        // axis 0: start=0, peak=16384 (=+1), end=16384
         b[rl + 4..rl + 6].copy_from_slice(&0i16.to_be_bytes());
         b[rl + 6..rl + 8].copy_from_slice(&16384i16.to_be_bytes());
         b[rl + 8..rl + 10].copy_from_slice(&16384i16.to_be_bytes());
@@ -702,8 +702,8 @@ mod tests {
         b[12..16].copy_from_slice(b"hasc");
         b[16..18].copy_from_slice(&0u16.to_be_bytes()); // outer
         b[18..20].copy_from_slice(&0u16.to_be_bytes()); // inner
-                                                        // bytes 20..22 are the unknown trailing bytes; we leave them zero.
-                                                        // IVS at ivs_off
+        // bytes 20..22 are the unknown trailing bytes; we leave them zero.
+        // IVS at ivs_off
         let ivs = ivs_off as usize;
         b[ivs..ivs + 2].copy_from_slice(&1u16.to_be_bytes());
         b[ivs + 2..ivs + 6].copy_from_slice(&12u32.to_be_bytes()); // vrlOff

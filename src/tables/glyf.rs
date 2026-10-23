@@ -7,10 +7,10 @@
 //!
 //! Spec: Microsoft OpenType `glyf` (TrueType outlines and composites).
 
-use crate::outline::{derive_bbox, BBox, Contour, Point, TtOutline};
-use crate::parser::{read_i16, read_u16, read_u8};
-use crate::tables::loca::LocaTable;
 use crate::Error;
+use crate::outline::{BBox, Contour, Point, TtOutline, derive_bbox};
+use crate::parser::{read_i16, read_u8, read_u16};
+use crate::tables::loca::LocaTable;
 
 const MAX_COMPOSITE_DEPTH: u8 = 16;
 
@@ -647,7 +647,7 @@ mod tests {
         g.extend_from_slice(&33u16.to_be_bytes()); // endPts[0]
         g.extend_from_slice(&5u16.to_be_bytes()); // endPts[1] < endPts[0]
         g.extend_from_slice(&0u16.to_be_bytes()); // instructionLength
-                                                  // (guard fires before any flags/coords are consulted)
+        // (guard fires before any flags/coords are consulted)
 
         let mut loca_bytes = Vec::new();
         loca_bytes.extend_from_slice(&0u32.to_be_bytes());
@@ -849,7 +849,7 @@ mod tests {
     #[test]
     fn scaled_component_offset_transforms_the_offset_vector() {
         let triangle = build_triangle(); // points (0,0) (100,0) (50,100)
-                                         // SCALED form.
+        // SCALED form.
         let scaled = build_scaled_offset_composite(0, true);
         let glyf_bytes: Vec<u8> = [triangle.as_slice(), scaled.as_slice()].concat();
         let tri_len = triangle.len() as u32;
@@ -915,8 +915,8 @@ mod tests {
         composite.extend_from_slice(&0u16.to_be_bytes()); // child = glyph 0
         composite.push(0); // arg1 = 0
         composite.push(0); // arg2 = 0
-                           // Component 2: point-matching. arg1 = parent point 1, arg2 = child
-                           // point 0. No ARGS_ARE_XY_VALUES bit -> point match.
+        // Component 2: point-matching. arg1 = parent point 1, arg2 = child
+        // point 0. No ARGS_ARE_XY_VALUES bit -> point match.
         let c2_flags = 0u16; // no XY-values, no more components
         composite.extend_from_slice(&c2_flags.to_be_bytes());
         composite.extend_from_slice(&0u16.to_be_bytes()); // child = glyph 0
@@ -1032,7 +1032,7 @@ mod tests {
         g.extend_from_slice(&0u16.to_be_bytes()); // child = glyph 0
         g.extend_from_slice(&0i16.to_be_bytes()); // arg1
         g.extend_from_slice(&0i16.to_be_bytes()); // arg2
-                                                  // Component 1: XY offset (c1x, c1y), last component.
+        // Component 1: XY offset (c1x, c1y), last component.
         let c1 = C_ARGS_ARE_XY_VALUES | C_ARG_1_AND_2_ARE_WORDS;
         g.extend_from_slice(&c1.to_be_bytes());
         g.extend_from_slice(&0u16.to_be_bytes()); // child = glyph 0

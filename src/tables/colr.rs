@@ -78,10 +78,10 @@
 //! parses the font, but its variation deltas resolve to 0 and
 //! [`ColrTable::var_index_map_unsupported`] reports the degradation.
 
-use crate::parser::{read_i16, read_u16, read_u24, read_u32, read_u8};
+use crate::Error;
+use crate::parser::{read_i16, read_u8, read_u16, read_u24, read_u32};
 use crate::tables::hvar::DeltaSetIndexMap;
 use crate::tables::mvar::ItemVariationStore;
-use crate::Error;
 
 /// One layer of a version-0 colour glyph: an outline-glyph id plus a
 /// CPAL palette-entry index. `palette_index == 0xFFFF` is the spec's

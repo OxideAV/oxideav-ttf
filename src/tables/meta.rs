@@ -98,8 +98,8 @@
 //! the on-wire format and pulling them into the parser would
 //! couple it to a moving target.
 
-use crate::parser::{read_u32, read_u8};
 use crate::Error;
+use crate::parser::{read_u8, read_u32};
 
 /// On-wire version of the metadata table per §5.7.6.1. The spec
 /// fixes the field at 1; any other value is rejected.
@@ -323,7 +323,7 @@ impl<'a> ScriptLangTag<'a> {
     /// Subtags split on the `-` separator. Per §5.7.6.3 the script
     /// subtag is mandatory; the parser does not assume a position,
     /// so this is the raw split.
-    pub fn subtags(&self) -> impl Iterator<Item = &'a str> {
+    pub fn subtags(&self) -> impl Iterator<Item = &'a str> + use<'a> {
         self.raw.split('-')
     }
 

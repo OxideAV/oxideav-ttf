@@ -41,9 +41,9 @@
 //! Outline reconstruction lives in [`charstring`]; this module owns the
 //! container walk and exposes [`CffTable::glyph_outline`].
 
-use crate::outline::TtOutline;
-use crate::parser::{read_u16, read_u8};
 use crate::Error;
+use crate::outline::TtOutline;
+use crate::parser::{read_u8, read_u16};
 
 pub mod charstring;
 pub mod strings;

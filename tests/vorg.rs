@@ -67,7 +67,7 @@ fn build_minimal_sfnt(tables: &[(&[u8; 4], Vec<u8>)]) -> Vec<u8> {
         payload_offset += payload.len();
         // 4-byte alignment between tables (the spec recommends it; the
         // parser does not require it but real-world fonts always do).
-        while payload_offset % 4 != 0 {
+        while !payload_offset.is_multiple_of(4) {
             payload_offset += 1;
         }
     }
@@ -92,9 +92,9 @@ fn make_head(units_per_em: u16, index_to_loc_format: i16) -> Vec<u8> {
     let mut h = vec![0u8; 54];
     h[0..4].copy_from_slice(&0x00010000u32.to_be_bytes()); // version
     h[4..8].copy_from_slice(&0x00010000u32.to_be_bytes()); // fontRevision
-                                                           // checksumAdjustment (8..12) = 0
+    // checksumAdjustment (8..12) = 0
     h[12..16].copy_from_slice(&0x5F0F3CF5u32.to_be_bytes()); // magicNumber
-                                                             // flags (16..18), unitsPerEm (18..20)
+    // flags (16..18), unitsPerEm (18..20)
     h[18..20].copy_from_slice(&units_per_em.to_be_bytes());
     // created/modified left zero
     // xMin/yMin/xMax/yMax (36..44) left zero
@@ -109,7 +109,7 @@ fn make_head(units_per_em: u16, index_to_loc_format: i16) -> Vec<u8> {
 fn make_hhea(num_h_metrics: u16) -> Vec<u8> {
     let mut h = vec![0u8; 36];
     h[0..4].copy_from_slice(&0x00010000u32.to_be_bytes()); // version
-                                                           // metricDataFormat at 32..34 = 0; numberOfHMetrics at 34..36.
+    // metricDataFormat at 32..34 = 0; numberOfHMetrics at 34..36.
     h[34..36].copy_from_slice(&num_h_metrics.to_be_bytes());
     h
 }
@@ -143,10 +143,10 @@ fn make_cmap_empty() -> Vec<u8> {
     sub.extend_from_slice(&2u16.to_be_bytes()); // searchRange
     sub.extend_from_slice(&0u16.to_be_bytes()); // entrySelector
     sub.extend_from_slice(&0u16.to_be_bytes()); // rangeShift
-                                                // endCode[1] = 0xFFFF (terminator)
+    // endCode[1] = 0xFFFF (terminator)
     sub.extend_from_slice(&0xFFFFu16.to_be_bytes());
     sub.extend_from_slice(&0u16.to_be_bytes()); // reservedPad
-                                                // startCode[1]
+    // startCode[1]
     sub.extend_from_slice(&0xFFFFu16.to_be_bytes());
     // idDelta[1] = 1 (so 0xFFFF maps to glyph 0)
     sub.extend_from_slice(&1u16.to_be_bytes());

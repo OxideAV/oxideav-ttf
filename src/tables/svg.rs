@@ -76,8 +76,8 @@
 //! (no `<text>`, `<script>`, `<a>`, relative `em`/`ex` units, …) are
 //! likewise a renderer concern, not a table-decode concern.
 
-use crate::parser::{read_u16, read_u32};
 use crate::Error;
+use crate::parser::{read_u16, read_u32};
 
 /// Four-byte ASCII tag identifying this table in the sfnt directory.
 /// Note the trailing space — the tag is exactly `'SVG '`.
@@ -212,12 +212,12 @@ impl<'a> SvgTable<'a> {
             // §5.5.1: records sorted by increasing startGlyphID, and
             // each startGlyphID > the endGlyphID of any previous
             // record — so the ranges are strictly disjoint + ascending.
-            if let Some(prev) = prev_end {
-                if start_glyph_id <= prev {
-                    return Err(Error::BadStructure(
-                        "SVG: record range not strictly after previous",
-                    ));
-                }
+            if let Some(prev) = prev_end
+                && start_glyph_id <= prev
+            {
+                return Err(Error::BadStructure(
+                    "SVG: record range not strictly after previous",
+                ));
             }
             prev_end = Some(end_glyph_id);
 
@@ -381,7 +381,7 @@ mod tests {
         let records_base = SVG_HEADER_LEN + 2;
         let payload_base = records_base + 2 * SVG_DOCUMENT_RECORD_LEN;
         let shared_off = (payload_base - SVG_HEADER_LEN) as u32; // from list start
-                                                                 // Record 1: gids 5..=6.
+        // Record 1: gids 5..=6.
         b.extend_from_slice(&5u16.to_be_bytes());
         b.extend_from_slice(&6u16.to_be_bytes());
         b.extend_from_slice(&shared_off.to_be_bytes());

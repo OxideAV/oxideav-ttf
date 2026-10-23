@@ -58,7 +58,7 @@ pub mod shape;
 pub mod tables;
 
 pub use agl::{glyph_name_to_char, glyph_name_to_codepoints};
-pub use collection::{is_collection, CollectionHeader, TTC_MAGIC};
+pub use collection::{CollectionHeader, TTC_MAGIC, is_collection};
 pub use shape::ShapedGlyph;
 
 use crate::parser::TableDirectory;
@@ -116,9 +116,9 @@ pub use outline::{BBox, Contour, Point, TtOutline};
 // stable BASE surface is the `Font::base_*` accessor family)
 #[doc(hidden)]
 pub use tables::base::{
-    AxisTable as BaseAxisTable, BaseCoord, BaseLangSysRecord, BaseScriptRecord, BaseScriptTable,
-    BaseValuesTable, FeatMinMaxRecord, MinMaxTable as BaseMinMaxTable, BASE_MAJOR_VERSION,
-    BASE_MINOR_VERSION_0, BASE_MINOR_VERSION_1,
+    AxisTable as BaseAxisTable, BASE_MAJOR_VERSION, BASE_MINOR_VERSION_0, BASE_MINOR_VERSION_1,
+    BaseCoord, BaseLangSysRecord, BaseScriptRecord, BaseScriptTable, BaseValuesTable,
+    FeatMinMaxRecord, MinMaxTable as BaseMinMaxTable,
 };
 pub use tables::cbdt::ColorBitmap;
 pub use tables::cblc::{BigGlyphMetrics, SmallGlyphMetrics};
@@ -128,18 +128,17 @@ pub use tables::colr::{
 // internal — exposed for tests/fuzz; not part of the stable API
 #[doc(hidden)]
 pub use tables::device::DeviceOrVariationIndex;
-pub use tables::dsig::{Signature as DsigSignature, DSIG_BLOCK_FORMAT_PKCS7, DSIG_VERSION};
+pub use tables::dsig::{DSIG_BLOCK_FORMAT_PKCS7, DSIG_VERSION, Signature as DsigSignature};
 pub use tables::ebdt::{CompositeBitmap, EbdtComponent, GrayBitmap};
-pub use tables::ebsc::{BitmapScale, SbitLineMetrics, EBSC_MAJOR_VERSION, EBSC_MINOR_VERSION};
+pub use tables::ebsc::{BitmapScale, EBSC_MAJOR_VERSION, EBSC_MINOR_VERSION, SbitLineMetrics};
 pub use tables::fvar::{NamedInstance, VariationAxis};
 pub use tables::gasp::{
-    GaspRange, GASP_DOGRAY, GASP_GRIDFIT, GASP_PPEM_SENTINEL, GASP_RESERVED_MASK,
-    GASP_SYMMETRIC_GRIDFIT, GASP_SYMMETRIC_SMOOTHING, GASP_TABLE_TAG, GASP_VERSION_0,
-    GASP_VERSION_1,
+    GASP_DOGRAY, GASP_GRIDFIT, GASP_PPEM_SENTINEL, GASP_RESERVED_MASK, GASP_SYMMETRIC_GRIDFIT,
+    GASP_SYMMETRIC_SMOOTHING, GASP_TABLE_TAG, GASP_VERSION_0, GASP_VERSION_1, GaspRange,
 };
 pub use tables::gpos::{CursiveAttachment, GposFeature, PosRecord, PosValue};
 pub use tables::gsub::GsubFeature;
-pub use tables::hdmx::{HdmxRecord, HDMX_TABLE_TAG, HDMX_VERSION_0};
+pub use tables::hdmx::{HDMX_TABLE_TAG, HDMX_VERSION_0, HdmxRecord};
 // internal — exposed for tests/fuzz; not part of the stable API
 #[doc(hidden)]
 pub use tables::hdmx::{HDMX_HEADER_LEN, HDMX_RECORD_HEADER_LEN};
@@ -154,12 +153,12 @@ pub use tables::hvar::DeltaSetIndexMap;
 pub use tables::kern::HeaderVariant as KernHeaderVariant;
 pub use tables::ltsh::{LTSH_ALWAYS_LINEAR, LTSH_TABLE_TAG, LTSH_VERSION_0};
 pub use tables::merg::{
-    MergeEntry, GROUP_LTR, GROUP_RTL, MERGE_LTR, MERGE_RTL, SECOND_IS_SUBORDINATE_LTR,
+    GROUP_LTR, GROUP_RTL, MERGE_LTR, MERGE_RTL, MergeEntry, SECOND_IS_SUBORDINATE_LTR,
     SECOND_IS_SUBORDINATE_RTL,
 };
 pub use tables::meta::{
-    is_valid_meta_tag, script_lang_tags, MetaRecord, ScriptLangTag, META_TABLE_TAG, META_TAG_APPL,
-    META_TAG_BILD, META_TAG_DLNG, META_TAG_SLNG, META_VERSION_1,
+    META_TABLE_TAG, META_TAG_APPL, META_TAG_BILD, META_TAG_DLNG, META_TAG_SLNG, META_VERSION_1,
+    MetaRecord, ScriptLangTag, is_valid_meta_tag, script_lang_tags,
 };
 // internal — exposed for tests/fuzz; not part of the stable API
 #[doc(hidden)]
@@ -167,7 +166,7 @@ pub use tables::meta::{META_DATA_MAP_LEN, META_HEADER_LEN};
 // internal — exposed for tests/fuzz; not part of the stable API
 #[doc(hidden)]
 pub use tables::mvar::ItemVariationStore;
-pub use tables::name::{name_id, platform, NameRecord};
+pub use tables::name::{NameRecord, name_id, platform};
 pub use tables::os2::{
     FSSELECTION_BOLD, FSSELECTION_ITALIC, FSSELECTION_OBLIQUE, FSSELECTION_REGULAR,
     FSSELECTION_USE_TYPO_METRICS, FSTYPE_BITMAP_ONLY, FSTYPE_EDITABLE, FSTYPE_NO_SUBSETTING,
@@ -180,14 +179,14 @@ pub use tables::pclt::{
 #[doc(hidden)]
 pub use tables::pclt::PCLT_TABLE_LEN;
 pub use tables::post::{
-    standard_mac_glyph_name, GlyphNameRef, PostFormat, PostV20, PostV25, POST_TABLE_TAG,
-    POST_VERSION_10, POST_VERSION_20, POST_VERSION_25, POST_VERSION_30,
-    RECOMMENDED_GLYPH_NAME_MAX_LEN, STANDARD_MAC_GLYPH_COUNT, STANDARD_MAC_GLYPH_NAMES,
+    GlyphNameRef, POST_TABLE_TAG, POST_VERSION_10, POST_VERSION_20, POST_VERSION_25,
+    POST_VERSION_30, PostFormat, PostV20, PostV25, RECOMMENDED_GLYPH_NAME_MAX_LEN,
+    STANDARD_MAC_GLYPH_COUNT, STANDARD_MAC_GLYPH_NAMES, standard_mac_glyph_name,
 };
 // internal — exposed for tests/fuzz; not part of the stable API
 #[doc(hidden)]
 pub use tables::post::POST_HEADER_LEN;
-pub use tables::sbix::{SbixGlyph, MAX_DUPE_DEPTH as SBIX_MAX_DUPE_DEPTH};
+pub use tables::sbix::{MAX_DUPE_DEPTH as SBIX_MAX_DUPE_DEPTH, SbixGlyph};
 pub use tables::stat::{
     AxisRecord as StatAxisRecord, AxisValue as StatAxisValue,
     FLAG_ELIDABLE_AXIS_VALUE_NAME as STAT_FLAG_ELIDABLE_AXIS_VALUE_NAME,
@@ -195,13 +194,13 @@ pub use tables::stat::{
     RANGE_MAX_POS_INFINITY as STAT_RANGE_MAX_POS_INFINITY,
     RANGE_MIN_NEG_INFINITY as STAT_RANGE_MIN_NEG_INFINITY,
 };
-pub use tables::svg::{SvgDocument, SVG_GZIP_MAGIC, SVG_TABLE_TAG, SVG_VERSION_0};
+pub use tables::svg::{SVG_GZIP_MAGIC, SVG_TABLE_TAG, SVG_VERSION_0, SvgDocument};
 // internal — exposed for tests/fuzz; not part of the stable API
 #[doc(hidden)]
 pub use tables::svg::{SVG_DOCUMENT_RECORD_LEN, SVG_HEADER_LEN};
 pub use tables::vdmx::{
-    RatioRange as VdmxRatioRange, VdmxGroup, VdmxVTableRecord, VDMX_TABLE_TAG, VDMX_VERSION_0,
-    VDMX_VERSION_1,
+    RatioRange as VdmxRatioRange, VDMX_TABLE_TAG, VDMX_VERSION_0, VDMX_VERSION_1, VdmxGroup,
+    VdmxVTableRecord,
 };
 // internal — exposed for tests/fuzz; not part of the stable API
 #[doc(hidden)]
@@ -210,7 +209,7 @@ pub use tables::vdmx::{
     VDMX_VTABLE_RECORD_LEN,
 };
 pub use tables::vhea::{VHEA_VERSION_1_0, VHEA_VERSION_1_1};
-pub use tables::vorg::{VertOriginEntry, VORG_MAJOR_VERSION, VORG_MINOR_VERSION};
+pub use tables::vorg::{VORG_MAJOR_VERSION, VORG_MINOR_VERSION, VertOriginEntry};
 
 /// Errors emitted during font parsing or glyph lookup.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -582,7 +581,7 @@ impl<'a> Font<'a> {
             _ => {
                 return Err(Error::BadStructure(
                     "loca/glyf must both be present or both absent",
-                ))
+                ));
             }
         };
         let glyf = dir.find(b"glyf", bytes).map(GlyfTable::new);
@@ -1356,22 +1355,16 @@ impl<'a> Font<'a> {
         // placement deltas inside the composite decode rather than to
         // flattened outline points, and resolve each component glyph's
         // own variation via a recursive child resolver.
-        if variable {
-            if let Ok(n_comp) = glyf.composite_component_count(range.clone()) {
-                if n_comp > 0 {
-                    let gvar = self.gvar.as_ref().unwrap();
-                    if let Ok(deltas) = gvar.glyph_component_deltas(glyph_id, n_comp, normalised) {
-                        let resolve = |child_gid: u16, child_depth: u8| {
-                            self.glyph_outline_at_depth(
-                                child_gid,
-                                child_depth,
-                                variable,
-                                normalised,
-                            )
-                        };
-                        return glyf.glyph_outline_var(range, loca, depth, &deltas, &resolve);
-                    }
-                }
+        if variable
+            && let Ok(n_comp) = glyf.composite_component_count(range.clone())
+            && n_comp > 0
+        {
+            let gvar = self.gvar.as_ref().unwrap();
+            if let Ok(deltas) = gvar.glyph_component_deltas(glyph_id, n_comp, normalised) {
+                let resolve = |child_gid: u16, child_depth: u8| {
+                    self.glyph_outline_at_depth(child_gid, child_depth, variable, normalised)
+                };
+                return glyf.glyph_outline_var(range, loca, depth, &deltas, &resolve);
             }
         }
 
@@ -2711,10 +2704,10 @@ impl<'a> Font<'a> {
             if attach_class != 0 && gdef.mark_attach_class(glyph_id) != attach_class {
                 return true;
             }
-            if let Some(set) = mark_filtering_set {
-                if !gdef.mark_glyph_set_contains(set, glyph_id) {
-                    return true;
-                }
+            if let Some(set) = mark_filtering_set
+                && !gdef.mark_glyph_set_contains(set, glyph_id)
+            {
+                return true;
             }
         }
         false
@@ -3728,10 +3721,10 @@ impl<'a> Font<'a> {
             None => return false,
         };
         for (i, axis) in axes.iter().enumerate() {
-            if let Some(v) = self.var_coords.get(i) {
-                if (v - axis.default).abs() > f32::EPSILON {
-                    return true;
-                }
+            if let Some(v) = self.var_coords.get(i)
+                && (v - axis.default).abs() > f32::EPSILON
+            {
+                return true;
             }
         }
         false

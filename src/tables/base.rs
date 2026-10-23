@@ -142,9 +142,9 @@
 //!   referencing convention is identical to the GPOS / GDEF /
 //!   MVAR / HVAR / VVAR path that already exists in the crate.
 
+use crate::Error;
 use crate::parser::{read_i16, read_u16, read_u32};
 use crate::tables::mvar::ItemVariationStore;
-use crate::Error;
 
 /// Documented header version per §6.3.1.3 ("Set to 1").
 pub const BASE_MAJOR_VERSION: u16 = 1;
@@ -1368,7 +1368,7 @@ mod tests {
         buf.extend_from_slice(&BASE_MINOR_VERSION_0.to_be_bytes());
         buf.extend_from_slice(&8u16.to_be_bytes()); // horizAxisOffset
         buf.extend_from_slice(&0u16.to_be_bytes()); // vertAxisOffset = NULL
-                                                    // Axis at +8: baseTagListOffset = 0, baseScriptListOffset = 0
+        // Axis at +8: baseTagListOffset = 0, baseScriptListOffset = 0
         buf.extend_from_slice(&0u16.to_be_bytes());
         buf.extend_from_slice(&0u16.to_be_bytes());
         let res = BaseTable::parse(&buf);
@@ -1384,10 +1384,10 @@ mod tests {
         buf.extend_from_slice(&BASE_MINOR_VERSION_0.to_be_bytes());
         buf.extend_from_slice(&8u16.to_be_bytes()); // horizAxisOffset
         buf.extend_from_slice(&0u16.to_be_bytes()); // vertAxisOffset = NULL
-                                                    // Axis at +8.
+        // Axis at +8.
         buf.extend_from_slice(&4u16.to_be_bytes()); // baseTagListOffset = +4 (rel)
         buf.extend_from_slice(&8u16.to_be_bytes()); // baseScriptListOffset = +8 (rel)
-                                                    // BaseTagList at +12: count = 5, but only 4 bytes follow.
+        // BaseTagList at +12: count = 5, but only 4 bytes follow.
         buf.extend_from_slice(&5u16.to_be_bytes());
         buf.extend_from_slice(b"romn");
         let res = BaseTable::parse(&buf);
@@ -1407,7 +1407,7 @@ mod tests {
         buf.extend_from_slice(&0u16.to_be_bytes()); // horizAxisOffset = NULL
         buf.extend_from_slice(&0u16.to_be_bytes()); // vertAxisOffset = NULL
         buf.extend_from_slice(&12u32.to_be_bytes()); // itemVarStoreOffset = 12
-                                                     // Dummy IVS payload (the actual bytes are not parsed here).
+        // Dummy IVS payload (the actual bytes are not parsed here).
         buf.extend_from_slice(&[0xAB, 0xCD, 0xEF, 0x01]);
         let base = BaseTable::parse(&buf).expect("parse");
         assert_eq!(base.major_version, BASE_MAJOR_VERSION);
@@ -1517,7 +1517,7 @@ mod tests {
         base_bytes.extend_from_slice(&3u16.to_be_bytes()); // format
         base_bytes.extend_from_slice(&50i16.to_be_bytes()); // coord
         base_bytes.extend_from_slice(&6u16.to_be_bytes()); // deviceOffset
-                                                           // [6..12) VariationIndex { outer=0, inner=0, fmt=0x8000 }.
+        // [6..12) VariationIndex { outer=0, inner=0, fmt=0x8000 }.
         base_bytes.extend_from_slice(&0u16.to_be_bytes());
         base_bytes.extend_from_slice(&0u16.to_be_bytes());
         base_bytes.extend_from_slice(&0x8000u16.to_be_bytes());
@@ -1569,11 +1569,11 @@ mod tests {
         // Axis at +8.
         buf.extend_from_slice(&0u16.to_be_bytes()); // baseTagListOffset = NULL
         buf.extend_from_slice(&4u16.to_be_bytes()); // baseScriptListOffset = +4 (rel)
-                                                    // BaseScriptList at +12.
+        // BaseScriptList at +12.
         buf.extend_from_slice(&1u16.to_be_bytes()); // baseScriptCount
         buf.extend_from_slice(b"latn");
         buf.extend_from_slice(&8u16.to_be_bytes()); // baseScriptOffset = +8 (rel)
-                                                    // BaseScript at +20.
+        // BaseScript at +20.
         buf.extend_from_slice(&0u16.to_be_bytes()); // baseValuesOffset = NULL
         buf.extend_from_slice(&0u16.to_be_bytes()); // defaultMinMaxOffset = NULL
         buf.extend_from_slice(&1u16.to_be_bytes()); // baseLangSysCount = 1

@@ -10,8 +10,8 @@
 
 use core::ops::Range;
 
-use crate::parser::{read_u16, read_u32};
 use crate::Error;
+use crate::parser::{read_u16, read_u32};
 
 #[derive(Debug, Clone)]
 pub struct LocaTable<'a> {

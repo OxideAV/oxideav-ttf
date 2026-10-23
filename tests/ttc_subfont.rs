@@ -18,7 +18,7 @@
 
 use std::path::PathBuf;
 
-use oxideav_ttf::{is_collection, CollectionHeader, Font};
+use oxideav_ttf::{CollectionHeader, Font, is_collection};
 
 fn cached_ttc() -> Option<Vec<u8>> {
     // Walk up from CARGO_MANIFEST_DIR to find the workspace's

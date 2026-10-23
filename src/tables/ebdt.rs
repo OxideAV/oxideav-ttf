@@ -44,8 +44,8 @@
 //! the §5.6.3.1 "Bit Depth" table; `bitDepth == 32` (BGRA colour) is the
 //! `CBDT` path and is rejected here as out of scope.
 
-use crate::tables::cblc::{BigGlyphMetrics, CblcEntry, SmallGlyphMetrics};
 use crate::Error;
+use crate::tables::cblc::{BigGlyphMetrics, CblcEntry, SmallGlyphMetrics};
 
 /// One glyph's worth of unpacked grayscale-coverage bitmap data resolved
 /// out of `EBDT`.
@@ -669,7 +669,7 @@ mod tests {
         bytes.extend_from_slice(&[10, 8, 1, 9, 8]);
         bytes.push(0x00); // pad
         bytes.extend_from_slice(&2u16.to_be_bytes()); // numComponents
-                                                      // component 0: glyph 5 at (0, 0)
+        // component 0: glyph 5 at (0, 0)
         bytes.extend_from_slice(&5u16.to_be_bytes());
         bytes.push(0);
         bytes.push(0);
@@ -742,7 +742,7 @@ mod tests {
         bytes.extend_from_slice(&[10, 8, 1, 9, 8]); // small metrics
         bytes.push(0x00); // pad
         bytes.extend_from_slice(&3u16.to_be_bytes()); // claims 3 components
-                                                      // ... but only supply one 4-byte record.
+        // ... but only supply one 4-byte record.
         bytes.extend_from_slice(&[0, 5, 0, 0]);
         let total = (bytes.len() - off) as u32;
         let t = EbdtTable::parse(&bytes).unwrap();

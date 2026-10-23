@@ -62,8 +62,8 @@
 //! NOT decode the PNG ourselves — that's the consumer crate's job via
 //! `oxideav-png`.
 
-use crate::parser::{read_i8, read_u16, read_u32, read_u8};
 use crate::Error;
+use crate::parser::{read_i8, read_u8, read_u16, read_u32};
 
 /// Per-glyph entry resolved out of CBLC. The caller indexes into the
 /// CBDT slice using `image_data_offset .. image_data_offset + data_len`
@@ -405,7 +405,7 @@ impl<'a> CblcTable<'a> {
                     _ => {
                         return Err(Error::BadStructure(
                             "CBLC: format 4 lookup missed (range covered but glyph absent)",
-                        ))
+                        ));
                     }
                 };
                 let len = off_b
@@ -497,13 +497,13 @@ mod tests {
         bytes[0..2].copy_from_slice(&3u16.to_be_bytes()); // major
         bytes[2..4].copy_from_slice(&0u16.to_be_bytes()); // minor
         bytes[4..8].copy_from_slice(&1u32.to_be_bytes()); // numSizes
-                                                          // BitmapSize record at +8.
+        // BitmapSize record at +8.
         let base = 8;
         bytes[base..base + 4].copy_from_slice(&strike_off.to_be_bytes()); // listOff
         bytes[base + 4..base + 8].copy_from_slice(&((8 + 8 + 16) as u32).to_be_bytes()); // listSize
         bytes[base + 8..base + 12].copy_from_slice(&1u32.to_be_bytes()); // numIndexSubtables
         bytes[base + 12..base + 16].copy_from_slice(&0u32.to_be_bytes()); // colorRef
-                                                                          // skip 12+12 metrics zeroed.
+        // skip 12+12 metrics zeroed.
         let after = base + 16 + 24;
         bytes[after..after + 2].copy_from_slice(&5u16.to_be_bytes()); // startGid
         bytes[after + 2..after + 4].copy_from_slice(&7u16.to_be_bytes()); // endGid

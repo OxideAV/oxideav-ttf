@@ -26,9 +26,9 @@
 //! They're rare in the wild compared to PNG and the consumer crate
 //! doesn't have a native BGRA path yet.
 
+use crate::Error;
 use crate::parser::read_u32;
 use crate::tables::cblc::{BigGlyphMetrics, CblcEntry, SmallGlyphMetrics};
-use crate::Error;
 
 /// One glyph's worth of data resolved out of CBDT, ready for PNG decode.
 #[derive(Debug, Clone, Copy)]

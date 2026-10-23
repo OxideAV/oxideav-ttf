@@ -60,8 +60,8 @@
 //! with explicit cycle detection — every visited glyph id is recorded
 //! and revisiting one bails to `None` rather than recursing forever.
 
-use crate::parser::{read_i16, read_u16, read_u32};
 use crate::Error;
+use crate::parser::{read_i16, read_u16, read_u32};
 
 /// Maximum number of `'dupe'` hops chased by
 /// [`SbixTable::resolve_dupe_chain`] / [`SbixTable::lookup_best_fit_resolved`]

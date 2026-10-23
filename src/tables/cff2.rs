@@ -35,9 +35,9 @@
 use super::cff::charstring::Interp;
 use super::cff::{Dict, Index};
 use super::mvar::ItemVariationStore;
-use crate::outline::TtOutline;
-use crate::parser::{read_u16, read_u8};
 use crate::Error;
+use crate::outline::TtOutline;
+use crate::parser::{read_u8, read_u16};
 
 /// The 4-byte table tag.
 pub const CFF2_TABLE_TAG: [u8; 4] = *b"CFF2";
@@ -48,7 +48,7 @@ mod op {
     pub const VSTORE: u16 = 24;
     pub const FD_ARRAY: u16 = 1236; // 12 36
     pub const FD_SELECT: u16 = 1237; // 12 37
-                                     // Private DICT.
+    // Private DICT.
     pub const SUBRS: u16 = 19;
     pub const VS_INDEX: u16 = 22; // default vsindex for the Private DICT
 }
@@ -475,8 +475,8 @@ mod tests {
         let i0 = [139u8]; // 0
         let i500 = [248u8, 136]; // 500
         let im500 = [252u8, 136]; // -500
-                                  // Type2 charstrings encode a 16-bit integer as [28, hi, lo]
-                                  // (NOT the DICT 5-byte form `enc5`, which uses operator 29).
+        // Type2 charstrings encode a 16-bit integer as [28, hi, lo]
+        // (NOT the DICT 5-byte form `enc5`, which uses operator 29).
         let cs_int16 = |v: i32| -> Vec<u8> {
             let mut b = vec![28u8];
             b.extend_from_slice(&(v as i16).to_be_bytes());
@@ -570,7 +570,7 @@ mod tests {
         assert_eq!(g_max.contours[0].points[0].x, 500); // 100 + 1·400
         let g_half = cff2.glyph_outline_at(1, &[0.5]).expect("gid1 half");
         assert_eq!(g_half.contours[0].points[0].x, 300); // 100 + 0.5·400
-                                                         // y is unaffected by the blend.
+        // y is unaffected by the blend.
         assert_eq!(g_max.contours[0].points[0].y, 100);
     }
 

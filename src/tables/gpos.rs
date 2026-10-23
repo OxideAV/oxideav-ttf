@@ -69,13 +69,13 @@
 //! §"Common Table Formats", Apple TrueType Reference §"GPOS",
 //! ISO/IEC 14496-22 §6 (OFF).
 
+use crate::Error;
 use crate::parser::{read_i16, read_u16, read_u32};
 use crate::tables::device::{read_device_offset, resolve_device_delta};
 use crate::tables::gdef::{
-    class_def_lookup, coverage_lookup, lookup_table_slice, popcount_u16, GdefTable,
+    GdefTable, class_def_lookup, coverage_lookup, lookup_table_slice, popcount_u16,
 };
 use crate::tables::mvar::ItemVariationStore;
-use crate::Error;
 
 const LOOKUP_SINGLE_POS: u16 = 1;
 const LOOKUP_PAIR_POS: u16 = 2;
@@ -443,14 +443,14 @@ impl<'a> GposTable<'a> {
             ];
             // §6.2.9 substitution: if this feature index is overridden,
             // use the alternate feature's lookup-index list directly.
-            if let Some(s) = subst {
-                if let Some(idxs) = s.lookup_indices_for_feature(fi) {
-                    into.push(GposFeature {
-                        tag,
-                        lookup_indices: idxs,
-                    });
-                    return;
-                }
+            if let Some(s) = subst
+                && let Some(idxs) = s.lookup_indices_for_feature(fi)
+            {
+                into.push(GposFeature {
+                    tag,
+                    lookup_indices: idxs,
+                });
+                return;
             }
             let foff = match read_u16(feature_list, r + 4) {
                 Ok(v) => v as usize,
@@ -526,10 +526,11 @@ impl<'a> GposTable<'a> {
             // Peek through LookupType-9 ExtensionPos to report the
             // wrapped type — callers shouldn't have to know the
             // sub-table is wrapped.
-            if kind == LOOKUP_EXTENSION_POS && sub_count > 0 {
-                if let Some(t) = peek_extension_type(lookup) {
-                    kind = t;
-                }
+            if kind == LOOKUP_EXTENSION_POS
+                && sub_count > 0
+                && let Some(t) = peek_extension_type(lookup)
+            {
+                kind = t;
             }
             Some((i, kind, sub_count))
         })
@@ -1207,12 +1208,11 @@ impl<'a> GposTable<'a> {
             };
             let flag = read_u16(lookup, 2).unwrap_or(0);
             let ignore_marks = (flag & 0x0008) != 0;
-            if ignore_marks {
-                if let Some(g) = gdef {
-                    if g.is_mark(left) || g.is_mark(right) {
-                        continue;
-                    }
-                }
+            if ignore_marks
+                && let Some(g) = gdef
+                && (g.is_mark(left) || g.is_mark(right))
+            {
+                continue;
             }
             let sub_count = read_u16(lookup, 4).unwrap_or(0) as usize;
             for s in 0..sub_count {
@@ -1313,12 +1313,11 @@ impl<'a> GposTable<'a> {
             _ => return 0,
         };
         let flag = read_u16(lookup, 2).unwrap_or(0);
-        if (flag & 0x0008) != 0 {
-            if let Some(g) = gdef {
-                if g.is_mark(left) || g.is_mark(right) {
-                    return 0;
-                }
-            }
+        if (flag & 0x0008) != 0
+            && let Some(g) = gdef
+            && (g.is_mark(left) || g.is_mark(right))
+        {
+            return 0;
         }
         self.walk_lookup_subtables(lookup_index, LOOKUP_PAIR_POS, |sub| {
             pair_pos_lookup(sub, left, right)
@@ -2380,10 +2379,10 @@ impl<'a> GposTable<'a> {
                 Err(_) => continue,
             };
             // ExtensionPos at the nested lookup level: peek through.
-            if nested_kind == LOOKUP_EXTENSION_POS {
-                if let Some(t) = peek_extension_type(lookup) {
-                    nested_kind = t;
-                }
+            if nested_kind == LOOKUP_EXTENSION_POS
+                && let Some(t) = peek_extension_type(lookup)
+            {
+                nested_kind = t;
             }
             match nested_kind {
                 LOOKUP_SINGLE_POS => {
@@ -2417,17 +2416,17 @@ impl<'a> GposTable<'a> {
                     // anchors exist for the pair.
                     let prev = self.apply_lookup_type_3(rec.lookup_index, gids[abs_idx - 1]);
                     let curr = self.apply_lookup_type_3(rec.lookup_index, gids[abs_idx]);
-                    if let (Some(p), Some(c)) = (prev, curr) {
-                        if let (Some((px, py)), Some((cx, cy))) = (p.exit, c.entry) {
-                            out.push(PosRecord {
-                                glyph_index: abs_idx,
-                                value: PosValue {
-                                    x_placement: px.wrapping_sub(cx),
-                                    y_placement: py.wrapping_sub(cy),
-                                    ..PosValue::default()
-                                },
-                            });
-                        }
+                    if let (Some(p), Some(c)) = (prev, curr)
+                        && let (Some((px, py)), Some((cx, cy))) = (p.exit, c.entry)
+                    {
+                        out.push(PosRecord {
+                            glyph_index: abs_idx,
+                            value: PosValue {
+                                x_placement: px.wrapping_sub(cx),
+                                y_placement: py.wrapping_sub(cy),
+                                ..PosValue::default()
+                            },
+                        });
                     }
                 }
                 LOOKUP_MARK_BASE_POS if abs_idx + 1 < gids.len() => {
@@ -3670,7 +3669,7 @@ mod tests {
         sub.extend_from_slice(&cov_off.to_be_bytes());
         sub.extend_from_slice(&vf.to_be_bytes());
         sub.extend_from_slice(&2u16.to_be_bytes()); // valueCount
-                                                    // Record [0] (gid 7): x_pl=10 y_pl=20 x_adv=30
+        // Record [0] (gid 7): x_pl=10 y_pl=20 x_adv=30
         sub.extend_from_slice(&10i16.to_be_bytes());
         sub.extend_from_slice(&20i16.to_be_bytes());
         sub.extend_from_slice(&30i16.to_be_bytes());
@@ -3770,11 +3769,11 @@ mod tests {
         sub.extend_from_slice(&vf.to_be_bytes());
         sub.extend_from_slice(&base.to_be_bytes()); // xAdvance
         sub.extend_from_slice(&10u16.to_be_bytes()); // xAdvDevice offset
-                                                     // VariationIndex sub-table at offset 10.
+        // VariationIndex sub-table at offset 10.
         sub.extend_from_slice(&0u16.to_be_bytes()); // outer
         sub.extend_from_slice(&0u16.to_be_bytes()); // inner
         sub.extend_from_slice(&0x8000u16.to_be_bytes()); // deltaFormat
-                                                         // Coverage at offset 16.
+        // Coverage at offset 16.
         sub.extend_from_slice(&1u16.to_be_bytes()); // cov format
         sub.extend_from_slice(&1u16.to_be_bytes()); // glyph count
         sub.extend_from_slice(&7u16.to_be_bytes()); // gid 7
@@ -3865,13 +3864,13 @@ mod tests {
         rule.extend_from_slice(&1u16.to_be_bytes()); // bt count
         rule.extend_from_slice(&1u16.to_be_bytes()); // bt[0]
         rule.extend_from_slice(&1u16.to_be_bytes()); // in count
-                                                     // (no extra inputs for in_count=1)
+        // (no extra inputs for in_count=1)
         rule.extend_from_slice(&1u16.to_be_bytes()); // la count
         rule.extend_from_slice(&99u16.to_be_bytes()); // la[0]
         rule.extend_from_slice(&1u16.to_be_bytes()); // posCount
         rule.extend_from_slice(&0u16.to_be_bytes()); // seqIndex
         rule.extend_from_slice(&0u16.to_be_bytes()); // lookupIndex → 0
-                                                     // RuleSet header: count=1 + offset[0] (after the header)
+        // RuleSet header: count=1 + offset[0] (after the header)
         let rule_set_header_len = 4u16;
         let mut rule_set = Vec::new();
         rule_set.extend_from_slice(&1u16.to_be_bytes());
@@ -4256,7 +4255,7 @@ mod tests {
         // + 3 EntryExitRecords (4 bytes each) = 6 + 12 = 18 bytes
         let header_len = 6 + 3 * 4;
         let cov_off = (header_len + 4 * 6) as u16; // anchors live before coverage
-                                                   // anchor placement: right after header.
+        // anchor placement: right after header.
         let a5_entry_off = header_len as u16;
         let a6_entry_off = a5_entry_off + 6;
         let a6_exit_off = a6_entry_off + 6;
@@ -4266,7 +4265,7 @@ mod tests {
         sub.extend_from_slice(&1u16.to_be_bytes()); // format
         sub.extend_from_slice(&cov_off.to_be_bytes());
         sub.extend_from_slice(&3u16.to_be_bytes()); // entryExitCount
-                                                    // Record [0] gid 5: entry only (exit = 0/null)
+        // Record [0] gid 5: entry only (exit = 0/null)
         sub.extend_from_slice(&a5_entry_off.to_be_bytes());
         sub.extend_from_slice(&0u16.to_be_bytes());
         // Record [1] gid 6: both
@@ -4506,10 +4505,10 @@ mod tests {
         cursive_sub.extend_from_slice(&1u16.to_be_bytes()); // format
         cursive_sub.extend_from_slice(&22u16.to_be_bytes()); // covOff (after anchors)
         cursive_sub.extend_from_slice(&1u16.to_be_bytes()); // entryExitCount
-                                                            // EntryExitRecord
+        // EntryExitRecord
         cursive_sub.extend_from_slice(&10u16.to_be_bytes()); // entryOff
         cursive_sub.extend_from_slice(&16u16.to_be_bytes()); // exitOff
-                                                             // Entry anchor (1, x=70, y=110)
+        // Entry anchor (1, x=70, y=110)
         cursive_sub.extend_from_slice(&1u16.to_be_bytes());
         cursive_sub.extend_from_slice(&70i16.to_be_bytes());
         cursive_sub.extend_from_slice(&110i16.to_be_bytes());
@@ -4596,7 +4595,7 @@ mod tests {
         rule.extend_from_slice(&20u16.to_be_bytes()); // inputSequence[0]
         rule.extend_from_slice(&1u16.to_be_bytes()); // seqIndex = 1
         rule.extend_from_slice(&0u16.to_be_bytes()); // lookupIndex = 0
-                                                     // SequenceRuleSet: count=1 + offset (after 4-byte header).
+        // SequenceRuleSet: count=1 + offset (after 4-byte header).
         let mut set = Vec::new();
         set.extend_from_slice(&1u16.to_be_bytes());
         set.extend_from_slice(&4u16.to_be_bytes());
@@ -4658,7 +4657,7 @@ mod tests {
         cd.extend_from_slice(&20u16.to_be_bytes());
         cd.extend_from_slice(&20u16.to_be_bytes());
         cd.extend_from_slice(&2u16.to_be_bytes()); // class 2
-                                                   // Coverage covers the first-position glyph (gid 10).
+        // Coverage covers the first-position glyph (gid 10).
         let mut cov = Vec::new();
         cov.extend_from_slice(&1u16.to_be_bytes());
         cov.extend_from_slice(&1u16.to_be_bytes());

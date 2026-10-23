@@ -46,8 +46,8 @@
 //!                                      instanceSize == 6 + 4*axisCount)
 //! ```
 
-use crate::parser::{read_i32, read_u16};
 use crate::Error;
+use crate::parser::{read_i32, read_u16};
 
 /// Minimum legal `axisSize` per the spec (one axis record).
 const MIN_AXIS_SIZE: u16 = 20;

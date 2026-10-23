@@ -12,7 +12,7 @@
 //! - `docs/text/opentype/otspec-post.html` (the §5.2.10.2 v2.0
 //!   worked example used in `tables::post` unit tests).
 
-use oxideav_ttf::{Font, GlyphNameRef, PostFormat, POST_VERSION_20};
+use oxideav_ttf::{Font, GlyphNameRef, POST_VERSION_20, PostFormat};
 
 const DEJAVU_SANS: &[u8] = include_bytes!("fixtures/DejaVuSans.ttf");
 const DEJAVU_MONO: &[u8] = include_bytes!("fixtures/DejaVuSansMono.ttf");
@@ -151,9 +151,10 @@ fn dejavu_sans_reverse_lookup_resolves_known_names() {
         .expect("post names a glyph 'A'");
     assert_eq!(via_cmap, via_name);
     // A name no glyph carries yields None.
-    assert!(font
-        .gid_for_glyph_name("this_is_not_a_real_glyph_name")
-        .is_none());
+    assert!(
+        font.gid_for_glyph_name("this_is_not_a_real_glyph_name")
+            .is_none()
+    );
 }
 
 #[test]

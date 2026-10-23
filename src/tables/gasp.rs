@@ -43,8 +43,8 @@
 //! before lookup. The last record's `rangeMaxPPEM` (commonly
 //! `0xFFFF`) is "never adjusted" per §5.3.7.
 
-use crate::parser::{read_u16, read_u32};
 use crate::Error;
+use crate::parser::{read_u16, read_u32};
 
 /// `gasp` table version 0 — pre-ClearType layout. Versions 0 and 1
 /// share the same byte layout; the version field gates whether the
@@ -183,12 +183,12 @@ impl GaspTable {
             // §5.3.7: "records in the gaspRange[] array must be sorted
             // in order of increasing rangeMaxPPEM value." A duplicate
             // rangeMaxPPEM would shadow the latter record; reject.
-            if let Some(prev) = prev_max {
-                if range_max_ppem <= prev {
-                    return Err(Error::BadStructure(
-                        "gasp: gaspRange not sorted by increasing rangeMaxPPEM",
-                    ));
-                }
+            if let Some(prev) = prev_max
+                && range_max_ppem <= prev
+            {
+                return Err(Error::BadStructure(
+                    "gasp: gaspRange not sorted by increasing rangeMaxPPEM",
+                ));
             }
             prev_max = Some(range_max_ppem);
             ranges.push(GaspRange {

@@ -32,11 +32,11 @@
 //! accessors. Each accessor borrows the parent table slice, so the
 //! parsed [`MathTable`] is a cheap set of validated offsets.
 
+use crate::Error;
 use crate::parser::{read_i16, read_u16};
 use crate::tables::device::resolve_device_delta;
 use crate::tables::gdef::coverage_lookup;
 use crate::tables::mvar::ItemVariationStore;
-use crate::Error;
 
 /// The 4-byte table tag.
 pub const MATH_TABLE_TAG: [u8; 4] = *b"MATH";
@@ -341,11 +341,7 @@ pub struct MathGlyphInfo<'a> {
 impl<'a> MathGlyphInfo<'a> {
     fn sub_off(&self, idx: usize) -> Option<usize> {
         let o = read_u16(self.data, self.base + idx * 2).ok()? as usize;
-        if o == 0 {
-            None
-        } else {
-            Some(self.base + o)
-        }
+        if o == 0 { None } else { Some(self.base + o) }
     }
 
     /// Italics-correction value for `gid` (§6.3.6.2.5), or `None` when the
@@ -593,11 +589,7 @@ impl<'a> MathVariants<'a> {
             GrowDirection::Horizontal => 4,
         };
         let o = read_u16(self.data, self.base + field).ok()? as usize;
-        if o == 0 {
-            None
-        } else {
-            Some(self.base + o)
-        }
+        if o == 0 { None } else { Some(self.base + o) }
     }
 
     fn glyph_count(&self, dir: GrowDirection) -> u16 {
@@ -626,11 +618,7 @@ impl<'a> MathVariants<'a> {
             GrowDirection::Horizontal => self.base + 10 + vert_count * 2,
         };
         let o = read_u16(self.data, array_base + idx * 2).ok()? as usize;
-        if o == 0 {
-            None
-        } else {
-            Some(self.base + o)
-        }
+        if o == 0 { None } else { Some(self.base + o) }
     }
 
     /// Ready-made stretchy variants for `gid` growing in `dir`, ordered
@@ -732,7 +720,7 @@ mod tests {
         data.extend_from_slice(&60i16.to_be_bytes()); // scriptScriptPercentScaleDown
         data.extend_from_slice(&300u16.to_be_bytes()); // delimitedSubFormulaMinHeight
         data.extend_from_slice(&1500u16.to_be_bytes()); // displayOperatorMinHeight
-                                                        // 51 MathValueRecords; set axisHeight (index 1) = 250, rest 0.
+        // 51 MathValueRecords; set axisHeight (index 1) = 250, rest 0.
         for i in 0..51 {
             let v: i16 = if i == constant::AXIS_HEIGHT as i32 as usize {
                 250
@@ -920,7 +908,7 @@ mod tests {
         let asm_off_pos = data.len();
         data.extend_from_slice(&0u16.to_be_bytes()); // glyphAssemblyOffset (patched)
         data.extend_from_slice(&2u16.to_be_bytes()); // variantCount
-                                                     // variant records: (glyph, advance)
+        // variant records: (glyph, advance)
         data.extend_from_slice(&10u16.to_be_bytes());
         data.extend_from_slice(&1000u16.to_be_bytes());
         data.extend_from_slice(&11u16.to_be_bytes());
@@ -933,13 +921,13 @@ mod tests {
         data.extend_from_slice(&0i16.to_be_bytes()); // italics value
         data.extend_from_slice(&0u16.to_be_bytes()); // italics device
         data.extend_from_slice(&2u16.to_be_bytes()); // partCount
-                                                     // part 0: top, not extender
+        // part 0: top, not extender
         data.extend_from_slice(&20u16.to_be_bytes()); // glyph
         data.extend_from_slice(&0u16.to_be_bytes()); // startConn
         data.extend_from_slice(&50u16.to_be_bytes()); // endConn
         data.extend_from_slice(&300u16.to_be_bytes()); // fullAdvance
         data.extend_from_slice(&0u16.to_be_bytes()); // flags
-                                                     // part 1: extender
+        // part 1: extender
         data.extend_from_slice(&21u16.to_be_bytes());
         data.extend_from_slice(&50u16.to_be_bytes());
         data.extend_from_slice(&50u16.to_be_bytes());
@@ -1017,7 +1005,7 @@ mod tests {
         ic_sub.extend_from_slice(&ic.to_be_bytes()); // value
         let ic_dev_pos = ic_sub.len();
         ic_sub.extend_from_slice(&0u16.to_be_bytes()); // device (patched)
-                                                       // Coverage @ +8: format 1, [7]
+        // Coverage @ +8: format 1, [7]
         ic_sub.extend_from_slice(&1u16.to_be_bytes());
         ic_sub.extend_from_slice(&1u16.to_be_bytes());
         ic_sub.extend_from_slice(&7u16.to_be_bytes());
@@ -1051,7 +1039,7 @@ mod tests {
         kern_sub.extend_from_slice(&0u16.to_be_bytes()); // TL
         kern_sub.extend_from_slice(&0u16.to_be_bytes()); // BR
         kern_sub.extend_from_slice(&0u16.to_be_bytes()); // BL
-                                                         // Coverage [7].
+        // Coverage [7].
         let kcov_at = kern_sub.len();
         kern_sub.extend_from_slice(&1u16.to_be_bytes());
         kern_sub.extend_from_slice(&1u16.to_be_bytes());
@@ -1072,7 +1060,7 @@ mod tests {
         kern_sub.extend_from_slice(&0u16.to_be_bytes()); // outer
         kern_sub.extend_from_slice(&0u16.to_be_bytes()); // inner
         kern_sub.extend_from_slice(&0x8000u16.to_be_bytes()); // fmt
-                                                              // kern[1] device offset is relative to the MathKern table start.
+        // kern[1] device offset is relative to the MathKern table start.
         kern_sub[khi_dev_pos..khi_dev_pos + 2]
             .copy_from_slice(&((kvar_at - mkern_at) as u16).to_be_bytes());
         kern_sub[krec_pos..krec_pos + 2].copy_from_slice(&(mkern_at as u16).to_be_bytes());
@@ -1128,7 +1116,7 @@ mod tests {
             gi.italics_correction_resolved(7, Some(&ivs), &[1.0]),
             Some(105.0)
         ); // 120 + (-15)
-           // Top-accent has no device → unchanged.
+        // Top-accent has no device → unchanged.
         assert_eq!(
             gi.top_accent_attachment_resolved(7, Some(&ivs), &[1.0]),
             Some(300.0)
@@ -1149,11 +1137,13 @@ mod tests {
         ); // 25 + (-15)
 
         // Uncovered glyph → None on every accessor.
-        assert!(gi
-            .italics_correction_resolved(99, Some(&ivs), &[1.0])
-            .is_none());
-        assert!(gi
-            .math_kern_resolved(99, MathKernCorner::TopRight, 0, Some(&ivs), &[1.0])
-            .is_none());
+        assert!(
+            gi.italics_correction_resolved(99, Some(&ivs), &[1.0])
+                .is_none()
+        );
+        assert!(
+            gi.math_kern_resolved(99, MathKernCorner::TopRight, 0, Some(&ivs), &[1.0])
+                .is_none()
+        );
     }
 }

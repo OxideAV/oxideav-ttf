@@ -43,10 +43,10 @@
 //! (otherwise the table cannot disambiguate which glyphs carry side-
 //! bearing or vertical-origin variations).
 
+use crate::Error;
 use crate::parser::{read_u16, read_u32};
 use crate::tables::hvar::DeltaSetIndexMap;
 use crate::tables::mvar::ItemVariationStore;
-use crate::Error;
 
 /// Parsed VVAR table.
 #[derive(Debug, Clone)]
@@ -241,9 +241,9 @@ mod tests {
         let mut b = vec![0u8; 24 + 32];
         // Header
         b[0..2].copy_from_slice(&1u16.to_be_bytes()); // major
-                                                      // minor = 0
+        // minor = 0
         b[4..8].copy_from_slice(&24u32.to_be_bytes()); // ivsOffset
-                                                       // ahm / tsb / bsb / vorg = 0
+        // ahm / tsb / bsb / vorg = 0
         let ivs = 24usize;
         b[ivs..ivs + 2].copy_from_slice(&1u16.to_be_bytes());
         b[ivs + 2..ivs + 6].copy_from_slice(&12u32.to_be_bytes());
@@ -252,7 +252,7 @@ mod tests {
         let rl = ivs + 12;
         b[rl..rl + 2].copy_from_slice(&1u16.to_be_bytes()); // axisCount
         b[rl + 2..rl + 4].copy_from_slice(&1u16.to_be_bytes()); // regionCount
-                                                                // axis 0 of region 0: start=0 / peak=+1 / end=+1
+        // axis 0 of region 0: start=0 / peak=+1 / end=+1
         b[rl + 4..rl + 6].copy_from_slice(&0i16.to_be_bytes());
         b[rl + 6..rl + 8].copy_from_slice(&16384i16.to_be_bytes());
         b[rl + 8..rl + 10].copy_from_slice(&16384i16.to_be_bytes());

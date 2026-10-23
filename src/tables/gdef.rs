@@ -29,10 +29,10 @@
 //! interpolation re-uses the shared `ItemVariationStore` decoder
 //! already in the MVAR / HVAR / VVAR pipeline if/when callers need it.
 
+use crate::Error;
 use crate::parser::{read_i16, read_u16, read_u32};
 use crate::tables::device::resolve_device_delta;
 use crate::tables::mvar::ItemVariationStore;
-use crate::Error;
 
 /// Predefined glyph classes per the GDEF spec.
 #[allow(dead_code)]
@@ -106,11 +106,7 @@ impl<'a> GdefTable<'a> {
                 return Err(Error::UnexpectedEof);
             }
             let raw = read_u32(bytes, 14)?;
-            if raw == 0 {
-                None
-            } else {
-                Some(raw)
-            }
+            if raw == 0 { None } else { Some(raw) }
         } else {
             None
         };
@@ -458,11 +454,7 @@ pub(crate) fn class_def_lookup(bytes: &[u8], glyph_id: u16) -> Option<u16> {
                 return None;
             }
             let val = read_u16(bytes, 6 + idx as usize * 2).ok()?;
-            if val == 0 {
-                None
-            } else {
-                Some(val)
-            }
+            if val == 0 { None } else { Some(val) }
         }
         2 => {
             // Format 2: u16 classRangeCount, ClassRangeRecord[count]
@@ -655,8 +647,8 @@ mod tests {
         t[0..2].copy_from_slice(&1u16.to_be_bytes()); // major
         t[2..4].copy_from_slice(&0u16.to_be_bytes()); // minor
         t[4..6].copy_from_slice(&class_def_off.to_be_bytes()); // GlyphClassDef
-                                                               // attachList/ligCaretList/markAttachClassDef offsets: leave 0.
-                                                               // ClassDef format 1: startGlyph=99, count=1, [3].
+        // attachList/ligCaretList/markAttachClassDef offsets: leave 0.
+        // ClassDef format 1: startGlyph=99, count=1, [3].
         let mut cd = vec![0u8; 8];
         cd[0..2].copy_from_slice(&1u16.to_be_bytes());
         cd[2..4].copy_from_slice(&99u16.to_be_bytes());
@@ -967,7 +959,7 @@ mod tests {
         let mut t = vec![0u8; 14];
         t[0..2].copy_from_slice(&1u16.to_be_bytes()); // major
         t[2..4].copy_from_slice(&2u16.to_be_bytes()); // minor 1.2
-                                                      // glyphClassDef / attachList / ligCaretList / markAttach all NULL.
+        // glyphClassDef / attachList / ligCaretList / markAttach all NULL.
         let mgs_off: u16 = 14;
         t[12..14].copy_from_slice(&mgs_off.to_be_bytes());
 

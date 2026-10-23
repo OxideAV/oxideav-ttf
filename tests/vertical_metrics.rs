@@ -18,7 +18,7 @@
 
 use std::path::PathBuf;
 
-use oxideav_ttf::{is_collection, Font};
+use oxideav_ttf::{Font, is_collection};
 
 const DEJAVU_MONO: &[u8] = include_bytes!("fixtures/DejaVuSansMono.ttf");
 const DEJAVU_SANS: &[u8] = include_bytes!("fixtures/DejaVuSans.ttf");

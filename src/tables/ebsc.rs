@@ -50,8 +50,8 @@
 //! per Em (in the appropriate direction), and are rounded to the nearest
 //! integer pixel."
 
-use crate::parser::{read_i8, read_u16, read_u32, read_u8};
 use crate::Error;
+use crate::parser::{read_i8, read_u8, read_u16, read_u32};
 
 /// Major version of an `EBSC` table per §5.6.4.
 pub const EBSC_MAJOR_VERSION: u16 = 2;

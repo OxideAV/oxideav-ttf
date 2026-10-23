@@ -37,7 +37,7 @@ fn build_minimal_sfnt(tables: &[(&[u8; 4], Vec<u8>)]) -> Vec<u8> {
     for (tag, payload) in tables {
         records.push((*tag, payload_offset as u32, payload.len() as u32));
         payload_offset += payload.len();
-        while payload_offset % 4 != 0 {
+        while !payload_offset.is_multiple_of(4) {
             payload_offset += 1;
         }
     }
@@ -191,12 +191,12 @@ fn make_eblc(offsets: [u32; 4]) -> Vec<u8> {
     let mut bm = vec![0u8; 48];
     let list_off = 56u32;
     bm[0..4].copy_from_slice(&list_off.to_be_bytes()); // indexSubTableArrayOffset
-                                                       // indexTablesSize: 2 IndexSubTableArray records (16) + subtable A (8 hdr
-                                                       // + 3 u32 offsets = 20) + subtable B (8 hdr + 2 u32 offsets = 16) = 52.
+    // indexTablesSize: 2 IndexSubTableArray records (16) + subtable A (8 hdr
+    // + 3 u32 offsets = 20) + subtable B (8 hdr + 2 u32 offsets = 16) = 52.
     bm[4..8].copy_from_slice(&52u32.to_be_bytes());
     bm[8..12].copy_from_slice(&2u32.to_be_bytes()); // numberOfIndexSubTables
     bm[12..16].copy_from_slice(&0u32.to_be_bytes()); // colorRef
-                                                     // hori (12) + vert (12) line metrics left zero ([16..40)).
+    // hori (12) + vert (12) line metrics left zero ([16..40)).
     bm[40..42].copy_from_slice(&5u16.to_be_bytes()); // startGlyphIndex
     bm[42..44].copy_from_slice(&7u16.to_be_bytes()); // endGlyphIndex
     bm[44] = 16; // ppemX

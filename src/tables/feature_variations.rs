@@ -50,8 +50,8 @@
 //! zero `conditionSetOffset` is the universal match. A zero
 //! `featureTableSubstitutionOffset` makes no substitutions.
 
-use crate::parser::{read_u16, read_u32};
 use crate::Error;
+use crate::parser::{read_u16, read_u32};
 
 /// The only Condition table format defined by §6.2.9.
 const CONDITION_FORMAT_AXIS_RANGE: u16 = 1;

@@ -75,8 +75,8 @@
 //! the §7.3.5 rule can cross-check `fvar.is_some()` before consulting
 //! `hdmx`.
 
-use crate::parser::{read_i16, read_i32, read_u16, read_u8};
 use crate::Error;
+use crate::parser::{read_i16, read_i32, read_u8, read_u16};
 
 /// On-wire table tag (`b"hdmx"`, big-endian Fixed `0x68646D78`). Exposed
 /// for callers that walk the table directory directly.
@@ -215,12 +215,12 @@ impl HdmxTable {
             // §5.7.2: "This table is sorted by pixel size." Enforce
             // strict monotonic increase so duplicates / out-of-order
             // entries do not silently shadow each other.
-            if let Some(prev) = prev_ppem {
-                if pixel_size <= prev {
-                    return Err(Error::BadStructure(
-                        "hdmx: pixelSize not strictly increasing",
-                    ));
-                }
+            if let Some(prev) = prev_ppem
+                && pixel_size <= prev
+            {
+                return Err(Error::BadStructure(
+                    "hdmx: pixelSize not strictly increasing",
+                ));
             }
             prev_ppem = Some(pixel_size);
             let widths_off = off + HDMX_RECORD_HEADER_LEN;

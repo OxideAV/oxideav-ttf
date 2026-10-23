@@ -69,10 +69,10 @@
 //! for the whole table (v1 segment maps still apply), matching the
 //! reference's version-fallback posture.
 
+use crate::Error;
 use crate::parser::{read_i16, read_u16, read_u32};
 use crate::tables::hvar::DeltaSetIndexMap;
 use crate::tables::mvar::ItemVariationStore;
-use crate::Error;
 
 /// Sanity cap on the per-axis segment-map length. Real fonts top out
 /// in single digits; the cap exists purely to bound parse cost.

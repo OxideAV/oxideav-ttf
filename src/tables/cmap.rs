@@ -52,8 +52,8 @@
 //! Apple Color Emoji, and most CJK fonts that expose Unicode
 //! Ideographic Variation Sequences (registered IVD collections).
 
-use crate::parser::{read_u16, read_u24, read_u32};
 use crate::Error;
+use crate::parser::{read_u16, read_u24, read_u32};
 
 /// Decoded cmap subtable, preselected from the candidate list.
 #[derive(Debug, Clone)]
@@ -245,10 +245,10 @@ impl<'a> CmapTable<'a> {
         let non_default_off = read_u32(bytes, rec_off + 7).ok()? as usize;
 
         // 1. Non-default UVS lookup wins — it carries an explicit glyph.
-        if non_default_off != 0 {
-            if let Some(g) = lookup_non_default_uvs(bytes, non_default_off, codepoint) {
-                return Some(g);
-            }
+        if non_default_off != 0
+            && let Some(g) = lookup_non_default_uvs(bytes, non_default_off, codepoint)
+        {
+            return Some(g);
         }
         // 2. Default UVS hit — semantically "use the base glyph". Return
         //    Some(base) so callers can rely on a single result type.
@@ -436,11 +436,7 @@ fn lookup_format0(bytes: &[u8], codepoint: u32) -> Option<u16> {
         return None;
     }
     let g = bytes[glyph_array_off + codepoint as usize];
-    if g == 0 {
-        None
-    } else {
-        Some(g as u16)
-    }
+    if g == 0 { None } else { Some(g as u16) }
 }
 
 // --- Format 2 --------------------------------------------------------------
@@ -689,11 +685,7 @@ fn lookup_format6(bytes: &[u8], codepoint: u32) -> Option<u16> {
         return None;
     }
     let g = read_u16(bytes, 10 + idx as usize * 2).ok()?;
-    if g == 0 {
-        None
-    } else {
-        Some(g)
-    }
+    if g == 0 { None } else { Some(g) }
 }
 
 // --- Format 8 --------------------------------------------------------------
@@ -816,11 +808,7 @@ fn lookup_format10(bytes: &[u8], codepoint: u32) -> Option<u16> {
         return None;
     }
     let g = read_u16(bytes, 20 + idx as usize * 2).ok()?;
-    if g == 0 {
-        None
-    } else {
-        Some(g)
-    }
+    if g == 0 { None } else { Some(g) }
 }
 
 // --- Format 12 -------------------------------------------------------------
@@ -984,7 +972,7 @@ mod tests {
         sub[0..2].copy_from_slice(&12u16.to_be_bytes());
         sub[4..8].copy_from_slice(&((16 + 24) as u32).to_be_bytes());
         sub[12..16].copy_from_slice(&2u32.to_be_bytes()); // numGroups
-                                                          // Group 0: start=0x4E00 end=0x4E02 startGlyph=1000
+        // Group 0: start=0x4E00 end=0x4E02 startGlyph=1000
         sub[16..20].copy_from_slice(&0x4E00u32.to_be_bytes());
         sub[20..24].copy_from_slice(&0x4E02u32.to_be_bytes());
         sub[24..28].copy_from_slice(&1000u32.to_be_bytes());
@@ -1042,7 +1030,7 @@ mod tests {
         let mut out = vec![0u8; header_len];
         out[0..2].copy_from_slice(&0u16.to_be_bytes()); // version
         out[2..4].copy_from_slice(&2u16.to_be_bytes()); // numTables
-                                                        // record 0
+        // record 0
         out[4..6].copy_from_slice(&3u16.to_be_bytes());
         out[6..8].copy_from_slice(&10u16.to_be_bytes());
         out[8..12].copy_from_slice(&(sub12_off as u32).to_be_bytes());
@@ -1460,9 +1448,9 @@ mod tests {
         let sub_len = 16 + num_groups as usize * 12;
         let mut sub = vec![0u8; sub_len];
         sub[0..2].copy_from_slice(&13u16.to_be_bytes()); // format
-                                                         // reserved at 2..4 stays zero
+        // reserved at 2..4 stays zero
         sub[4..8].copy_from_slice(&(sub_len as u32).to_be_bytes()); // length
-                                                                    // language at 8..12 stays zero
+        // language at 8..12 stays zero
         sub[12..16].copy_from_slice(&num_groups.to_be_bytes()); // numGroups
         for (i, &(start, end, glyph)) in groups.iter().enumerate() {
             let off = 16 + i * 12;
@@ -1646,9 +1634,9 @@ mod tests {
         let sub_len = 8208 + groups.len() * 12;
         let mut sub = vec![0u8; sub_len];
         sub[0..2].copy_from_slice(&8u16.to_be_bytes()); // format
-                                                        // reserved at 2..4 stays zero
+        // reserved at 2..4 stays zero
         sub[4..8].copy_from_slice(&(sub_len as u32).to_be_bytes()); // length
-                                                                    // language at 8..12 stays zero
+        // language at 8..12 stays zero
         for &w in is32_words {
             // Spec bit position: is32[w / 8] & (1 << (7 - w % 8)).
             sub[12 + (w as usize) / 8] |= 1 << (7 - w % 8);
@@ -1751,9 +1739,9 @@ mod tests {
         let sub_len = 20 + glyphs.len() * 2;
         let mut sub = vec![0u8; sub_len];
         sub[0..2].copy_from_slice(&10u16.to_be_bytes()); // format
-                                                         // reserved at 2..4 stays zero
+        // reserved at 2..4 stays zero
         sub[4..8].copy_from_slice(&(sub_len as u32).to_be_bytes()); // length
-                                                                    // language at 8..12 stays zero
+        // language at 8..12 stays zero
         sub[12..16].copy_from_slice(&start.to_be_bytes());
         sub[16..20].copy_from_slice(&(glyphs.len() as u32).to_be_bytes());
         for (i, &g) in glyphs.iter().enumerate() {
@@ -1821,7 +1809,7 @@ mod tests {
         let mut sub = vec![0u8; total];
         sub[0..2].copy_from_slice(&2u16.to_be_bytes()); // format
         sub[2..4].copy_from_slice(&(total as u16).to_be_bytes()); // length
-                                                                  // language at 4..6 stays zero
+        // language at 4..6 stays zero
         for (i, k) in sub_header_keys.iter().enumerate() {
             let off = 6 + i * 2;
             sub[off..off + 2].copy_from_slice(&k.to_be_bytes());

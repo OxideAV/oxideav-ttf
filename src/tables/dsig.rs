@@ -34,8 +34,8 @@
 //! currently defined by the spec, but the format field is forward-looking)
 //! surface their format id, declared length, and the raw block bytes.
 
-use crate::parser::{read_u16, read_u32};
 use crate::Error;
+use crate::parser::{read_u16, read_u32};
 
 /// The current (and only) defined `DSIG` table version per the spec.
 pub const DSIG_VERSION: u32 = 0x0000_0001;

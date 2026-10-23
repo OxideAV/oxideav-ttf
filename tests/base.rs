@@ -34,12 +34,14 @@ fn dejavu_mono_has_no_base() {
     let f = Font::from_bytes(DEJAVU_MONO).unwrap();
     assert!(!f.has_base());
     assert!(f.base_table().is_none());
-    assert!(f
-        .base_horiz_y_for_script_baseline(*b"latn", *b"romn")
-        .is_none());
-    assert!(f
-        .base_vert_x_for_script_baseline(*b"latn", *b"romn")
-        .is_none());
+    assert!(
+        f.base_horiz_y_for_script_baseline(*b"latn", *b"romn")
+            .is_none()
+    );
+    assert!(
+        f.base_vert_x_for_script_baseline(*b"latn", *b"romn")
+            .is_none()
+    );
 }
 
 #[test]
@@ -71,7 +73,7 @@ fn build_minimal_sfnt(tables: &[(&[u8; 4], Vec<u8>)]) -> Vec<u8> {
     for (tag, payload) in tables {
         records.push((*tag, payload_offset as u32, payload.len() as u32));
         payload_offset += payload.len();
-        while payload_offset % 4 != 0 {
+        while !payload_offset.is_multiple_of(4) {
             payload_offset += 1;
         }
     }
@@ -446,16 +448,19 @@ fn synth_horiz_only_table_walks_both_scripts() {
     assert_eq!(hani.base_values.as_ref().unwrap().default_baseline_index, 0);
 
     // Unknown scripts / baselines decline cleanly.
-    assert!(font
-        .base_horiz_y_for_script_baseline(*b"arab", *b"romn")
-        .is_none());
-    assert!(font
-        .base_horiz_y_for_script_baseline(*b"latn", *b"hang")
-        .is_none());
+    assert!(
+        font.base_horiz_y_for_script_baseline(*b"arab", *b"romn")
+            .is_none()
+    );
+    assert!(
+        font.base_horiz_y_for_script_baseline(*b"latn", *b"hang")
+            .is_none()
+    );
     // VertAxis-side lookups on a HorizAxis-only font return None.
-    assert!(font
-        .base_vert_x_for_script_baseline(*b"latn", *b"romn")
-        .is_none());
+    assert!(
+        font.base_vert_x_for_script_baseline(*b"latn", *b"romn")
+            .is_none()
+    );
 }
 
 #[test]
@@ -484,15 +489,17 @@ fn synth_table_with_horiz_and_vert_axes() {
         font.base_horiz_y_for_script_baseline(*b"latn", *b"romn"),
         Some(0)
     );
-    assert!(font
-        .base_horiz_y_for_script_baseline(*b"hani", *b"ideo")
-        .is_none());
+    assert!(
+        font.base_horiz_y_for_script_baseline(*b"hani", *b"ideo")
+            .is_none()
+    );
     // VertAxis: Han -> ideo = 50; no Latin.
     assert_eq!(
         font.base_vert_x_for_script_baseline(*b"hani", *b"ideo"),
         Some(50)
     );
-    assert!(font
-        .base_vert_x_for_script_baseline(*b"latn", *b"romn")
-        .is_none());
+    assert!(
+        font.base_vert_x_for_script_baseline(*b"latn", *b"romn")
+            .is_none()
+    );
 }

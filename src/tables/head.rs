@@ -8,8 +8,8 @@
 //! word, `lowestRecPPEM`, `fontDirectionHint`, `indexToLocFormat` (which
 //! controls `loca` width), and `glyphDataFormat`.
 
-use crate::parser::{read_i16, read_u16};
 use crate::Error;
+use crate::parser::{read_i16, read_u16};
 
 /// `head.flags` bits (§5.2.1).
 pub const HEAD_FLAG_BASELINE_AT_Y0: u16 = 0x0001;

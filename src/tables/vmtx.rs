@@ -41,8 +41,8 @@
 //! origin-Y derivation lives at the [`crate::Font`] level so it can
 //! consult `glyf`.
 
-use crate::parser::{read_i16, read_u16};
 use crate::Error;
+use crate::parser::{read_i16, read_u16};
 
 /// Parsed `vmtx` table — borrowed-bytes view over the two arrays.
 ///

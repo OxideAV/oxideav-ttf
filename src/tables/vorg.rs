@@ -41,8 +41,8 @@
 //! The parser validates the sort + de-duplication invariants up-front
 //! so per-glyph lookup can binary-search the array without revalidating.
 
-use crate::parser::{read_i16, read_u16};
 use crate::Error;
+use crate::parser::{read_i16, read_u16};
 
 /// Documented header version per §5.4.4 ("Set to 1").
 pub const VORG_MAJOR_VERSION: u16 = 1;
@@ -128,12 +128,12 @@ impl VorgTable {
             let off = 8 + i * 4;
             let glyph_index = read_u16(bytes, off)?;
             let vert_origin_y = read_i16(bytes, off + 2)?;
-            if let Some(prev) = last {
-                if glyph_index <= prev {
-                    return Err(Error::BadStructure(
-                        "VORG: vertOriginYMetrics not strictly increasing",
-                    ));
-                }
+            if let Some(prev) = last
+                && glyph_index <= prev
+            {
+                return Err(Error::BadStructure(
+                    "VORG: vertOriginYMetrics not strictly increasing",
+                ));
             }
             last = Some(glyph_index);
             metrics.push(VertOriginEntry {

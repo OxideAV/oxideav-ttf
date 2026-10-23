@@ -15,8 +15,8 @@
 
 use oxideav_ttf::Font;
 use oxideav_ttf::{
-    script_lang_tags, META_DATA_MAP_LEN, META_HEADER_LEN, META_TAG_DLNG, META_TAG_SLNG,
-    META_VERSION_1,
+    META_DATA_MAP_LEN, META_HEADER_LEN, META_TAG_DLNG, META_TAG_SLNG, META_VERSION_1,
+    script_lang_tags,
 };
 
 const DEJAVU_MONO: &[u8] = include_bytes!("fixtures/DejaVuSansMono.ttf");
@@ -58,7 +58,7 @@ fn build_minimal_sfnt(tables: &[(&[u8; 4], Vec<u8>)]) -> Vec<u8> {
     for (tag, payload) in tables {
         records.push((*tag, payload_offset as u32, payload.len() as u32));
         payload_offset += payload.len();
-        while payload_offset % 4 != 0 {
+        while !payload_offset.is_multiple_of(4) {
             payload_offset += 1;
         }
     }

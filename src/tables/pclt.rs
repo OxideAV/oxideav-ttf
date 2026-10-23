@@ -102,8 +102,8 @@
 //! the OpenType convention that minor-version bumps stay layout-
 //! compatible.
 
-use crate::parser::{read_i8, read_u16, read_u32, read_u8};
 use crate::Error;
+use crate::parser::{read_i8, read_u8, read_u16, read_u32};
 
 /// On-wire table tag (`b"PCLT"`, big-endian `0x50434C54`). Exposed for
 /// callers that walk the table directory directly.

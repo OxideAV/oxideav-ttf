@@ -114,8 +114,8 @@
 //!   surfaced (the field is decoded and accessible) but not consumed
 //!   here; consumers wire it into their text-style controls.
 
-use crate::parser::{read_i32, read_u16, read_u32};
 use crate::Error;
+use crate::parser::{read_i32, read_u16, read_u32};
 
 /// Bound on `designAxisCount`. The spec allows up to 65 535; real fonts
 /// stay well under double digits (Inter ships three: opsz, wght, ital).
@@ -777,7 +777,7 @@ mod tests {
         b.extend_from_slice(&2u16.to_be_bytes()); // axisCount
         b.extend_from_slice(&0u16.to_be_bytes()); // flags
         b.extend_from_slice(&300u16.to_be_bytes()); // valueNameID
-                                                    // axisValue[0]: wght(0) = 700
+        // axisValue[0]: wght(0) = 700
         b.extend_from_slice(&0u16.to_be_bytes());
         b.extend_from_slice(&((700i32) << 16).to_be_bytes());
         // axisValue[1]: wdth(1) = 75

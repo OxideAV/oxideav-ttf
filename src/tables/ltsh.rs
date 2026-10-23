@@ -61,8 +61,8 @@
 //! which the grid-fit advance can be trusted to round to the linear
 //! advance, and the rasteriser computes the advance arithmetically.
 
-use crate::parser::{read_u16, read_u8};
 use crate::Error;
+use crate::parser::{read_u8, read_u16};
 
 /// On-wire table tag (`b"LTSH"`, big-endian Fixed `0x4C545348`). Exposed
 /// for callers that walk the table directory directly.
@@ -118,12 +118,12 @@ impl LtshTable {
             return Err(Error::BadStructure("LTSH: unrecognised version"));
         }
         let num_glyphs = read_u16(bytes, 2)?;
-        if let Some(exp) = expected {
-            if num_glyphs != exp {
-                return Err(Error::BadStructure(
-                    "LTSH: numGlyphs disagrees with maxp.numGlyphs",
-                ));
-            }
+        if let Some(exp) = expected
+            && num_glyphs != exp
+        {
+            return Err(Error::BadStructure(
+                "LTSH: numGlyphs disagrees with maxp.numGlyphs",
+            ));
         }
         // yPels[numGlyphs] is uint8 per §5.7.4 so the body length is
         // exactly `numGlyphs` bytes — the table is `4 + numGlyphs` bytes

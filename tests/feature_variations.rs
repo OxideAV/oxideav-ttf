@@ -34,7 +34,7 @@ fn build_minimal_sfnt(tables: &[(&[u8; 4], Vec<u8>)]) -> Vec<u8> {
     for (tag, payload) in tables {
         records.push((*tag, payload_offset as u32, payload.len() as u32));
         payload_offset += payload.len();
-        while payload_offset % 4 != 0 {
+        while !payload_offset.is_multiple_of(4) {
             payload_offset += 1;
         }
     }
@@ -147,7 +147,7 @@ fn make_fvar_wght(min: f32, default: f32, max: f32) -> Vec<u8> {
     out.extend_from_slice(&20u16.to_be_bytes()); // axisSize
     out.extend_from_slice(&0u16.to_be_bytes()); // instanceCount
     out.extend_from_slice(&8u16.to_be_bytes()); // instanceSize (4 + 4*axisCount)
-                                                // axis record (20 bytes)
+    // axis record (20 bytes)
     out.extend_from_slice(b"wght"); // axisTag
     out.extend_from_slice(&fixed(min));
     out.extend_from_slice(&fixed(default));
@@ -182,10 +182,10 @@ fn make_gsub_v11(
     sl.extend_from_slice(&1u16.to_be_bytes()); // scriptCount
     sl.extend_from_slice(b"DFLT"); // tag
     sl.extend_from_slice(&8u16.to_be_bytes()); // scriptOffset (rel ScriptList)
-                                               // Script @ 8
+    // Script @ 8
     sl.extend_from_slice(&4u16.to_be_bytes()); // defaultLangSysOffset (rel Script)
     sl.extend_from_slice(&0u16.to_be_bytes()); // langSysCount
-                                               // LangSys @ Script+4 = 12
+    // LangSys @ Script+4 = 12
     sl.extend_from_slice(&0u16.to_be_bytes()); // lookupOrderOffset
     sl.extend_from_slice(&0xFFFFu16.to_be_bytes()); // requiredFeatureIndex
     sl.extend_from_slice(&1u16.to_be_bytes()); // featureIndexCount
@@ -198,7 +198,7 @@ fn make_gsub_v11(
     fl.extend_from_slice(&1u16.to_be_bytes()); // featureCount
     fl.extend_from_slice(b"liga"); // tag
     fl.extend_from_slice(&8u16.to_be_bytes()); // featureOffset (rel FeatureList)
-                                               // Feature @ 8
+    // Feature @ 8
     fl.extend_from_slice(&0u16.to_be_bytes()); // featureParamsOffset
     fl.extend_from_slice(&(default_lookups.len() as u16).to_be_bytes());
     for &li in default_lookups {
@@ -227,11 +227,11 @@ fn make_gsub_v11(
         ll.extend_from_slice(&0u16.to_be_bytes()); // lookupFlag
         ll.extend_from_slice(&1u16.to_be_bytes()); // subTableCount
         ll.extend_from_slice(&8u16.to_be_bytes()); // subtableOffset (rel Lookup)
-                                                   // SingleSubstFormat2 @ Lookup+8
+        // SingleSubstFormat2 @ Lookup+8
         ll.extend_from_slice(&2u16.to_be_bytes()); // substFormat
         ll.extend_from_slice(&8u16.to_be_bytes()); // coverageOffset (rel subtable)
         ll.extend_from_slice(&0u16.to_be_bytes()); // glyphCount = 0
-                                                   // Coverage format 1 @ subtable+8
+        // Coverage format 1 @ subtable+8
         ll.extend_from_slice(&1u16.to_be_bytes()); // coverageFormat
         ll.extend_from_slice(&0u16.to_be_bytes()); // glyphCount = 0
     }
@@ -250,7 +250,7 @@ fn make_gsub_v11(
     let rec = fv.len();
     fv.extend_from_slice(&0u32.to_be_bytes()); // conditionSetOffset (patch)
     fv.extend_from_slice(&0u32.to_be_bytes()); // featureTableSubstOffset (patch)
-                                               // ConditionSet
+    // ConditionSet
     let cs = fv.len() as u32;
     fv.extend_from_slice(&1u16.to_be_bytes()); // conditionCount
     let cond_off_pos = fv.len();
@@ -260,7 +260,7 @@ fn make_gsub_v11(
     fv.extend_from_slice(&0u16.to_be_bytes()); // axisIndex 0 (wght)
     fv.extend_from_slice(&cond_min.to_be_bytes()); // filterRangeMin
     fv.extend_from_slice(&cond_max.to_be_bytes()); // filterRangeMax
-                                                   // FeatureTableSubstitution
+    // FeatureTableSubstitution
     let ss = fv.len() as u32;
     fv.extend_from_slice(&1u16.to_be_bytes()); // major
     fv.extend_from_slice(&0u16.to_be_bytes()); // minor

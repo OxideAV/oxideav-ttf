@@ -28,7 +28,7 @@
 
 use oxideav_ttf::Font;
 use std::collections::BTreeSet;
-use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Mutex;
 
 static SITES: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());

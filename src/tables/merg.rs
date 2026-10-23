@@ -34,9 +34,9 @@
 //! consumes these entries to decide which glyph *sequences* get
 //! antialiased together) is a renderer concern left to the consumer crate.
 
+use crate::Error;
 use crate::parser::read_u16;
 use crate::tables::gdef::class_def_lookup;
-use crate::Error;
 
 /// `MERGE_LTR` — merge the glyph pair before antialiasing, for left-to-right
 /// visual order.

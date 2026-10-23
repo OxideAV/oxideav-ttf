@@ -66,7 +66,7 @@ fn build_minimal_sfnt(tables: &[(&[u8; 4], Vec<u8>)]) -> Vec<u8> {
     for (tag, payload) in tables {
         records.push((*tag, payload_offset as u32, payload.len() as u32));
         payload_offset += payload.len();
-        while payload_offset % 4 != 0 {
+        while !payload_offset.is_multiple_of(4) {
             payload_offset += 1;
         }
     }
@@ -174,12 +174,12 @@ fn make_pclt(major_version: u16) -> Vec<u8> {
     let mut b = Vec::with_capacity(PCLT_TABLE_LEN);
     b.extend_from_slice(&major_version.to_be_bytes()); // majorVersion
     b.extend_from_slice(&0u16.to_be_bytes()); // minorVersion
-                                              // FontNumber: native (bit 31 clear), vendor 'M', assigned 7.
+    // FontNumber: native (bit 31 clear), vendor 'M', assigned 7.
     let font_number: u32 = (u32::from(b'M') << 24) | 7;
     b.extend_from_slice(&font_number.to_be_bytes());
     b.extend_from_slice(&569u16.to_be_bytes()); // Pitch
     b.extend_from_slice(&1062u16.to_be_bytes()); // xHeight
-                                                 // Style: structure 0 (solid), width 0 (normal), posture 1 (italic).
+    // Style: structure 0 (solid), width 0 (normal), posture 1 (italic).
     b.extend_from_slice(&1u16.to_be_bytes());
     // TypeFamily: vendor 4 (Monotype) + family code 517.
     b.extend_from_slice(&((4u16 << 12) | 517).to_be_bytes());
@@ -188,7 +188,7 @@ fn make_pclt(major_version: u16) -> Vec<u8> {
     let mut typeface = [b' '; 16];
     typeface[..9].copy_from_slice(b"Times New");
     b.extend_from_slice(&typeface); // Typeface[16]
-                                    // CharacterComplement: Windows 3.1 "ANSI" per the §5.7.7 example.
+    // CharacterComplement: Windows 3.1 "ANSI" per the §5.7.7 example.
     b.extend_from_slice(&0xFFFF_FFFF_37FF_FFFEu64.to_be_bytes());
     b.extend_from_slice(b"TNRI00"); // FileName[6]
     b.push(0u8); // StrokeWeight (0 = Book / text / regular)

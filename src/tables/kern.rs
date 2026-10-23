@@ -35,8 +35,8 @@
 //! Kerning subtables are additive, so [`KernTable::lookup`] sums every
 //! matching subtable's contribution.
 
-use crate::parser::{read_i16, read_u16, read_u32};
 use crate::Error;
+use crate::parser::{read_i16, read_u16, read_u32};
 
 #[derive(Debug, Clone)]
 // internal — exposed for tests/fuzz; not part of the stable API
@@ -152,7 +152,7 @@ impl Format2Subtable {
         let byte_off = lo + ro;
         // The left value is a multiple of rowWidth and the right value a
         // multiple of 2, so the sum is even; guard anyway.
-        if self.row_width == 0 || byte_off % 2 != 0 {
+        if self.row_width == 0 || !byte_off.is_multiple_of(2) {
             return 0;
         }
         let idx = byte_off / 2;
@@ -422,11 +422,11 @@ mod tests {
         let mut t = vec![0u8; 4];
         t[0..2].copy_from_slice(&0u16.to_be_bytes()); // version
         t[2..4].copy_from_slice(&1u16.to_be_bytes()); // nTables
-                                                      // Subtable (header 6 + body 8 + 1*6 = 20 bytes).
+        // Subtable (header 6 + body 8 + 1*6 = 20 bytes).
         let mut sub = vec![0u8; 20];
         sub[0..2].copy_from_slice(&0u16.to_be_bytes()); // sub-version
         sub[2..4].copy_from_slice(&20u16.to_be_bytes()); // length
-                                                         // coverage = 0x0001 (horizontal, format 0)
+        // coverage = 0x0001 (horizontal, format 0)
         sub[4..6].copy_from_slice(&1u16.to_be_bytes());
         // body: nPairs=1
         sub[6..8].copy_from_slice(&1u16.to_be_bytes());
@@ -560,22 +560,22 @@ mod tests {
         sub[0..2].copy_from_slice(&0u16.to_be_bytes()); // sub version
         sub[2..4].copy_from_slice(&38u16.to_be_bytes()); // length
         sub[4..6].copy_from_slice(&0x0201u16.to_be_bytes()); // format 2, horizontal
-                                                             // body header (offsets are from the subtable start)
+        // body header (offsets are from the subtable start)
         sub[6..8].copy_from_slice(&4u16.to_be_bytes()); // rowWidth
         sub[8..10].copy_from_slice(&14u16.to_be_bytes()); // leftClassTable offset
         sub[10..12].copy_from_slice(&22u16.to_be_bytes()); // rightClassTable offset
         sub[12..14].copy_from_slice(&30u16.to_be_bytes()); // array offset
-                                                           // left class table at sub+14
+        // left class table at sub+14
         sub[14..16].copy_from_slice(&10u16.to_be_bytes()); // firstGlyph
         sub[16..18].copy_from_slice(&2u16.to_be_bytes()); // nGlyphs
         sub[18..20].copy_from_slice(&4u16.to_be_bytes()); // glyph10 -> class1*rowWidth
         sub[20..22].copy_from_slice(&0u16.to_be_bytes()); // glyph11 -> class0
-                                                          // right class table at sub+22
+        // right class table at sub+22
         sub[22..24].copy_from_slice(&20u16.to_be_bytes()); // firstGlyph
         sub[24..26].copy_from_slice(&2u16.to_be_bytes()); // nGlyphs
         sub[26..28].copy_from_slice(&2u16.to_be_bytes()); // glyph20 -> class1*2
         sub[28..30].copy_from_slice(&0u16.to_be_bytes()); // glyph21 -> class0
-                                                          // array at sub+30: 4 cells, r1c1 = index 3
+        // array at sub+30: 4 cells, r1c1 = index 3
         sub[36..38].copy_from_slice(&cell_value.to_be_bytes());
         t.extend_from_slice(&sub);
         t
@@ -619,7 +619,7 @@ mod tests {
         let mut t = vec![0u8; 4];
         t[0..2].copy_from_slice(&0u16.to_be_bytes());
         t[2..4].copy_from_slice(&2u16.to_be_bytes()); // nTables = 2
-                                                      // format-0 subtable (length 20): pair (10,20) = -30.
+        // format-0 subtable (length 20): pair (10,20) = -30.
         let mut f0 = vec![0u8; 20];
         f0[2..4].copy_from_slice(&20u16.to_be_bytes());
         f0[4..6].copy_from_slice(&1u16.to_be_bytes()); // coverage: format 0, horizontal

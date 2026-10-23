@@ -12,7 +12,7 @@
 //! shaper — every assertion below traces to a field laid out in
 //! `tests/fixtures/InterVariable.ttf`.
 
-use oxideav_ttf::{Font, StatAxisValue, STAT_FLAG_ELIDABLE_AXIS_VALUE_NAME};
+use oxideav_ttf::{Font, STAT_FLAG_ELIDABLE_AXIS_VALUE_NAME, StatAxisValue};
 
 const FONT: &[u8] = include_bytes!("fixtures/InterVariable.ttf");
 

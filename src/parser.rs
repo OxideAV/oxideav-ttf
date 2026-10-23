@@ -196,7 +196,7 @@ mod tests {
         let mut bytes = vec![0u8; 32];
         bytes[0..4].copy_from_slice(&0x00010000u32.to_be_bytes()); // version
         bytes[4..6].copy_from_slice(&1u16.to_be_bytes()); // numTables
-                                                          // searchRange/entrySelector/rangeShift left zero.
+        // searchRange/entrySelector/rangeShift left zero.
         bytes[12..16].copy_from_slice(b"head");
         // checksum 0
         bytes[20..24].copy_from_slice(&28u32.to_be_bytes()); // offset

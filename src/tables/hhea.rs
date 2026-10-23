@@ -7,8 +7,8 @@
 //! `metricDataFormat`, and `numberOfHMetrics` (the count of long entries in
 //! `hmtx`).
 
-use crate::parser::{read_i16, read_u16};
 use crate::Error;
+use crate::parser::{read_i16, read_u16};
 
 #[derive(Debug, Clone, Copy)]
 pub struct HheaTable {

@@ -101,8 +101,8 @@
 //!    a normalised coord vector, return per-point `(dx, dy)` deltas
 //!    (in font units) to add to the static outline.
 
-use crate::parser::{read_i16, read_i8, read_u16, read_u32, read_u8};
 use crate::Error;
+use crate::parser::{read_i8, read_i16, read_u8, read_u16, read_u32};
 
 /// Sanity cap on a single glyph's tuple-variation count.
 const MAX_TUPLES_PER_GLYPH: u16 = 4096;
@@ -686,11 +686,7 @@ fn infer_contour(
 /// Next index within a contour `[start, end]`, wrapping `end → start`.
 #[inline]
 fn next_in_contour(i: usize, start: usize, end: usize) -> usize {
-    if i >= end {
-        start
-    } else {
-        i + 1
-    }
+    if i >= end { start } else { i + 1 }
 }
 
 /// Infer one axis's delta for a target point lying (in contour order)
@@ -923,11 +919,11 @@ mod tests {
         let mut b = vec![0u8; 20 + 4];
         b[0..2].copy_from_slice(&1u16.to_be_bytes()); // major
         b[4..6].copy_from_slice(&1u16.to_be_bytes()); // axisCount
-                                                      // sharedTupleCount 0, sharedTuplesOffset 0
+        // sharedTupleCount 0, sharedTuplesOffset 0
         b[12..14].copy_from_slice(&1u16.to_be_bytes()); // glyphCount
-                                                        // flags = 0 (short offsets)
+        // flags = 0 (short offsets)
         b[16..20].copy_from_slice(&24u32.to_be_bytes()); // glyphVariationDataArrayOffset
-                                                         // offsets[0] = 0, offsets[1] = 0 (already zero)
+        // offsets[0] = 0, offsets[1] = 0 (already zero)
         b
     }
 
@@ -1070,7 +1066,7 @@ mod tests {
         b[0..2].copy_from_slice(&1u16.to_be_bytes()); // major
         b[4..6].copy_from_slice(&1u16.to_be_bytes()); // axisCount
         b[12..14].copy_from_slice(&1u16.to_be_bytes()); // glyphCount
-                                                        // flags = 0 (short offsets)
+        // flags = 0 (short offsets)
         let data_array_off = 24u32; // header(20) + offsets[2]*2 = 24
         b[16..20].copy_from_slice(&data_array_off.to_be_bytes());
         // offsets[0] = 0 (÷2), offsets[1] = block.len()/2. Block length

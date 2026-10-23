@@ -69,7 +69,7 @@ fn push_ivs(b: &mut B, rows: &[i16]) -> u32 {
     b.u32(12); // variationRegionListOffset (IVS-relative)
     b.u16(1); // itemVariationDataCount
     b.u32(22); // ivdOffsets[0]
-               // Region list: 1 axis, 1 region, (0, +1, +1) in F2DOT14.
+    // Region list: 1 axis, 1 region, (0, +1, +1) in F2DOT14.
     b.u16(1);
     b.u16(1);
     b.i16(0);
@@ -132,7 +132,7 @@ fn build_main_table() -> MainTable {
     let cl = b.len() as u32;
     b.u8(1); // format
     b.u32(2); // numClips
-              // Clip 0: gids 5..=6 -> static ClipBoxFormat1.
+    // Clip 0: gids 5..=6 -> static ClipBoxFormat1.
     b.u16(5);
     b.u16(6);
     let box0_slot = b.slot24();

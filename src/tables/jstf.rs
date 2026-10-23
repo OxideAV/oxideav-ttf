@@ -28,8 +28,8 @@
 //! arrays. The actual GSUB/GPOS lookups the mod-lists reference live in
 //! those tables; JSTF only carries indices into their lookup lists.
 
-use crate::parser::read_u16;
 use crate::Error;
+use crate::parser::read_u16;
 
 /// The 4-byte table tag.
 pub const JSTF_TABLE_TAG: [u8; 4] = *b"JSTF";
@@ -361,9 +361,10 @@ mod tests {
         assert_eq!(prio.mod_list(JstfMod::ShrinkageEnableGsub), vec![7]);
         // Other slots are NULL.
         assert!(prio.mod_list(JstfMod::ExtensionEnableGpos).is_empty());
-        assert!(prio
-            .jstf_max_lookup_count(JstfMod::ShrinkageJstfMax)
-            .is_none());
+        assert!(
+            prio.jstf_max_lookup_count(JstfMod::ShrinkageJstfMax)
+                .is_none()
+        );
         // Out-of-range priority.
         assert!(lang.priority(1).is_none());
     }

@@ -50,8 +50,8 @@
 //!   [`Font::glyph_name`](crate::Font::glyph_name) accessor, looking a
 //!   `StandardMac` index up in [`STANDARD_MAC_GLYPH_NAMES`].
 
-use crate::parser::{read_i16, read_i32, read_u16, read_u32, read_u8};
 use crate::Error;
+use crate::parser::{read_i16, read_i32, read_u8, read_u16, read_u32};
 
 /// `post` table tag (`b"post"`).
 pub const POST_TABLE_TAG: [u8; 4] = *b"post";

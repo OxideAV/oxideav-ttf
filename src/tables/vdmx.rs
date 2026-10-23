@@ -107,8 +107,8 @@
 //! the §7.3.5 rule can cross-check `is_variable()` before
 //! consulting these accessors.
 
-use crate::parser::{read_i16, read_u16, read_u8};
 use crate::Error;
+use crate::parser::{read_i16, read_u8, read_u16};
 
 /// On-wire table tag (`b"VDMX"`, big-endian Fixed `0x56444D58`).
 /// Exposed for callers that walk the table directory directly.
@@ -455,12 +455,12 @@ impl VdmxTable {
             let y_pel_height = read_u16(bytes, rec_off)?;
             let y_max = read_i16(bytes, rec_off + 2)?;
             let y_min = read_i16(bytes, rec_off + 4)?;
-            if let Some(prev) = prev_ppem {
-                if y_pel_height <= prev {
-                    return Err(Error::BadStructure(
-                        "VDMX: vTable yPelHeight not strictly increasing",
-                    ));
-                }
+            if let Some(prev) = prev_ppem
+                && y_pel_height <= prev
+            {
+                return Err(Error::BadStructure(
+                    "VDMX: vTable yPelHeight not strictly increasing",
+                ));
             }
             prev_ppem = Some(y_pel_height);
             entries.push(VdmxVTableRecord {
@@ -562,7 +562,7 @@ mod tests {
         out.extend_from_slice(&version.to_be_bytes());
         out.extend_from_slice(&1u16.to_be_bytes()); // numRecs
         out.extend_from_slice(&1u16.to_be_bytes()); // numRatios
-                                                    // RatioRange: (charset=1, 1:1)
+        // RatioRange: (charset=1, 1:1)
         out.extend_from_slice(&[1, 1, 1, 1]);
         // Offset16 to the single group.
         let group_off = VDMX_HEADER_LEN + VDMX_RATIO_RECORD_LEN + VDMX_OFFSET_LEN;

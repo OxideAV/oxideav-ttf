@@ -6,7 +6,7 @@
 //! Spec: Adobe Technical Note #5149 §1.2 (Platform / Script / Language
 //! IDs) and §1.3–1.10 (per-`nameID` semantics).
 
-use oxideav_ttf::{name_id, platform, Font};
+use oxideav_ttf::{Font, name_id, platform};
 
 const FIXTURE_SANS: &[u8] = include_bytes!("fixtures/DejaVuSans.ttf");
 

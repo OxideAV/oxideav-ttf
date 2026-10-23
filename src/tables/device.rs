@@ -47,9 +47,9 @@
 //! Spec: Microsoft OpenType §"Common Table Formats" / ISO/IEC
 //! 14496-22 §6.2 (OFF).
 
+use crate::Error;
 use crate::parser::read_u16;
 use crate::tables::mvar::ItemVariationStore;
-use crate::Error;
 
 /// `deltaFormat` discriminator for a VariationIndex table.
 pub const DELTA_FORMAT_VARIATION_INDEX: u16 = 0x8000;

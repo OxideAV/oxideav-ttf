@@ -38,8 +38,8 @@
 //!  98   uint16 usUpperOpticalPointSize
 //! ```
 
-use crate::parser::{read_i16, read_u16, read_u32};
 use crate::Error;
+use crate::parser::{read_i16, read_u16, read_u32};
 
 /// `fsType` embedding-permission bits (§5.2.3 `fsType`). Bit 0 is reserved
 /// (must be 0); the low 4 bits 1..3 are the mutually-exclusive licensing

@@ -53,8 +53,8 @@
 //! static `cvt ` values for that variation instance.
 
 use super::gvar::{decode_packed_deltas, decode_packed_points, f2dot14, tuple_scalar};
-use crate::parser::{read_i16, read_u16};
 use crate::Error;
+use crate::parser::{read_i16, read_u16};
 
 /// Tuple-index high-byte flags (mask `0xF000`) — shared with `gvar`.
 const TI_EMBEDDED_PEAK: u16 = 0x8000;
@@ -284,12 +284,12 @@ mod tests {
         b[2..4].copy_from_slice(&0u16.to_be_bytes()); // minor
         b[4..6].copy_from_slice(&1u16.to_be_bytes()); // tupleVariationCount = 1
         b[6..8].copy_from_slice(&(data_off as u16).to_be_bytes()); // dataOffset
-                                                                   // TupleVariationHeader: varDataSize = just the delta run
-                                                                   // (the shared point set lives outside the tuple's data).
+        // TupleVariationHeader: varDataSize = just the delta run
+        // (the shared point set lives outside the tuple's data).
         b[8..10].copy_from_slice(&(delta_bytes.len() as u16).to_be_bytes());
         b[10..12].copy_from_slice(&TI_EMBEDDED_PEAK.to_be_bytes()); // tupleIndex (embedded peak)
         b[12..14].copy_from_slice(&0x4000u16.to_be_bytes()); // peak = 1.0 in F2DOT14
-                                                             // Data area: shared all-points sentinel, then tuple deltas.
+        // Data area: shared all-points sentinel, then tuple deltas.
         b.push(0x00);
         b.extend_from_slice(&delta_bytes);
         b

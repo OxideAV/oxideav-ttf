@@ -9,8 +9,8 @@
 //! path on a real font. The fractional VariationIndex deltas themselves
 //! are covered by the synthetic unit tests in `tables::math`.
 
-use oxideav_ttf::tables::math::{constant, GrowDirection, MathKernCorner};
 use oxideav_ttf::Font;
+use oxideav_ttf::tables::math::{GrowDirection, MathKernCorner, constant};
 
 const DEJAVU_SANS: &[u8] = include_bytes!("fixtures/DejaVuSans.ttf");
 const DEJAVU_MONO: &[u8] = include_bytes!("fixtures/DejaVuSansMono.ttf");
@@ -87,9 +87,10 @@ fn assembly_italics_correction_var_matches_plain() {
 
     // A glyph with no assembly declines on both paths.
     assert!(v.assembly(0, GrowDirection::Vertical).is_none());
-    assert!(f
-        .math_assembly_italics_correction_var(0, GrowDirection::Vertical)
-        .is_none());
+    assert!(
+        f.math_assembly_italics_correction_var(0, GrowDirection::Vertical)
+            .is_none()
+    );
 }
 
 #[test]

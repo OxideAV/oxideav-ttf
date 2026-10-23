@@ -49,8 +49,8 @@
 //! driven by `init`/`medi`/`fina` + `mark`/`mkmk`/`curs`), the requested
 //! feature set drives correct output directly.
 
-use crate::tables::gpos::PosRecord;
 use crate::Font;
+use crate::tables::gpos::PosRecord;
 
 /// Maximum number of GSUB lookup passes over the buffer, as a guard
 /// against a pathological self-growing lookup graph (a multiple- or
@@ -271,23 +271,23 @@ impl<'a> Font<'a> {
                         cand_gids.push(w.gid);
                         cand_idx.push(i + off);
                     }
-                    if let Some((lig, consumed)) = self.gsub_apply_lookup_type_4(li, &cand_gids) {
-                        if consumed >= 1 {
-                            let cluster = buf[i].cluster;
-                            buf[i] = WorkGlyph { gid: lig, cluster };
-                            // Remove the consumed components 1..consumed
-                            // (their absolute indices), highest first so
-                            // earlier removals don't shift later indices.
-                            let to_remove: Vec<usize> =
-                                cand_idx[1..consumed.min(cand_idx.len())].to_vec();
-                            for &idx in to_remove.iter().rev() {
-                                if idx < buf.len() {
-                                    buf.remove(idx);
-                                }
+                    if let Some((lig, consumed)) = self.gsub_apply_lookup_type_4(li, &cand_gids)
+                        && consumed >= 1
+                    {
+                        let cluster = buf[i].cluster;
+                        buf[i] = WorkGlyph { gid: lig, cluster };
+                        // Remove the consumed components 1..consumed
+                        // (their absolute indices), highest first so
+                        // earlier removals don't shift later indices.
+                        let to_remove: Vec<usize> =
+                            cand_idx[1..consumed.min(cand_idx.len())].to_vec();
+                        for &idx in to_remove.iter().rev() {
+                            if idx < buf.len() {
+                                buf.remove(idx);
                             }
-                            i += 1;
-                            continue;
                         }
+                        i += 1;
+                        continue;
                     }
                     i += 1;
                 }

@@ -33,7 +33,7 @@ fn build_minimal_sfnt(tables: &[(&[u8; 4], Vec<u8>)]) -> Vec<u8> {
     for (tag, payload) in tables {
         records.push((*tag, payload_offset as u32, payload.len() as u32));
         payload_offset += payload.len();
-        while payload_offset % 4 != 0 {
+        while !payload_offset.is_multiple_of(4) {
             payload_offset += 1;
         }
     }
@@ -135,7 +135,7 @@ fn make_triangle() -> Vec<u8> {
     g.extend_from_slice(&100i16.to_be_bytes()); // yMax
     g.extend_from_slice(&2u16.to_be_bytes()); // endPtsOfContours[0] = 2
     g.extend_from_slice(&0u16.to_be_bytes()); // instructionLength
-                                              // 3 points, all on-curve (flag 0x01), X/Y as shorts.
+    // 3 points, all on-curve (flag 0x01), X/Y as shorts.
     g.push(0x01);
     g.push(0x01);
     g.push(0x01);

@@ -35,7 +35,7 @@ fn build_minimal_sfnt(tables: &[(&[u8; 4], Vec<u8>)]) -> Vec<u8> {
     for (tag, payload) in tables {
         records.push((*tag, payload_offset as u32, payload.len() as u32));
         payload_offset += payload.len();
-        while payload_offset % 4 != 0 {
+        while !payload_offset.is_multiple_of(4) {
             payload_offset += 1;
         }
     }
@@ -152,12 +152,12 @@ fn make_eblc(ppem: u8, entry_len: u32) -> Vec<u8> {
     let list_off = 56u32;
     let base = 8;
     bytes[base..base + 4].copy_from_slice(&list_off.to_be_bytes()); // indexSubTableArrayOffset
-                                                                    // indexTablesSize = IndexSubTableArray record (8) + IndexSubTable
-                                                                    // format-1 header (8) + sbitOffsets[2] (8) = 24.
+    // indexTablesSize = IndexSubTableArray record (8) + IndexSubTable
+    // format-1 header (8) + sbitOffsets[2] (8) = 24.
     bytes[base + 4..base + 8].copy_from_slice(&24u32.to_be_bytes());
     bytes[base + 8..base + 12].copy_from_slice(&1u32.to_be_bytes()); // numberOfIndexSubTables
     bytes[base + 12..base + 16].copy_from_slice(&0u32.to_be_bytes()); // colorRef
-                                                                      // hori (12) + vert (12) line metrics zeroed.
+    // hori (12) + vert (12) line metrics zeroed.
     let after = base + 16 + 24;
     bytes[after..after + 2].copy_from_slice(&5u16.to_be_bytes()); // startGlyphIndex
     bytes[after + 2..after + 4].copy_from_slice(&5u16.to_be_bytes()); // endGlyphIndex
@@ -175,7 +175,7 @@ fn make_eblc(ppem: u8, entry_len: u32) -> Vec<u8> {
     bytes.extend_from_slice(&1u16.to_be_bytes()); // indexFormat = 1 (u32 offsets)
     bytes.extend_from_slice(&1u16.to_be_bytes()); // imageFormat = 1 (small, byte-aligned)
     bytes.extend_from_slice(&4u32.to_be_bytes()); // imageDataOffset (into EBDT, past header)
-                                                  // sbitOffsets[2]: glyph 5 spans [0, entry_len).
+    // sbitOffsets[2]: glyph 5 spans [0, entry_len).
     bytes.extend_from_slice(&0u32.to_be_bytes());
     bytes.extend_from_slice(&entry_len.to_be_bytes());
     bytes
@@ -206,7 +206,7 @@ fn make_ebsc(target_ppem: u8, substitute_ppem: u8) -> Vec<u8> {
     bytes.extend_from_slice(&2u16.to_be_bytes()); // majorVersion = 2
     bytes.extend_from_slice(&0u16.to_be_bytes()); // minorVersion = 0
     bytes.extend_from_slice(&1u32.to_be_bytes()); // numSizes = 1
-                                                  // BitmapScale: hori (12) + vert (12) line metrics, then 4 ppem bytes.
+    // BitmapScale: hori (12) + vert (12) line metrics, then 4 ppem bytes.
     bytes.extend_from_slice(&[0u8; 24]);
     bytes.push(target_ppem); // ppemX
     bytes.push(target_ppem); // ppemY

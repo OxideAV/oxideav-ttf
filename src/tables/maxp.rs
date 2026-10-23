@@ -8,8 +8,8 @@
 //! for a v1.0 table. They let a rasteriser pre-size its point / contour /
 //! stack buffers and validate composite nesting.
 
-use crate::parser::{read_u16, read_u32};
 use crate::Error;
+use crate::parser::{read_u16, read_u32};
 
 /// The v1.0 TrueType maxima (offsets 6..32 of a 32-byte `maxp`).
 #[derive(Debug, Clone, Copy)]

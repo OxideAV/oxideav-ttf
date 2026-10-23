@@ -19,8 +19,8 @@
 //! (Platform / Script / Language IDs) and §1.3–1.10 (per-`nameID`
 //! semantics). Apple TrueType Reference §"name".
 
-use crate::parser::read_u16;
 use crate::Error;
+use crate::parser::read_u16;
 
 /// Well-known `nameID` values.
 ///
@@ -291,7 +291,7 @@ fn decode<'a>(platform: u16, encoding: u16, raw: &'a [u8]) -> Option<std::borrow
         // UTF-16 BE: Unicode platform (0,*), Windows Unicode (3,1) and
         // (3,10).
         (0, _) | (3, 1) | (3, 10) => {
-            if raw.len() % 2 != 0 {
+            if !raw.len().is_multiple_of(2) {
                 return None;
             }
             let mut s = String::with_capacity(raw.len() / 2);
@@ -353,7 +353,7 @@ mod tests {
         out[0..2].copy_from_slice(&0u16.to_be_bytes()); // format
         out[2..4].copy_from_slice(&1u16.to_be_bytes()); // count
         out[4..6].copy_from_slice(&(header_size as u16).to_be_bytes()); // stringOffset
-                                                                        // Record:
+        // Record:
         out[6..8].copy_from_slice(&3u16.to_be_bytes()); // platform = Windows
         out[8..10].copy_from_slice(&1u16.to_be_bytes()); // encoding = Unicode BMP
         out[10..12].copy_from_slice(&0x0409u16.to_be_bytes()); // language = English

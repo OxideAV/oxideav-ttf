@@ -53,11 +53,13 @@ fn lt1_single_positioning_fires_on_real_arabic_glyphs() {
     let mut hits = 0usize;
     for idx in &lt1 {
         for gid in 0..f.glyph_count() {
-            if let Some(v) = f.gpos_apply_lookup_type_1(*idx, gid) {
-                if v.x_advance != 0 || v.y_advance != 0 || v.x_placement != 0 || v.y_placement != 0
-                {
-                    hits += 1;
-                }
+            if let Some(v) = f.gpos_apply_lookup_type_1(*idx, gid)
+                && (v.x_advance != 0
+                    || v.y_advance != 0
+                    || v.x_placement != 0
+                    || v.y_placement != 0)
+            {
+                hits += 1;
             }
         }
     }
@@ -115,10 +117,10 @@ fn lt5_mark_to_ligature_anchors_marks_on_lam_alef() {
         .expect("LAM-ALEF (U+FEFB) must map");
     let mut marks: Vec<(char, u16)> = Vec::new();
     for cp in 0x064Bu32..=0x0652 {
-        if let Some(c) = char::from_u32(cp) {
-            if let Some(g) = f.glyph_index(c) {
-                marks.push((c, g));
-            }
+        if let Some(c) = char::from_u32(cp)
+            && let Some(g) = f.glyph_index(c)
+        {
+            marks.push((c, g));
         }
     }
     assert!(
@@ -247,8 +249,8 @@ fn lt1_plus_lt5_combined_shaping_pass_on_lam_alef_with_fatha() {
         }
     }
     let _ = lt1_hit_count; // LAM-ALEF may or may not be in LT 1 coverage
-                           // — the test is a panic-freedom + dispatch
-                           // walk, not a value assertion for LT 1.
+    // — the test is a panic-freedom + dispatch
+    // walk, not a value assertion for LT 1.
 
     // 2. LT 5 mark-to-ligature: attach FATHA on LAM (component 0).
     let off = f
