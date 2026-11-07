@@ -115,6 +115,7 @@ const MAX_DOCUMENT_RECORDS: usize = u16::MAX as usize;
 /// the document exactly as stored (plain UTF-8 text *or* gzip-encoded);
 /// its length matches the on-wire `svgDocLength` field.
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct SvgDocument<'a> {
     /// First glyph ID covered by this document (inclusive).
     pub start_glyph_id: u16,

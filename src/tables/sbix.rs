@@ -72,6 +72,7 @@ pub const MAX_DUPE_DEPTH: usize = 8;
 
 /// One per-glyph bitmap entry resolved out of a strike.
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct SbixGlyph<'a> {
     /// 4-byte format tag, e.g. `*b"png "`, `*b"jpg "`, `*b"tiff"`,
     /// or `*b"dupe"` (the indirection sentinel — `bytes` is then a

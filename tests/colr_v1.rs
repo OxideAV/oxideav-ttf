@@ -819,6 +819,9 @@ fn bounded_graph_walk_visits_all_nodes() {
             | Paint::LinearGradient { .. }
             | Paint::RadialGradient { .. }
             | Paint::SweepGradient { .. } => {}
+            // A paint format this test does not know has no children
+            // to walk.
+            _ => {}
         }
     }
     // Every node in the synthetic graph decodes except the format-99

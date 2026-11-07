@@ -78,6 +78,7 @@ const MAX_GSUB_BUFFER_GROWTH: usize = 64;
 ///   this glyph. Seeded from the horizontal `hmtx` advance, then
 ///   adjusted by GPOS.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ShapedGlyph {
     pub glyph_id: u16,
     pub cluster: u32,

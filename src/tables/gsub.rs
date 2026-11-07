@@ -74,6 +74,7 @@ const MAX_NESTED_LOOKUP_DEPTH: u8 = 8;
 /// `*b"init"`, `*b"medi"`, `*b"fina"`, `*b"isol"`, `*b"liga"`,
 /// `*b"smcp"` — the OpenType registered-feature catalogue.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct GsubFeature {
     pub tag: [u8; 4],
     pub lookup_indices: Vec<u16>,

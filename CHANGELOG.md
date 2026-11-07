@@ -7,8 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `PosRecord::new(glyph_index, value)` and `PosValue::with_*` setters, so callers can stop using struct literals.
+
 ### Changed
 
+- API hygiene: the enums `Error`, `Paint` (COLRv1 paint formats) and
+  `StatAxisValue` (`tables::stat::AxisValue`), and the derived records
+  `ShapedGlyph`, `CollectionHeader`, `ColorBitmap`, `GrayBitmap`,
+  `CompositeBitmap`, `SbixGlyph`, `SvgDocument`, `NamedInstance`,
+  `VariationAxis`, `NameRecord`, `GposFeature`, `GsubFeature` and
+  `MetaRecord` are now `#[non_exhaustive]` (match the enums with a `_`
+  arm). Records that mirror a fixed binary record layout (`ColorLayer`,
+  `ColorStop`, `ColorLine`, `GaspRange`, `CursiveAttachment`,
+  `AxisRecord`, `EbdtComponent`, `SbitLineMetrics`, `BitmapScale`,
+  `RatioRange`, `VdmxVTableRecord`, `VertOriginEntry`, `PostV20`,
+  `PostV25`, `BigGlyphMetrics`, `SmallGlyphMetrics`), the geometry values
+  (`Point`, `Contour`, `BBox`, `TtOutline`, `Affine2x3`, `ClipBox`) and
+  the fixed-format enums (`BaseCoord`, `CaretValue`, `CompositeMode`,
+  `Extend`, `PostFormat`, `GlyphNameRef`, `GrowDirection`,
+  `KernHeaderVariant`, `MathKernCorner`, `JstfMod`) stay exhaustive.
+  `PosValue` / `PosRecord` stay exhaustive for now because a sibling
+  crate builds them by struct literal.
 - edition 2024, MSRV 1.95
 
 ## [0.1.8](https://github.com/OxideAV/oxideav-ttf/compare/v0.1.7...v0.1.8) - 2026-08-15

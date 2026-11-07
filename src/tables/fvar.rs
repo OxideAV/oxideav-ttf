@@ -65,6 +65,7 @@ pub const AXIS_FLAG_HIDDEN: u16 = 0x0001;
 /// One variation axis as published in the font's `fvar` table. All
 /// values are in user-space units (Fixed 16.16 scaled to f32 here).
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct VariationAxis {
     pub tag: [u8; 4],
     pub min: f32,
@@ -86,6 +87,7 @@ impl VariationAxis {
 
 /// One named instance (a pre-defined coordinate vector).
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct NamedInstance {
     /// `name` table id for the subfamily label ("Light", "Bold" …).
     pub subfamily_name_id: u16,

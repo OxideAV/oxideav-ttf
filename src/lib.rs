@@ -213,6 +213,7 @@ pub use tables::vorg::{VORG_MAJOR_VERSION, VORG_MINOR_VERSION, VertOriginEntry};
 
 /// Errors emitted during font parsing or glyph lookup.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Error {
     /// The input slice is too short for the requested header / structure.
     UnexpectedEof,

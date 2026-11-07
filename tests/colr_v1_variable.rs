@@ -78,6 +78,8 @@ fn walk(
         | Paint::LinearGradient { .. }
         | Paint::RadialGradient { .. }
         | Paint::SweepGradient { .. } => {}
+        // A paint format this test does not know has no children to walk.
+        _ => {}
     }
     for child in children {
         walk(font, child, visited, depth + 1, dump, undecodable);

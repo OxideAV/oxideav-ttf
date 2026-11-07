@@ -32,6 +32,7 @@ use crate::tables::cblc::{BigGlyphMetrics, CblcEntry, SmallGlyphMetrics};
 
 /// One glyph's worth of data resolved out of CBDT, ready for PNG decode.
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct ColorBitmap<'a> {
     /// Width of the bitmap in pixels (from the per-glyph metrics).
     pub width: u8,

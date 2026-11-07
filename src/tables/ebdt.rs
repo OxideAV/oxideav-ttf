@@ -55,6 +55,7 @@ use crate::tables::cblc::{BigGlyphMetrics, CblcEntry, SmallGlyphMetrics};
 /// `0xFF` = opaque/black). The caller composites it at `(bearing_x,
 /// bearing_y)` relative to the pen origin.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct GrayBitmap {
     /// Width of the bitmap in pixels (from the per-glyph metrics).
     pub width: u8,
@@ -104,6 +105,7 @@ pub struct EbdtComponent {
 ///
 /// [`Font`]: crate::Font
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct CompositeBitmap {
     /// Composite bounding-box width in pixels (from the composite's own
     /// Small/BigGlyphMetrics).

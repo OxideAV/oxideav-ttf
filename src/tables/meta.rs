@@ -146,6 +146,7 @@ pub const META_TAG_BILD: [u8; 4] = *b"bild";
 /// the on-wire `meta` table bytes — its length matches the on-wire
 /// `dataLength` field exactly (no padding is implied by the spec).
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct MetaRecord<'a> {
     /// The four-byte ASCII tag identifying the category of the
     /// payload. See §5.7.6.2 for the registered + reserved tags.

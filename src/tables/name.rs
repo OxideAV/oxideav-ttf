@@ -93,6 +93,7 @@ pub mod platform {
 /// locator tuple is still surfaced so a caller can decode the raw bytes
 /// itself via [`NameTable::record_bytes`].
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct NameRecord {
     pub platform_id: u16,
     pub encoding_id: u16,

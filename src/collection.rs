@@ -43,6 +43,7 @@ const MAX_SUBFONTS: u32 = 1024;
 /// Parsed TTC header. Carries the per-subfont byte offsets so the caller
 /// can construct a `Font<'_>` over `&bytes[offset..]`.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct CollectionHeader {
     /// `(major, minor)` from the TTC header. Always `(1, 0)` or `(2, 0)`
     /// in real-world fonts; we don't enforce minor==0 strictly.

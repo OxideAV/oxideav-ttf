@@ -288,6 +288,7 @@ pub struct ClipBox {
 /// [`ColrTable::paint`]; the caller owns traversal and must bound
 /// depth (hostile fonts can tie cycles through `PaintColrGlyph`).
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum Paint {
     /// Formats 1: a bottom-up z-ordered slice of the LayerList,
     /// composited with source-over.

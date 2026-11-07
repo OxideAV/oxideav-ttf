@@ -122,6 +122,36 @@ pub struct PosValue {
     pub y_advance: i16,
 }
 
+impl PosValue {
+    /// Builder: set [`x_placement`](Self::x_placement).
+    #[must_use]
+    pub fn with_x_placement(mut self, v: i16) -> Self {
+        self.x_placement = v;
+        self
+    }
+
+    /// Builder: set [`y_placement`](Self::y_placement).
+    #[must_use]
+    pub fn with_y_placement(mut self, v: i16) -> Self {
+        self.y_placement = v;
+        self
+    }
+
+    /// Builder: set [`x_advance`](Self::x_advance).
+    #[must_use]
+    pub fn with_x_advance(mut self, v: i16) -> Self {
+        self.x_advance = v;
+        self
+    }
+
+    /// Builder: set [`y_advance`](Self::y_advance).
+    #[must_use]
+    pub fn with_y_advance(mut self, v: i16) -> Self {
+        self.y_advance = v;
+        self
+    }
+}
+
 /// One adjustment emitted by a chained-context positioning match.
 ///
 /// `glyph_index` is an *absolute* offset into the input glyph run
@@ -134,6 +164,13 @@ pub struct PosValue {
 pub struct PosRecord {
     pub glyph_index: usize,
     pub value: PosValue,
+}
+
+impl PosRecord {
+    /// A positioning adjustment `value` for the glyph at `glyph_index`.
+    pub fn new(glyph_index: usize, value: PosValue) -> Self {
+        Self { glyph_index, value }
+    }
 }
 
 /// Cursive attachment anchors for one glyph (GPOS LookupType 3).
@@ -170,6 +207,7 @@ pub struct CursiveAttachment {
 /// kept distinct so callers don't accidentally feed a GSUB lookup
 /// index into a GPOS apply path.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct GposFeature {
     pub tag: [u8; 4],
     pub lookup_indices: Vec<u16>,

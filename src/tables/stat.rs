@@ -159,6 +159,7 @@ pub struct AxisRecord {
 
 /// An axis value table (§7.3.7.3).
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum AxisValue {
     /// Format 1 — single (axis, value) point.
     Format1 {
