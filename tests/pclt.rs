@@ -279,10 +279,17 @@ fn synth_pclt_round_trips_through_font_accessors() {
 }
 
 #[test]
-fn synth_pclt_bad_major_version_fails_font_parse() {
+fn synth_pclt_bad_major_version_fails_validate() {
     // §5.7.7 defines only version 1.0; majorVersion 2 is rejected as
-    // BadStructure, and the whole-font parse surfaces it rather than
-    // silently dropping the table.
+    // BadStructure. Optional tables parse lazily: construction
+    // succeeds, the table reads as absent, and `validate()` surfaces
+    // the error.
     let font_bytes = build_synth_with_pclt(2);
-    assert!(Font::from_bytes(&font_bytes).is_err());
+    let font = Font::from_bytes(&font_bytes).expect("required tables parse");
+    assert!(!font.has_pclt());
+    assert!(font.pclt_table().is_none());
+    assert!(matches!(
+        font.validate(),
+        Err(oxideav_ttf::Error::BadStructure(_))
+    ));
 }

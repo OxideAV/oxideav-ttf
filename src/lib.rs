@@ -61,6 +61,8 @@ pub use agl::{glyph_name_to_char, glyph_name_to_codepoints};
 pub use collection::{CollectionHeader, TTC_MAGIC, is_collection};
 pub use shape::ShapedGlyph;
 
+use std::sync::OnceLock;
+
 use crate::parser::TableDirectory;
 use crate::tables::{
     avar::AvarTable,
@@ -262,13 +264,69 @@ impl core::fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
+/// One optional sfnt table, located at construction and parsed on
+/// first access.
+///
+/// `slice` is the bounds-checked table body from the directory (or
+/// `None` when the font does not ship the table). The first accessor
+/// call runs the table parser and caches its outcome — the parsed
+/// table *or* the parse error — so a malformed table is parsed exactly
+/// once and then reads as absent. [`Font::validate`] surfaces the
+/// cached errors.
+struct LazyTable<'a, T> {
+    slice: Option<&'a [u8]>,
+    cell: OnceLock<Result<T, Error>>,
+}
+
+impl<'a, T> LazyTable<'a, T> {
+    fn new(slice: Option<&'a [u8]>) -> Self {
+        Self {
+            slice,
+            cell: OnceLock::new(),
+        }
+    }
+
+    /// Parse on first use (with `parse`), then return the cached table.
+    /// `None` when the table is absent or failed to parse.
+    #[inline]
+    fn get_with(&self, parse: impl FnOnce(&'a [u8]) -> Result<T, Error>) -> Option<&T> {
+        let slice = self.slice?;
+        self.cell.get_or_init(|| parse(slice)).as_ref().ok()
+    }
+
+    /// The cached parse error, if the table was parsed and failed.
+    fn error(&self) -> Option<&Error> {
+        match self.cell.get() {
+            Some(Err(e)) => Some(e),
+            _ => None,
+        }
+    }
+}
+
+impl<T: core::fmt::Debug> core::fmt::Debug for LazyTable<'_, T> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match (self.slice, self.cell.get()) {
+            (None, _) => f.write_str("Absent"),
+            (Some(s), None) => write!(f, "Unparsed({} bytes)", s.len()),
+            (Some(_), Some(Ok(t))) => f.debug_tuple("Parsed").field(t).finish(),
+            (Some(_), Some(Err(e))) => f.debug_tuple("Failed").field(e).finish(),
+        }
+    }
+}
+
 /// A parsed TrueType / OpenType font, lifetime-bound to the input bytes.
 ///
-/// `Font::from_bytes` walks the sfnt header + table directory once; the
-/// individual `*Table` parsers are run on first use and cached as
-/// already-validated slices on the struct. Lookup methods (`glyph_index`,
-/// `glyph_outline`, etc.) are O(log n) or O(n) over the raw table bytes —
-/// no glyphs are pre-decoded or cached.
+/// `Font::from_bytes` walks the sfnt header + table directory once and
+/// parses only the required tables (`head`, `hhea`, `maxp`, `cmap`,
+/// `name`, `hmtx` — each a header-sized read) plus the directory-level
+/// `vhea`/`vmtx` and `loca`/`glyf` pairing checks. Every other table is
+/// located (bounds-checked sub-slice) but parsed on first use and cached
+/// for the life of the `Font`, so construction costs well under a
+/// microsecond regardless of how many tables the font ships. An optional
+/// table that fails to parse reads as absent; [`Font::validate`] forces
+/// every table and reports the first failure. Lookup methods
+/// (`glyph_index`, `glyph_outline`, etc.) are O(log n) or O(n) over the
+/// raw table bytes — no glyphs are pre-decoded or cached.
 #[derive(Debug)]
 pub struct Font<'a> {
     bytes: &'a [u8],
@@ -277,7 +335,7 @@ pub struct Font<'a> {
     maxp: MaxpTable,
     cmap: CmapTable<'a>,
     name: NameTable<'a>,
-    os2: Option<Os2Table>,
+    os2: LazyTable<'a, Os2Table>,
     hmtx: HmtxTable<'a>,
     /// Vertical header table (`vhea`, ISO/IEC 14496-22:2019 §5.7.9).
     /// Optional — only fonts intended for vertical layout ship one;
@@ -285,11 +343,11 @@ pub struct Font<'a> {
     /// When present, the companion `vmtx` table is also required per
     /// §5.7.10 ("OFFvertical fonts require both a vertical header
     /// table ('vhea') and the vertical metrics table").
-    vhea: Option<VheaTable>,
+    vhea: LazyTable<'a, VheaTable>,
     /// Vertical metrics table (`vmtx`, ISO/IEC 14496-22:2019 §5.7.10).
     /// Always paired with `vhea`; only present when the font supplies
     /// vertical layout data.
-    vmtx: Option<VmtxTable<'a>>,
+    vmtx: LazyTable<'a, VmtxTable<'a>>,
     /// Vertical origin table (`VORG`, ISO/IEC 14496-22:2019 §5.4.4).
     /// Optional table that records, per glyph, the Y coordinate of the
     /// glyph's vertical origin in font design units. Per §5.4.4 the
@@ -300,62 +358,62 @@ pub struct Font<'a> {
     /// [`Font::vert_origin_y_from_vorg`] accessor respects the
     /// ignore-on-TrueType policy and returns `None` once `glyf` is
     /// present.
-    vorg: Option<VorgTable>,
+    vorg: LazyTable<'a, VorgTable>,
     /// Glyph-location offsets into `glyf`. Optional because CBDT/CBLC-only
     /// colour-emoji fonts (e.g. NotoColorEmoji.ttf) ship without `loca`
     /// and `glyf` — every glyph is a colour bitmap and there are no
     /// outlines to address.
-    loca: Option<LocaTable<'a>>,
+    loca: LazyTable<'a, LocaTable<'a>>,
     glyf: Option<GlyfTable<'a>>,
     /// `CFF ` outlines (PostScript / Type 2 charstrings). Present in
     /// OTTO-flavoured fonts; mutually exclusive with `glyf` in practice.
-    cff: Option<CffTable<'a>>,
+    cff: LazyTable<'a, CffTable<'a>>,
     /// `CFF2` outlines (variable PostScript charstrings). Present in
     /// CFF2-flavoured variable fonts; we render the default instance.
-    cff2: Option<Cff2Table<'a>>,
-    post: Option<PostTable>,
-    kern: Option<KernTable<'a>>,
-    gsub: Option<GsubTable<'a>>,
-    gpos: Option<GposTable<'a>>,
-    gdef: Option<GdefTable<'a>>,
-    cblc: Option<CblcTable<'a>>,
-    cbdt: Option<CbdtTable<'a>>,
+    cff2: LazyTable<'a, Cff2Table<'a>>,
+    post: LazyTable<'a, PostTable>,
+    kern: LazyTable<'a, KernTable<'a>>,
+    gsub: LazyTable<'a, GsubTable<'a>>,
+    gpos: LazyTable<'a, GposTable<'a>>,
+    gdef: LazyTable<'a, GdefTable<'a>>,
+    cblc: LazyTable<'a, CblcTable<'a>>,
+    cbdt: LazyTable<'a, CbdtTable<'a>>,
     /// Embedded bitmap *location* table (`EBLC`, ISO/IEC 14496-22:2019
     /// §5.6.3). The monochrome / grayscale analog of `CBLC`; identical
     /// on-wire layout (the shared [`CblcTable`] walker accepts both),
     /// paired with [`Font::ebdt`](Self::ebdt) rather than `CBDT`.
-    eblc: Option<CblcTable<'a>>,
+    eblc: LazyTable<'a, CblcTable<'a>>,
     /// Embedded monochrome / grayscale bitmap data (`EBDT`, ISO/IEC
     /// 14496-22:2019 §5.6.2). Located through the shared `EBLC`/`CBLC`
     /// walker (the same `CblcTable` used for colour bitmaps); an `EBLC`
     /// (major == 2) strike resolves the same way a `CBLC` colour strike
     /// does. Present on legacy
     /// pixel / CJK bitmap faces.
-    ebdt: Option<EbdtTable<'a>>,
+    ebdt: LazyTable<'a, EbdtTable<'a>>,
     /// Embedded bitmap *scaling* table (`EBSC`, ISO/IEC 14496-22:2019
     /// §5.6.4). Declares synthesised strikes built by scaling an existing
     /// `EBLC`/`EBDT` strike up or down (small Kanji sizes are the spec's
     /// motivating case). Owns no glyph imagery; it redirects a requested
     /// ppem to a real `substitutePpem` strike. Carries no lifetime — every
     /// field copies out of the slice at parse time.
-    ebsc: Option<EbscTable>,
-    colr: Option<ColrTable<'a>>,
-    cpal: Option<CpalTable<'a>>,
-    sbix: Option<SbixTable<'a>>,
+    ebsc: LazyTable<'a, EbscTable>,
+    colr: LazyTable<'a, ColrTable<'a>>,
+    cpal: LazyTable<'a, CpalTable<'a>>,
+    sbix: LazyTable<'a, SbixTable<'a>>,
     /// Variable-font axes header (`fvar`). Absent for static fonts.
-    fvar: Option<FvarTable>,
+    fvar: LazyTable<'a, FvarTable>,
     /// Per-axis non-linear remap (`avar`). Absent unless the font
     /// publishes one (most variable fonts do, identity for axes that
     /// don't need bending).
-    avar: Option<AvarTable>,
+    avar: LazyTable<'a, AvarTable>,
     /// Per-glyph TupleVariationStore (`gvar`). Required when `fvar`
     /// is present and the outline kind is TrueType; not populated for
     /// CFF2 (which interleaves its deltas inside the `CFF2` table).
-    gvar: Option<GvarTable<'a>>,
+    gvar: LazyTable<'a, GvarTable<'a>>,
     /// CVT-variations table (`cvar`, ISO/IEC 14496-22:2019 §7.3.2).
     /// Present in TrueType-hinted variable fonts; supplies per-instance
     /// deltas for the `cvt ` Control Value Table entries.
-    cvar: Option<CvarTable<'a>>,
+    cvar: LazyTable<'a, CvarTable<'a>>,
     /// Raw `cvt ` Control Value Table bytes (an array of big-endian
     /// `int16` FWORDs). Held so [`Font::cvt_value`] / [`Font::cvt_count`]
     /// can resolve entries, optionally with `cvar` deltas applied.
@@ -374,13 +432,13 @@ pub struct Font<'a> {
     /// variable fonts; carries per-instance adjustments for `OS/2`,
     /// `hhea`, `vhea`, `post`, `gasp` metric fields keyed by the
     /// §7.3.6.3 value-tag registry.
-    mvar: Option<MvarTable>,
+    mvar: LazyTable<'a, MvarTable>,
     /// Per-glyph horizontal-metrics variation table (`HVAR`,
     /// ISO/IEC 14496-22:2019 §7.3.5). Variable fonts with TrueType
     /// outlines are encouraged to ship one; CFF2 variable fonts are
     /// required to. Provides interpolated adjustments for `hmtx`
     /// advance widths plus optional left- and right-side bearings.
-    hvar: Option<HvarTable>,
+    hvar: LazyTable<'a, HvarTable>,
     /// Per-glyph vertical-metrics variation table (`VVAR`,
     /// ISO/IEC 14496-22:2019 §7.3.8). Optional in TrueType variable
     /// fonts (where `gvar` phantom points carry the same data); for
@@ -389,27 +447,27 @@ pub struct Font<'a> {
     /// advance heights plus optional top-/bottom-side bearings and —
     /// for CFF2 fonts that publish a `VORG` table — vertical-origin
     /// Y coordinates.
-    vvar: Option<VvarTable>,
+    vvar: LazyTable<'a, VvarTable>,
     /// Style attributes table (`STAT`, ISO/IEC 14496-22:2019 §7.3.7).
     /// Required in all variable fonts; optional otherwise. Carries
     /// design-axis records and per-axis-value name mappings used by
     /// font pickers to compose family / subfamily strings under the
     /// R/B/I/BI, WWS, and unrestricted naming models.
-    stat: Option<StatTable>,
+    stat: LazyTable<'a, StatTable>,
     /// Baseline table (`BASE`, ISO/IEC 14496-22:2019 §6.3.1). Optional
     /// table that supplies per-script baseline coordinates and
     /// per-script / per-language-system / per-feature minimum and
     /// maximum glyph extents. Carries one Axis sub-table per text
     /// direction (HorizAxis for Y baselines / horizontal text;
     /// VertAxis for X baselines / vertical text).
-    base: Option<BaseTable>,
+    base: LazyTable<'a, BaseTable>,
     /// Grid-fitting and scan-conversion procedure table (`gasp`,
     /// ISO/IEC 14496-22:2019 §5.3.7). Optional; carries the
     /// per-ppem-range rasterisation hints (grid-fit / grayscale /
     /// ClearType-symmetric flags) sorted by `rangeMaxPPEM`. Used by
     /// callers that drive a font rasteriser and want to pick the
     /// font-author-recommended hinting policy at a given pixel size.
-    gasp: Option<GaspTable>,
+    gasp: LazyTable<'a, GaspTable>,
     /// Linear threshold table (`LTSH`, ISO/IEC 14496-22:2019 §5.7.4).
     /// Optional; carries one byte per glyph recording the lowest ppem
     /// at which the grid-fitted advance width has converged on the
@@ -418,7 +476,7 @@ pub struct Font<'a> {
     /// converting the glyph. The §5.7.4 sentinel `1` means "always
     /// scales linearly" (the glyph carries no instructions on its
     /// sidebearings).
-    ltsh: Option<LtshTable>,
+    ltsh: LazyTable<'a, LtshTable>,
     /// Horizontal device metrics table (`hdmx`, ISO/IEC 14496-22:2019
     /// §5.7.2). Optional; carries one device record per selected ppem,
     /// each holding the per-glyph grid-fitted advance width in integer
@@ -428,7 +486,7 @@ pub struct Font<'a> {
     /// set of ppem sizes. §7.3.5 forbids `hdmx` in variable fonts;
     /// callers that want to honour that rule can cross-check
     /// `is_variable()` before consulting these accessors.
-    hdmx: Option<HdmxTable>,
+    hdmx: LazyTable<'a, HdmxTable>,
     /// Vertical device metrics table (`VDMX`, ISO/IEC 14496-22:2019
     /// §5.7.8). Optional; carries one or more groups of vTable
     /// records (`yPelHeight` → `(yMax, yMin)` pel envelope) indexed
@@ -440,13 +498,13 @@ pub struct Font<'a> {
     /// grid-fitting every glyph in the font. §7.3.5 forbids `VDMX`
     /// in variable fonts; callers can cross-check `is_variable()`
     /// before consulting these accessors.
-    vdmx: Option<VdmxTable>,
+    vdmx: LazyTable<'a, VdmxTable>,
     /// Metadata table (`meta`, ISO/IEC 14496-22:2019 §5.7.6). Optional;
     /// carries a tagged DataMap array whose payloads describe font-wide
     /// metadata in either UTF-8 text (`'dlng'`, `'slng'`) or vendor-
     /// defined binary form. Records borrow from the on-wire `meta`
     /// byte slice — the table itself does not copy the payload data.
-    meta: Option<MetaTable<'a>>,
+    meta: LazyTable<'a, MetaTable<'a>>,
     /// PCL 5 table (`PCLT`, ISO/IEC 14496-22:2019 §5.7.7). Optional
     /// (and "strongly discouraged for OFF fonts with TrueType
     /// outlines" per the spec); carries the PCL 5 font-selection
@@ -455,38 +513,43 @@ pub struct Font<'a> {
     /// typeface string, the 8-byte character-complement bitfield,
     /// the 6-byte PCL file name, and the stroke-weight / width-type
     /// / serif-style classification bytes.
-    pclt: Option<PcltTable>,
+    pclt: LazyTable<'a, PcltTable>,
     /// SVG table (`SVG `, ISO/IEC 14496-22:2019/Amd.1:2020 §5.5.1).
     /// Optional; carries per-glyph-range SVG 1.1 vector colour-glyph
     /// documents (plain UTF-8 or gzip-encoded). Records borrow from the
     /// on-wire `SVG ` byte slice — the table does not copy the markup.
-    svg: Option<SvgTable<'a>>,
+    svg: LazyTable<'a, SvgTable<'a>>,
     /// Math typesetting table (`MATH`, ISO/IEC 14496-22:2019 §6.3.6).
     /// Present in fonts designed for mathematical layout; carries the
     /// MathConstants / MathGlyphInfo / MathVariants sub-tables that a
     /// math-layout engine consumes. Borrows from the on-wire slice.
-    math: Option<MathTable<'a>>,
+    math: LazyTable<'a, MathTable<'a>>,
     /// Justification table (`JSTF`, ISO/IEC 14496-22:2019 §6.3.5).
     /// Optional; carries per-script/language justification suggestions
     /// (GSUB/GPOS lookup enable/disable lists + extender glyphs).
-    jstf: Option<JstfTable<'a>>,
+    jstf: LazyTable<'a, JstfTable<'a>>,
     /// Digital signature table (`DSIG`, ISO/IEC 14496-22:2019 §8.x).
     /// Optional; carries the font's digital signature as one or more
     /// `SignatureRecord`s pointing at PKCS#7 signature blocks. Block
     /// payloads borrow from the on-wire `DSIG` slice — this crate decodes
     /// the table structure but does not verify the signature.
-    dsig: Option<DsigTable<'a>>,
+    dsig: LazyTable<'a, DsigTable<'a>>,
     /// Merge table (`MERG`, ISO/IEC 14496-22:2019 §5.7.5). Optional;
     /// declares which glyph-class pairs a renderer should merge or group
     /// before antialias filtering. Copies its ClassDef + merge-entry bytes
     /// out at parse time, so it carries no lifetime.
-    merg: Option<MergTable>,
+    merg: LazyTable<'a, MergTable>,
     /// Current user-space coordinate vector, one per axis (defaults
     /// to each axis's `default` value when `fvar` is present, empty
     /// vec otherwise). `set_variation_coords` updates this; the
     /// outline accessor consults [`Self::normalised_coords`] to
     /// derive the per-axis weight applied to gvar deltas.
-    var_coords: Vec<f32>,
+    var_coords: Option<Vec<f32>>,
+    /// Each axis's `fvar` default, materialised on first use so
+    /// [`Font::variation_coords`] can hand out a slice before any
+    /// coordinate has been set. A property of the font (not of the
+    /// current instance), so caching it is coordinate-independent.
+    default_coords: OnceLock<Vec<f32>>,
 }
 
 impl<'a> Font<'a> {
@@ -547,16 +610,11 @@ impl<'a> Font<'a> {
         // either is treated as horizontal-only. §5.7.10 mandates that
         // a font shipping one ship both ("OFFvertical fonts require
         // both"), so a half-pair is rejected as a malformed file
-        // rather than silently degraded.
-        let vhea = dir.find(b"vhea", bytes).map(VheaTable::parse).transpose()?;
-        let vmtx_slice = dir.find(b"vmtx", bytes);
-        let vmtx = match (vhea.as_ref(), vmtx_slice) {
-            (Some(vh), Some(slice)) => Some(VmtxTable::parse(
-                slice,
-                vh.num_long_ver_metrics,
-                maxp.num_glyphs,
-            )?),
-            (None, None) => None,
+        // rather than silently degraded. Only the directory presence is
+        // checked here; both tables are parsed lazily on first use.
+        let vhea = dir.find(b"vhea", bytes);
+        let vmtx = dir.find(b"vmtx", bytes);
+        match (vhea, vmtx) {
             (Some(_), None) => {
                 return Err(Error::BadStructure(
                     "vhea present but vmtx missing (§5.7.10 requires both)",
@@ -567,130 +625,29 @@ impl<'a> Font<'a> {
                     "vmtx present but vhea missing (§5.7.10 requires both)",
                 ));
             }
-        };
+            _ => {}
+        }
         // `loca` + `glyf` are jointly optional: CBDT/CBLC-only colour-
         // emoji fonts (e.g. NotoColorEmoji.ttf) ship without either.
         // When loca is present we still require glyf (and vice versa)
         // because a half-pair would be malformed.
-        let loca = match (dir.find(b"loca", bytes), dir.find(b"glyf", bytes)) {
-            (Some(l), Some(_g)) => Some(LocaTable::parse(
-                l,
-                maxp.num_glyphs,
-                head.index_to_loc_format,
-            )?),
-            (None, None) => None,
-            _ => {
-                return Err(Error::BadStructure(
-                    "loca/glyf must both be present or both absent",
-                ));
-            }
-        };
-        let glyf = dir.find(b"glyf", bytes).map(GlyfTable::new);
-        // `CFF ` carries PostScript outlines (OTTO fonts). The tag has a
-        // trailing space.
-        let cff = dir.find(b"CFF ", bytes).map(CffTable::parse).transpose()?;
-        // `CFF2` carries variable PostScript outlines; we render the
-        // default instance.
-        let cff2 = dir.find(b"CFF2", bytes).map(Cff2Table::parse).transpose()?;
-
-        let os2 = dir.find(b"OS/2", bytes).map(Os2Table::parse).transpose()?;
-        let post = dir.find(b"post", bytes).map(PostTable::parse).transpose()?;
-        let kern = dir.find(b"kern", bytes).map(KernTable::parse).transpose()?;
-        let gsub = dir.find(b"GSUB", bytes).map(GsubTable::parse).transpose()?;
-        let gpos = dir.find(b"GPOS", bytes).map(GposTable::parse).transpose()?;
-        let gdef = dir.find(b"GDEF", bytes).map(GdefTable::parse).transpose()?;
-        let cblc = dir.find(b"CBLC", bytes).map(CblcTable::parse).transpose()?;
-        let cbdt = dir.find(b"CBDT", bytes).map(CbdtTable::parse).transpose()?;
-        let eblc = dir.find(b"EBLC", bytes).map(CblcTable::parse).transpose()?;
-        let ebdt = dir.find(b"EBDT", bytes).map(EbdtTable::parse).transpose()?;
-        let ebsc = dir.find(b"EBSC", bytes).map(EbscTable::parse).transpose()?;
-        let colr = dir.find(b"COLR", bytes).map(ColrTable::parse).transpose()?;
-        let cpal = dir.find(b"CPAL", bytes).map(CpalTable::parse).transpose()?;
-        let sbix = dir
-            .find(b"sbix", bytes)
-            .map(|s| SbixTable::parse(s, maxp.num_glyphs))
-            .transpose()?;
-
-        // Variable-font tables. `fvar` is the gate: if it's absent the
-        // font is static and we skip the rest. If it's present we still
-        // try to load `gvar` (TrueType deltas) and `avar` (axis remap)
-        // but a missing `gvar` is acceptable for non-outline (CBDT-only)
-        // variable fonts.
-        let fvar = dir.find(b"fvar", bytes).map(FvarTable::parse).transpose()?;
-        let avar = dir.find(b"avar", bytes).map(AvarTable::parse).transpose()?;
-        let gvar = dir.find(b"gvar", bytes).map(GvarTable::parse).transpose()?;
-        let cvar = dir.find(b"cvar", bytes).map(CvarTable::parse).transpose()?;
+        let loca = dir.find(b"loca", bytes);
+        let glyf = dir.find(b"glyf", bytes);
+        if loca.is_some() != glyf.is_some() {
+            return Err(Error::BadStructure(
+                "loca/glyf must both be present or both absent",
+            ));
+        }
+        let glyf = glyf.map(GlyfTable::new);
+        // Every optional table is only *located* here (a bounds-checked
+        // sub-slice of `bytes`); its parser runs on first access and the
+        // result — table or error — is cached in a `OnceLock`.
         // `cvt ` is a plain `int16[]` Control Value Table; held raw.
         let cvt_bytes = dir.find(b"cvt ", bytes);
         // `fpgm` / `prep` are raw TrueType bytecode programs (§5.3.3 /
         // §5.3.x). Not executed by this crate — held raw for tooling.
         let fpgm_bytes = dir.find(b"fpgm", bytes);
         let prep_bytes = dir.find(b"prep", bytes);
-        let mvar = dir.find(b"MVAR", bytes).map(MvarTable::parse).transpose()?;
-        let hvar = dir.find(b"HVAR", bytes).map(HvarTable::parse).transpose()?;
-        let vvar = dir.find(b"VVAR", bytes).map(VvarTable::parse).transpose()?;
-        let stat = dir.find(b"STAT", bytes).map(StatTable::parse).transpose()?;
-        let base = dir.find(b"BASE", bytes).map(BaseTable::parse).transpose()?;
-        let gasp = dir.find(b"gasp", bytes).map(GaspTable::parse).transpose()?;
-        let vorg = dir.find(b"VORG", bytes).map(VorgTable::parse).transpose()?;
-        // §5.7.4 says `LTSH.numGlyphs` "should be the same as the
-        // numGlyphs field in the 'maxp' table". A mismatch would either
-        // truncate or over-read the per-glyph lookups, so cross-check
-        // at parse time and reject as `BadStructure`.
-        let ltsh = dir
-            .find(b"LTSH", bytes)
-            .map(|s| LtshTable::parse_with_glyph_count(s, maxp.num_glyphs))
-            .transpose()?;
-        // §5.7.2 fixes the per-record `widths[]` length at
-        // `maxp.numGlyphs`. Cross-checking against `maxp.num_glyphs`
-        // at parse time rejects under-sized records (`UnexpectedEof`)
-        // and protects per-ppem lookups from over-reading the slice.
-        let hdmx = dir
-            .find(b"hdmx", bytes)
-            .map(|s| HdmxTable::parse(s, maxp.num_glyphs))
-            .transpose()?;
-        // §5.7.8 describes a fixed-shape table: 6-byte header, then a
-        // RatioRange + Offset16 pair of arrays followed by VDMX groups
-        // referenced from those offsets. No per-glyph cross-check
-        // against `maxp` is needed — the table publishes font-wide
-        // extents indexed by ppem only, not per-glyph data. `parse`
-        // enforces the §5.7.8 sort + sentinel invariants.
-        let vdmx = dir.find(b"VDMX", bytes).map(VdmxTable::parse).transpose()?;
-        // §5.7.6 metadata table — header + DataMap array indexed by
-        // four-character ASCII tags. The data payloads sit later in
-        // the same byte slice and `MetaRecord::payload` borrows from
-        // there; the `'a` lifetime of `Font<'a>` therefore covers
-        // every payload exposed through `meta_*` accessors.
-        let meta = dir.find(b"meta", bytes).map(MetaTable::parse).transpose()?;
-        // §5.7.7 PCL 5 table — fixed 54-byte struct of PCL font-
-        // selection attributes. All fields copy out of the slice at
-        // parse time so the parsed table carries no lifetime.
-        let pclt = dir.find(b"PCLT", bytes).map(PcltTable::parse).transpose()?;
-        // §5.5.1 (Amd.1:2020) SVG table — per-glyph-range SVG 1.1 vector
-        // colour-glyph documents. The tag carries a trailing space
-        // (`'SVG '`). Document payloads borrow from this byte slice so
-        // the `'a` lifetime of `Font<'a>` covers every document exposed
-        // through the `svg_*` accessors.
-        let svg = dir
-            .find(&SVG_TABLE_TAG, bytes)
-            .map(SvgTable::parse)
-            .transpose()?;
-        // §6.3.6 MATH table — math-layout parameters. Borrows from the
-        // on-wire slice.
-        let math = dir.find(b"MATH", bytes).map(MathTable::parse).transpose()?;
-        // §6.3.5 JSTF table — justification suggestions. Borrows from the
-        // on-wire slice.
-        let jstf = dir.find(b"JSTF", bytes).map(JstfTable::parse).transpose()?;
-        // §8.x DSIG table — digital signature. Structural decode only; the
-        // PKCS#7 block payloads borrow from this slice.
-        let dsig = dir.find(b"DSIG", bytes).map(DsigTable::parse).transpose()?;
-        // §5.7.5 MERG table — glyph-merge declarations for antialias
-        // filtering. Copies its bytes out at parse time.
-        let merg = dir.find(b"MERG", bytes).map(MergTable::parse).transpose()?;
-        let var_coords = match fvar.as_ref() {
-            Some(f) => f.axes().iter().map(|a| a.default).collect(),
-            None => Vec::new(),
-        };
 
         Ok(Self {
             bytes,
@@ -699,52 +656,53 @@ impl<'a> Font<'a> {
             maxp,
             cmap,
             name,
-            os2,
+            os2: LazyTable::new(dir.find(b"OS/2", bytes)),
             hmtx,
-            vhea,
-            vmtx,
-            vorg,
-            loca,
+            vhea: LazyTable::new(vhea),
+            vmtx: LazyTable::new(vmtx),
+            vorg: LazyTable::new(dir.find(b"VORG", bytes)),
+            loca: LazyTable::new(loca),
             glyf,
-            cff,
-            cff2,
-            post,
-            kern,
-            gsub,
-            gpos,
-            gdef,
-            cblc,
-            cbdt,
-            eblc,
-            ebdt,
-            ebsc,
-            colr,
-            cpal,
-            sbix,
-            fvar,
-            avar,
-            gvar,
-            cvar,
+            cff: LazyTable::new(dir.find(b"CFF ", bytes)),
+            cff2: LazyTable::new(dir.find(b"CFF2", bytes)),
+            post: LazyTable::new(dir.find(b"post", bytes)),
+            kern: LazyTable::new(dir.find(b"kern", bytes)),
+            gsub: LazyTable::new(dir.find(b"GSUB", bytes)),
+            gpos: LazyTable::new(dir.find(b"GPOS", bytes)),
+            gdef: LazyTable::new(dir.find(b"GDEF", bytes)),
+            cblc: LazyTable::new(dir.find(b"CBLC", bytes)),
+            cbdt: LazyTable::new(dir.find(b"CBDT", bytes)),
+            eblc: LazyTable::new(dir.find(b"EBLC", bytes)),
+            ebdt: LazyTable::new(dir.find(b"EBDT", bytes)),
+            ebsc: LazyTable::new(dir.find(b"EBSC", bytes)),
+            colr: LazyTable::new(dir.find(b"COLR", bytes)),
+            cpal: LazyTable::new(dir.find(b"CPAL", bytes)),
+            sbix: LazyTable::new(dir.find(b"sbix", bytes)),
+            fvar: LazyTable::new(dir.find(b"fvar", bytes)),
+            avar: LazyTable::new(dir.find(b"avar", bytes)),
+            gvar: LazyTable::new(dir.find(b"gvar", bytes)),
+            cvar: LazyTable::new(dir.find(b"cvar", bytes)),
             cvt_bytes,
             fpgm_bytes,
             prep_bytes,
-            mvar,
-            hvar,
-            vvar,
-            stat,
-            base,
-            gasp,
-            ltsh,
-            hdmx,
-            vdmx,
-            meta,
-            pclt,
-            svg,
-            math,
-            jstf,
-            dsig,
-            merg,
-            var_coords,
+            mvar: LazyTable::new(dir.find(b"MVAR", bytes)),
+            hvar: LazyTable::new(dir.find(b"HVAR", bytes)),
+            vvar: LazyTable::new(dir.find(b"VVAR", bytes)),
+            stat: LazyTable::new(dir.find(b"STAT", bytes)),
+            base: LazyTable::new(dir.find(b"BASE", bytes)),
+            gasp: LazyTable::new(dir.find(b"gasp", bytes)),
+            ltsh: LazyTable::new(dir.find(b"LTSH", bytes)),
+            hdmx: LazyTable::new(dir.find(b"hdmx", bytes)),
+            vdmx: LazyTable::new(dir.find(b"VDMX", bytes)),
+            meta: LazyTable::new(dir.find(b"meta", bytes)),
+            pclt: LazyTable::new(dir.find(b"PCLT", bytes)),
+            svg: LazyTable::new(dir.find(&SVG_TABLE_TAG, bytes)),
+            math: LazyTable::new(dir.find(b"MATH", bytes)),
+            jstf: LazyTable::new(dir.find(b"JSTF", bytes)),
+            dsig: LazyTable::new(dir.find(b"DSIG", bytes)),
+            merg: LazyTable::new(dir.find(b"MERG", bytes)),
+            var_coords: None,
+            default_coords: OnceLock::new(),
         })
     }
 
@@ -910,24 +868,21 @@ impl<'a> Font<'a> {
     /// Typographic ascent. We prefer `OS/2.sTypoAscender` if present
     /// (Windows-clean), falling back to `hhea.ascent`.
     pub fn ascent(&self) -> i16 {
-        self.os2
-            .as_ref()
+        self.os2()
             .and_then(|o| o.s_typo_ascender)
             .unwrap_or(self.hhea.ascent)
     }
 
     /// Typographic descent (typically negative).
     pub fn descent(&self) -> i16 {
-        self.os2
-            .as_ref()
+        self.os2()
             .and_then(|o| o.s_typo_descender)
             .unwrap_or(self.hhea.descent)
     }
 
     /// Suggested gap between lines.
     pub fn line_gap(&self) -> i16 {
-        self.os2
-            .as_ref()
+        self.os2()
             .and_then(|o| o.s_typo_line_gap)
             .unwrap_or(self.hhea.line_gap)
     }
@@ -955,13 +910,13 @@ impl<'a> Font<'a> {
 
     /// `OS/2.usWeightClass` (100..1000), or 400 (Regular) if `OS/2` absent.
     pub fn weight_class(&self) -> u16 {
-        self.os2.as_ref().map(|o| o.us_weight_class).unwrap_or(400)
+        self.os2().map(|o| o.us_weight_class).unwrap_or(400)
     }
 
     /// `OS/2.usWidthClass` (1..9, where 5 = Medium/Normal), or 5 if `OS/2`
     /// is absent (ISO/IEC 14496-22:2019 §5.2.3).
     pub fn width_class(&self) -> u16 {
-        self.os2.as_ref().map(|o| o.us_width_class).unwrap_or(5)
+        self.os2().map(|o| o.us_width_class).unwrap_or(5)
     }
 
     /// Borrow the parsed `OS/2` table (ISO/IEC 14496-22:2019 §5.2.3), when
@@ -972,7 +927,7 @@ impl<'a> Font<'a> {
     /// the typographic / Windows vertical metrics, and (versioned) x-height
     /// / cap-height / optical-size range.
     pub fn os2_table(&self) -> Option<&Os2Table> {
-        self.os2.as_ref()
+        self.os2()
     }
 
     /// The `OS/2.fsType` embedding-permission state, distilled to the
@@ -981,54 +936,54 @@ impl<'a> Font<'a> {
     /// default. See [`Os2Table`]'s `embedding_*` predicates for the raw
     /// bits.
     pub fn embedding_installable(&self) -> Option<bool> {
-        self.os2.as_ref().map(|o| o.embedding_installable())
+        self.os2().map(|o| o.embedding_installable())
     }
 
     /// `post.italicAngle` in degrees (negative for forward-slanted).
     pub fn italic_angle(&self) -> f32 {
-        self.post.as_ref().map(|p| p.italic_angle).unwrap_or(0.0)
+        self.post().map(|p| p.italic_angle).unwrap_or(0.0)
     }
 
     /// `true` when the font ships a `post` table (any version).
     pub fn has_post(&self) -> bool {
-        self.post.is_some()
+        self.post().is_some()
     }
 
     /// `true` when the font carries PostScript (`CFF `) outlines rather
     /// than (or in addition to) TrueType `glyf` outlines.
     pub fn has_cff_outlines(&self) -> bool {
-        self.cff.is_some()
+        self.cff().is_some()
     }
 
     /// Borrow the parsed `CFF ` table, when the font ships one.
     pub fn cff_table(&self) -> Option<&CffTable<'a>> {
-        self.cff.as_ref()
+        self.cff()
     }
 
     /// `true` when the font carries variable PostScript (`CFF2`) outlines.
     pub fn has_cff2_outlines(&self) -> bool {
-        self.cff2.is_some()
+        self.cff2().is_some()
     }
 
     /// Borrow the parsed `CFF2` table, when the font ships one.
     pub fn cff2_table(&self) -> Option<&Cff2Table<'a>> {
-        self.cff2.as_ref()
+        self.cff2()
     }
 
     /// `true` when the `CFF ` table is CID-keyed (Adobe TN #5176 §18).
     pub fn is_cid_keyed(&self) -> bool {
-        self.cff.as_ref().is_some_and(|c| c.is_cid())
+        self.cff().is_some_and(|c| c.is_cid())
     }
 
     /// `true` when the font ships a `MATH` table (math typesetting data).
     pub fn has_math(&self) -> bool {
-        self.math.is_some()
+        self.math().is_some()
     }
 
     /// Borrow the parsed `MATH` table, when the font publishes one
     /// (ISO/IEC 14496-22:2019 §6.3.6).
     pub fn math_table(&self) -> Option<&MathTable<'a>> {
-        self.math.as_ref()
+        self.math()
     }
 
     /// A `MathConstants` value (one of the `tables::math::constant::*`
@@ -1041,7 +996,7 @@ impl<'a> Font<'a> {
     /// design units (fractional after variation). For a non-variable font
     /// the result equals the plain `MathConstants` design-unit value.
     pub fn math_constant_var(&self, index: usize) -> Option<f32> {
-        let c = self.math.as_ref()?.constants()?;
+        let c = self.math()?.constants()?;
         let ivs = self.gdef_item_variation_store();
         let coords = self.normalised_coords();
         Some(c.value_resolved(index, ivs.as_ref(), &coords))
@@ -1051,7 +1006,7 @@ impl<'a> Font<'a> {
     /// variation instance (§6.3.6.2.5 + §6.3.6.2.1). `None` when there is
     /// no MATH table, no MathGlyphInfo, or `gid` is uncovered.
     pub fn math_italics_correction_var(&self, gid: u16) -> Option<f32> {
-        let gi = self.math.as_ref()?.glyph_info()?;
+        let gi = self.math()?.glyph_info()?;
         let ivs = self.gdef_item_variation_store();
         let coords = self.normalised_coords();
         gi.italics_correction_resolved(gid, ivs.as_ref(), &coords)
@@ -1061,7 +1016,7 @@ impl<'a> Font<'a> {
     /// current variation instance (§6.3.6.2.6 + §6.3.6.2.1). `None` when
     /// uncovered (the layout engine then uses the glyph's geometric centre).
     pub fn math_top_accent_attachment_var(&self, gid: u16) -> Option<f32> {
-        let gi = self.math.as_ref()?.glyph_info()?;
+        let gi = self.math()?.glyph_info()?;
         let ivs = self.gdef_item_variation_store();
         let coords = self.normalised_coords();
         gi.top_accent_attachment_resolved(gid, ivs.as_ref(), &coords)
@@ -1071,7 +1026,7 @@ impl<'a> Font<'a> {
     /// resolved at the current variation instance (§6.3.6.2.8/.9 +
     /// §6.3.6.2.1). `None` when `gid` has no kern table for `corner`.
     pub fn math_kern_var(&self, gid: u16, corner: MathKernCorner, height: i16) -> Option<f32> {
-        let gi = self.math.as_ref()?.glyph_info()?;
+        let gi = self.math()?.glyph_info()?;
         let ivs = self.gdef_item_variation_store();
         let coords = self.normalised_coords();
         gi.math_kern_resolved(gid, corner, height, ivs.as_ref(), &coords)
@@ -1085,7 +1040,7 @@ impl<'a> Font<'a> {
         gid: u16,
         dir: GrowDirection,
     ) -> Option<f32> {
-        let v = self.math.as_ref()?.variants()?;
+        let v = self.math()?.variants()?;
         let ivs = self.gdef_item_variation_store();
         let coords = self.normalised_coords();
         v.assembly_italics_correction_resolved(gid, dir, ivs.as_ref(), &coords)
@@ -1093,18 +1048,18 @@ impl<'a> Font<'a> {
 
     /// `true` when the font ships a `JSTF` table (justification data).
     pub fn has_jstf(&self) -> bool {
-        self.jstf.is_some()
+        self.jstf().is_some()
     }
 
     /// Borrow the parsed `JSTF` table, when the font publishes one
     /// (ISO/IEC 14496-22:2019 §6.3.5).
     pub fn jstf_table(&self) -> Option<&JstfTable<'a>> {
-        self.jstf.as_ref()
+        self.jstf()
     }
 
     /// `true` when the font ships a `DSIG` table (a digital signature).
     pub fn has_dsig(&self) -> bool {
-        self.dsig.is_some()
+        self.dsig().is_some()
     }
 
     /// Borrow the parsed `DSIG` table (ISO/IEC 14496-22:2019 §8.x), when
@@ -1112,13 +1067,13 @@ impl<'a> Font<'a> {
     /// signature blocks surfaced as raw bytes; this crate decodes the table
     /// structure but does not verify the signature cryptographically.
     pub fn dsig_table(&self) -> Option<&DsigTable<'a>> {
-        self.dsig.as_ref()
+        self.dsig()
     }
 
     /// `true` when the font ships a `MERG` table (glyph-merge declarations
     /// for antialias filtering, ISO/IEC 14496-22:2019 §5.7.5).
     pub fn has_merg(&self) -> bool {
-        self.merg.is_some()
+        self.merg().is_some()
     }
 
     /// Borrow the parsed `MERG` table, when the font publishes one. The
@@ -1126,13 +1081,13 @@ impl<'a> Font<'a> {
     /// merge-entry byte; the run-processing algorithm that consumes those
     /// entries is a renderer concern.
     pub fn merg_table(&self) -> Option<&MergTable> {
-        self.merg.as_ref()
+        self.merg()
     }
 
     /// Borrow the parsed `post` table. `None` when the font does not
     /// publish one.
     pub fn post_table(&self) -> Option<&PostTable> {
-        self.post.as_ref()
+        self.post()
     }
 
     /// Resolve glyph `gid`'s `post`-table name reference, when the
@@ -1156,7 +1111,7 @@ impl<'a> Font<'a> {
     ///   v2.5 index array, or the index references a Pascal string
     ///   the pool cannot satisfy.
     pub fn glyph_name_ref(&self, gid: u16) -> Option<GlyphNameRef<'_>> {
-        self.post.as_ref()?.glyph_name_ref(gid)
+        self.post()?.glyph_name_ref(gid)
     }
 
     /// Convenience accessor: return the glyph's PostScript name,
@@ -1182,7 +1137,7 @@ impl<'a> Font<'a> {
             None => {
                 // OTTO/CFF fonts commonly ship a `post` v3.0 (no names);
                 // the `CFF ` charset is then the only name source.
-                self.cff.as_ref().and_then(|c| c.glyph_name(gid))
+                self.cff().and_then(|c| c.glyph_name(gid))
             }
         }
     }
@@ -1199,12 +1154,12 @@ impl<'a> Font<'a> {
     /// when the font has no `post` table, the table is v3.0, or no glyph
     /// is named `name`.
     pub fn gid_for_glyph_name(&self, name: &str) -> Option<u16> {
-        if let Some(gid) = self.post.as_ref().and_then(|p| p.gid_for_name(name)) {
+        if let Some(gid) = self.post().and_then(|p| p.gid_for_name(name)) {
             return Some(gid);
         }
         // OTTO/CFF fonts with a `post` v3.0 (no names) resolve through the
         // CFF charset instead.
-        self.cff.as_ref().and_then(|c| c.gid_for_name(name))
+        self.cff().and_then(|c| c.gid_for_name(name))
     }
 
     /// Iterate every `(glyph_id, post-table name)` pair the font
@@ -1219,12 +1174,11 @@ impl<'a> Font<'a> {
         // Prefer `post`-table names; fall back to the CFF charset for OTTO
         // fonts whose `post` is v3.0 (no names).
         let has_post_names = self
-            .post
-            .as_ref()
+            .post()
             .is_some_and(|p| p.iter_glyph_names().next().is_some());
         if has_post_names {
-            Box::new(self.post.iter().flat_map(|p| p.iter_glyph_names()))
-        } else if let Some(cff) = self.cff.as_ref() {
+            Box::new(self.post().into_iter().flat_map(|p| p.iter_glyph_names()))
+        } else if let Some(cff) = self.cff() {
             Box::new(cff.iter_glyph_names())
         } else {
             Box::new(std::iter::empty())
@@ -1295,17 +1249,17 @@ impl<'a> Font<'a> {
         // outline from the `CFF ` Type 2 charstring instead. CFF outlines
         // are not gvar-variable in this crate (CFF2 is a separate table),
         // so the variation path below never applies to them.
-        if self.glyf.is_none() {
-            if let Some(cff) = self.cff.as_ref() {
+        if self.glyf().is_none() {
+            if let Some(cff) = self.cff() {
                 return Ok(cff.glyph_outline(glyph_id).unwrap_or_default());
             }
-            if let Some(cff2) = self.cff2.as_ref() {
+            if let Some(cff2) = self.cff2() {
                 // CFF2 outline at the current variation instance. When the
                 // caller has set non-default axis coordinates, the
                 // avar-bent normalised vector drives the `blend` operator;
                 // otherwise the default instance is rendered.
-                let cff2_variable = self.fvar.is_some()
-                    && !self.var_coords.is_empty()
+                let cff2_variable = self.fvar().is_some()
+                    && !self.coords().is_empty()
                     && self.coords_differ_from_default();
                 let normalised = if cff2_variable {
                     self.normalised_coords()
@@ -1317,8 +1271,10 @@ impl<'a> Font<'a> {
                     .unwrap_or_default());
             }
         }
+        // Cheap coordinate checks first so a default-instance outline never
+        // forces the `gvar` parse.
         let variable =
-            self.gvar.is_some() && !self.var_coords.is_empty() && self.coords_differ_from_default();
+            !self.coords().is_empty() && self.coords_differ_from_default() && self.gvar().is_some();
         // Compute the avar-bent normalised coordinate vector once and
         // share it across the whole (possibly recursive) composite walk.
         let normalised = if variable {
@@ -1343,7 +1299,7 @@ impl<'a> Font<'a> {
         if glyph_id >= self.maxp.num_glyphs {
             return Err(Error::GlyphOutOfRange(glyph_id));
         }
-        let (loca, glyf) = match (self.loca.as_ref(), self.glyf.as_ref()) {
+        let (loca, glyf) = match (self.loca(), self.glyf()) {
             (Some(l), Some(g)) => (l, g),
             _ => return Ok(TtOutline::default()),
         };
@@ -1360,7 +1316,7 @@ impl<'a> Font<'a> {
             && let Ok(n_comp) = glyf.composite_component_count(range.clone())
             && n_comp > 0
         {
-            let gvar = self.gvar.as_ref().unwrap();
+            let gvar = self.gvar().unwrap();
             if let Ok(deltas) = gvar.glyph_component_deltas(glyph_id, n_comp, normalised) {
                 let resolve = |child_gid: u16, child_depth: u8| {
                     self.glyph_outline_at_depth(child_gid, child_depth, variable, normalised)
@@ -1371,7 +1327,7 @@ impl<'a> Font<'a> {
 
         let mut out = glyf.glyph_outline(range, loca, depth)?;
         if variable {
-            let gvar = self.gvar.as_ref().unwrap();
+            let gvar = self.gvar().unwrap();
             let n_pts: usize = out.contours.iter().map(|c| c.points.len()).sum();
             if n_pts > 0 && n_pts <= u16::MAX as usize {
                 // Build the static contour structure + default grid
@@ -1434,7 +1390,7 @@ impl<'a> Font<'a> {
     /// composites where no component sets the flag. The chase is bounded by
     /// the composite-depth limit and guards against a self-reference.
     fn metrics_source_glyph(&self, glyph_id: u16) -> u16 {
-        let (loca, glyf) = match (self.loca.as_ref(), self.glyf.as_ref()) {
+        let (loca, glyf) = match (self.loca(), self.glyf()) {
             (Some(l), Some(g)) => (l, g),
             _ => return glyph_id,
         };
@@ -1459,13 +1415,13 @@ impl<'a> Font<'a> {
     /// i.e. it supplies vertical-layout metrics for CJK / Mongolian
     /// or other top-to-bottom-written scripts.
     pub fn has_vertical_metrics(&self) -> bool {
-        self.vhea.is_some() && self.vmtx.is_some()
+        self.vhea().is_some() && self.vmtx().is_some()
     }
 
     /// Borrow the parsed `vhea` table, when present.
     /// (ISO/IEC 14496-22:2019 §5.7.9.)
     pub fn vhea_table(&self) -> Option<&VheaTable> {
-        self.vhea.as_ref()
+        self.vhea()
     }
 
     /// Vertical typographic ascender from `vhea`. For v1.1 this is
@@ -1475,32 +1431,32 @@ impl<'a> Font<'a> {
     /// the centre-line-relative `ascent` field. Returns `None` if the
     /// font lacks a `vhea` table.
     pub fn vertical_ascent(&self) -> Option<i16> {
-        self.vhea.map(|v| v.vert_typo_ascender)
+        self.vhea().map(|v| v.vert_typo_ascender)
     }
 
     /// Vertical typographic descender from `vhea` (v1.1
     /// `vertTypoDescender`; v1.0 `descent`).
     pub fn vertical_descent(&self) -> Option<i16> {
-        self.vhea.map(|v| v.vert_typo_descender)
+        self.vhea().map(|v| v.vert_typo_descender)
     }
 
     /// Vertical typographic line gap from `vhea` (v1.1
     /// `vertTypoLineGap`; v1.0 row "Reserved; set to 0", so static
     /// v1.0 fonts will return `Some(0)` here).
     pub fn vertical_line_gap(&self) -> Option<i16> {
-        self.vhea.map(|v| v.vert_typo_line_gap)
+        self.vhea().map(|v| v.vert_typo_line_gap)
     }
 
     /// `vhea.advanceHeightMax` — the maximum advance height in the
     /// font, in design units. Per §5.7.9 the field is `int16`.
     pub fn advance_height_max(&self) -> Option<i16> {
-        self.vhea.map(|v| v.advance_height_max)
+        self.vhea().map(|v| v.advance_height_max)
     }
 
     /// Borrow the parsed `vmtx` table, when present.
     /// (ISO/IEC 14496-22:2019 §5.7.10.)
     pub fn vmtx_table(&self) -> Option<&VmtxTable<'a>> {
-        self.vmtx.as_ref()
+        self.vmtx()
     }
 
     /// Per-glyph advance height in font design units. Returns `None`
@@ -1509,13 +1465,13 @@ impl<'a> Font<'a> {
     /// tail" rule (glyphs beyond `numOfLongVerMetrics` inherit the
     /// last pair's advance height) applied transparently.
     pub fn glyph_advance_height(&self, glyph_id: u16) -> Option<u16> {
-        Some(self.vmtx.as_ref()?.advance_height(glyph_id))
+        Some(self.vmtx()?.advance_height(glyph_id))
     }
 
     /// Per-glyph top side bearing in font design units. Returns
     /// `None` when the font lacks `vmtx`.
     pub fn glyph_top_side_bearing(&self, glyph_id: u16) -> Option<i16> {
-        Some(self.vmtx.as_ref()?.top_side_bearing(glyph_id))
+        Some(self.vmtx()?.top_side_bearing(glyph_id))
     }
 
     /// Per-glyph vertical origin Y coordinate in font design units.
@@ -1527,7 +1483,7 @@ impl<'a> Font<'a> {
     /// recommends the optional `VORG` table instead; that path is not
     /// implemented here (TrueType outlines only).
     pub fn glyph_vertical_origin_y(&self, glyph_id: u16) -> Option<i16> {
-        let tsb = self.vmtx.as_ref()?.top_side_bearing(glyph_id);
+        let tsb = self.vmtx()?.top_side_bearing(glyph_id);
         let bbox = self.glyph_bounding_box(glyph_id)?;
         // Saturating add keeps a pathological bbox from panicking;
         // real-world fonts are nowhere near i16::MAX in this dim.
@@ -1541,20 +1497,20 @@ impl<'a> Font<'a> {
     /// declines to consult it (the spec mandates "If present in
     /// TrueType OFF fonts it must be ignored by font clients").
     pub fn has_vorg(&self) -> bool {
-        self.vorg.is_some()
+        self.vorg().is_some()
     }
 
     /// Borrow the parsed `VORG` table, when present. Surfaced verbatim
     /// so callers that want to introspect the metrics array directly
     /// (e.g. font tooling) can do so without re-parsing the bytes.
     pub fn vorg_table(&self) -> Option<&VorgTable> {
-        self.vorg.as_ref()
+        self.vorg()
     }
 
     /// Default vertical-origin Y per §5.4.4, in font design units.
     /// Returns `None` when no `VORG` table is present.
     pub fn vorg_default_vert_origin_y(&self) -> Option<i16> {
-        self.vorg.as_ref().map(|v| v.default_vert_origin_y)
+        self.vorg().map(|v| v.default_vert_origin_y)
     }
 
     /// Y coordinate of the vertical origin for `glyph_id` per `VORG`
@@ -1576,12 +1532,12 @@ impl<'a> Font<'a> {
     ///  - `Some(vert_origin_y)` from the metrics-array override when
     ///    one is present.
     pub fn vert_origin_y_from_vorg(&self, glyph_id: u16) -> Option<i16> {
-        let vorg = self.vorg.as_ref()?;
+        let vorg = self.vorg()?;
         // §5.4.4: TrueType clients must ignore the table. The presence
         // of `glyf` is the canonical sfnt signal that the outlines are
         // TrueType (a CFF font carries `CFF ` or `CFF2` instead and has
         // no `glyf`/`loca`).
-        if self.glyf.is_some() {
+        if self.glyf().is_some() {
             return None;
         }
         Some(vorg.vert_origin_y(glyph_id))
@@ -1592,14 +1548,14 @@ impl<'a> Font<'a> {
     /// and is consulted by text-layout clients when aligning glyphs
     /// from different scripts on a common baseline.
     pub fn has_base(&self) -> bool {
-        self.base.is_some()
+        self.base().is_some()
     }
 
     /// Borrow the parsed `BASE` table when present. Exposes the
     /// HorizAxis / VertAxis trees plus (in v1.1 tables) the
     /// ItemVariationStore offset for variable-font baseline deltas.
     pub fn base_table(&self) -> Option<&BaseTable> {
-        self.base.as_ref()
+        self.base()
     }
 
     /// Per-script default Y baseline (HorizAxis, §6.3.1.3) for the
@@ -1622,7 +1578,7 @@ impl<'a> Font<'a> {
         script_tag: [u8; 4],
         baseline_tag: [u8; 4],
     ) -> Option<i16> {
-        let base = self.base.as_ref()?;
+        let base = self.base()?;
         let h = base.horiz_axis.as_ref()?;
         let idx = h.baseline_index_for_tag(baseline_tag)?;
         let bs = h.base_script_for_tag(script_tag)?;
@@ -1638,7 +1594,7 @@ impl<'a> Font<'a> {
         script_tag: [u8; 4],
         baseline_tag: [u8; 4],
     ) -> Option<i16> {
-        let base = self.base.as_ref()?;
+        let base = self.base()?;
         let v = base.vert_axis.as_ref()?;
         let idx = v.baseline_index_for_tag(baseline_tag)?;
         let bs = v.base_script_for_tag(script_tag)?;
@@ -1657,8 +1613,7 @@ impl<'a> Font<'a> {
         baseline_tag: [u8; 4],
     ) -> Option<i16> {
         let coords = self.normalised_coords();
-        self.base
-            .as_ref()?
+        self.base()?
             .horiz_baseline_y_resolved(script_tag, baseline_tag, &coords)
     }
 
@@ -1670,8 +1625,7 @@ impl<'a> Font<'a> {
         baseline_tag: [u8; 4],
     ) -> Option<i16> {
         let coords = self.normalised_coords();
-        self.base
-            .as_ref()?
+        self.base()?
             .vert_baseline_x_resolved(script_tag, baseline_tag, &coords)
     }
 
@@ -1679,7 +1633,7 @@ impl<'a> Font<'a> {
     /// (ISO/IEC 14496-22:2019 §5.3.7). Absent in many fonts; the
     /// rasteriser applies its default policy when missing.
     pub fn has_gasp(&self) -> bool {
-        self.gasp.is_some()
+        self.gasp().is_some()
     }
 
     /// Borrow the parsed `gasp` table when present. Carries the
@@ -1687,7 +1641,7 @@ impl<'a> Font<'a> {
     /// `GASP_SYMMETRIC_GRIDFIT`, `GASP_SYMMETRIC_SMOOTHING`) sorted
     /// by `rangeMaxPPEM`.
     pub fn gasp_table(&self) -> Option<&GaspTable> {
-        self.gasp.as_ref()
+        self.gasp()
     }
 
     /// Pick the `gasp` record that governs rasterisation at the given
@@ -1697,7 +1651,7 @@ impl<'a> Font<'a> {
     /// either case the caller should fall back to the rasteriser's
     /// default policy.
     pub fn gasp_behavior_for_ppem(&self, ppem: u16) -> Option<&GaspRange> {
-        self.gasp.as_ref()?.behavior_for_ppem(ppem)
+        self.gasp()?.behavior_for_ppem(ppem)
     }
 
     /// `true` when the font ships an `LTSH` table (ISO/IEC 14496-22:2019
@@ -1705,14 +1659,14 @@ impl<'a> Font<'a> {
     /// grid-fit (or consult `hdmx` / `vdmx` if those are present
     /// instead) to find each glyph's true advance width.
     pub fn has_ltsh(&self) -> bool {
-        self.ltsh.is_some()
+        self.ltsh().is_some()
     }
 
     /// Borrow the parsed `LTSH` table when present. Carries the
     /// per-glyph `yPels` array recording each glyph's linear-threshold
     /// ppem per §5.7.4.
     pub fn ltsh_table(&self) -> Option<&LtshTable> {
-        self.ltsh.as_ref()
+        self.ltsh()
     }
 
     /// Lowest ppem at which the grid-fitted advance for `glyph_id` has
@@ -1721,7 +1675,7 @@ impl<'a> Font<'a> {
     /// at every ppem at least the returned value. Returns `None` when
     /// the font ships no `LTSH` table or `glyph_id` is out of range.
     pub fn ltsh_threshold(&self, glyph_id: u16) -> Option<u8> {
-        self.ltsh.as_ref()?.linear_threshold(glyph_id)
+        self.ltsh()?.linear_threshold(glyph_id)
     }
 
     /// `true` when `glyph_id` is safe to advance-scale linearly at
@@ -1731,7 +1685,7 @@ impl<'a> Font<'a> {
     /// for fonts without an `LTSH`). Returns `false` for out-of-range
     /// `glyph_id`.
     pub fn ltsh_linearly_scales_at_ppem(&self, glyph_id: u16, ppem: u16) -> bool {
-        match self.ltsh.as_ref() {
+        match self.ltsh() {
             Some(t) => t.linearly_scales_at_ppem(glyph_id, ppem),
             None => false,
         }
@@ -1742,14 +1696,14 @@ impl<'a> Font<'a> {
     /// `hdmx` in variable fonts — a caller that wants to validate the
     /// font shape may pair this with [`Self::is_variable`].
     pub fn has_hdmx(&self) -> bool {
-        self.hdmx.is_some()
+        self.hdmx().is_some()
     }
 
     /// Borrow the parsed `hdmx` table when present. Carries the
     /// per-ppem device records mapping each glyph to its grid-fitted
     /// integer-pixel advance width at that ppem.
     pub fn hdmx_table(&self) -> Option<&HdmxTable> {
-        self.hdmx.as_ref()
+        self.hdmx()
     }
 
     /// Grid-fitted advance width of `glyph_id` at the requested
@@ -1761,14 +1715,14 @@ impl<'a> Font<'a> {
     /// the on-wire field that drives the lookup is `uint8`; values
     /// above 255 ppem are not representable in the table.
     pub fn hdmx_advance_pixels(&self, glyph_id: u16, ppem: u8) -> Option<u8> {
-        self.hdmx.as_ref()?.advance_pixels(glyph_id, ppem)
+        self.hdmx()?.advance_pixels(glyph_id, ppem)
     }
 
     /// The set of ppem sizes the font's `hdmx` table covers, in
     /// ascending order. Returns an empty `Vec` when no `hdmx` is
     /// present.
     pub fn hdmx_recorded_ppem_sizes(&self) -> Vec<u8> {
-        match self.hdmx.as_ref() {
+        match self.hdmx() {
             Some(t) => t.recorded_ppem_sizes(),
             None => Vec::new(),
         }
@@ -1779,7 +1733,7 @@ impl<'a> Font<'a> {
     /// `VDMX` in variable fonts — pair with [`Self::is_variable`] when
     /// validating a font's shape.
     pub fn has_vdmx(&self) -> bool {
-        self.vdmx.is_some()
+        self.vdmx().is_some()
     }
 
     /// Borrow the parsed `VDMX` table when present. Carries one or
@@ -1787,7 +1741,7 @@ impl<'a> Font<'a> {
     /// array; each group publishes per-ppem `(yMax, yMin)` envelopes
     /// for the font as a whole.
     pub fn vdmx_table(&self) -> Option<&VdmxTable> {
-        self.vdmx.as_ref()
+        self.vdmx()
     }
 
     /// `(yMax, yMin)` pel envelope for `(ppem, deviceXRatio,
@@ -1806,8 +1760,7 @@ impl<'a> Font<'a> {
         device_x_ratio: u8,
         device_y_ratio: u8,
     ) -> Option<(i16, i16)> {
-        self.vdmx
-            .as_ref()?
+        self.vdmx()?
             .y_extent_for_device(ppem, device_x_ratio, device_y_ratio)
     }
 
@@ -1824,7 +1777,7 @@ impl<'a> Font<'a> {
     /// `true` when the font ships a `meta` (Metadata) table per
     /// ISO/IEC 14496-22:2019 §5.7.6.
     pub fn has_meta(&self) -> bool {
-        self.meta.is_some()
+        self.meta().is_some()
     }
 
     /// Borrow the parsed `meta` table when present.
@@ -1833,7 +1786,7 @@ impl<'a> Font<'a> {
     /// per-record payloads borrow from the on-wire `meta` byte slice
     /// for the lifetime of the [`Font`].
     pub fn meta_table(&self) -> Option<&MetaTable<'a>> {
-        self.meta.as_ref()
+        self.meta()
     }
 
     /// First `meta` DataMap record whose tag equals `tag`, or
@@ -1844,7 +1797,7 @@ impl<'a> Font<'a> {
     /// want every record for a duplicated tag should iterate
     /// [`MetaTable::records`] directly.
     pub fn meta_record(&self, tag: &[u8; 4]) -> Option<MetaRecord<'_>> {
-        self.meta.as_ref()?.record(tag)
+        self.meta()?.record(tag)
     }
 
     /// Design-language declaration from the `meta` table's `'dlng'`
@@ -1853,7 +1806,7 @@ impl<'a> Font<'a> {
     /// ScriptLangTags identifying the languages or scripts the font
     /// was primarily designed for.
     pub fn meta_design_languages(&self) -> Option<&'a str> {
-        self.meta.as_ref()?.design_languages()
+        self.meta()?.design_languages()
     }
 
     /// Supported-language declaration from the `meta` table's
@@ -1862,7 +1815,7 @@ impl<'a> Font<'a> {
     /// the font is capable of supporting (a superset of
     /// [`Self::meta_design_languages`] in typical use).
     pub fn meta_supported_languages(&self) -> Option<&'a str> {
-        self.meta.as_ref()?.supported_languages()
+        self.meta()?.supported_languages()
     }
 
     /// `true` when the font ships a `PCLT` (PCL 5) table per ISO/IEC
@@ -1870,7 +1823,7 @@ impl<'a> Font<'a> {
     /// discouraged for OFF fonts with TrueType outlines", so a `true`
     /// here typically marks a legacy font.
     pub fn has_pclt(&self) -> bool {
-        self.pclt.is_some()
+        self.pclt().is_some()
     }
 
     /// Borrow the parsed `PCLT` table when present.
@@ -1882,7 +1835,7 @@ impl<'a> Font<'a> {
     /// character-complement bitfield, the PCL file name, and the
     /// stroke-weight / width-type / serif-style classification bytes.
     pub fn pclt_table(&self) -> Option<&PcltTable> {
-        self.pclt.as_ref()
+        self.pclt()
     }
 
     /// `true` when the font ships an `SVG ` table per ISO/IEC
@@ -1891,7 +1844,7 @@ impl<'a> Font<'a> {
     /// colour-glyph mechanisms (`COLR`/`CPAL`, `CBDT`/`CBLC`, `sbix`,
     /// `SVG `); a font may ship more than one.
     pub fn has_svg(&self) -> bool {
-        self.svg.is_some()
+        self.svg().is_some()
     }
 
     /// Borrow the parsed `SVG ` table when present.
@@ -1902,7 +1855,7 @@ impl<'a> Font<'a> {
     /// (plain UTF-8 markup or gzip-encoded — test with
     /// [`SvgDocument::is_gzip_encoded`]).
     pub fn svg_table(&self) -> Option<&SvgTable<'a>> {
-        self.svg.as_ref()
+        self.svg()
     }
 
     /// Resolve the raw SVG document covering `glyph_id`, or `None` when
@@ -1913,7 +1866,7 @@ impl<'a> Font<'a> {
     /// responsibility, matching the raw-payload policy used for `sbix`
     /// and `CBDT` image strikes.
     pub fn svg_document(&self, glyph_id: u16) -> Option<&SvgDocument<'a>> {
-        self.svg.as_ref()?.document_for_glyph(glyph_id)
+        self.svg()?.document_for_glyph(glyph_id)
     }
 
     /// Glyph bounding box from the `glyf` header (xMin/yMin/xMax/yMax).
@@ -1923,7 +1876,7 @@ impl<'a> Font<'a> {
         if glyph_id >= self.maxp.num_glyphs {
             return None;
         }
-        let (loca, glyf) = (self.loca.as_ref()?, self.glyf.as_ref()?);
+        let (loca, glyf) = (self.loca()?, self.glyf()?);
         let range = loca.glyph_range(glyph_id).ok()?;
         if range.is_empty() {
             return None;
@@ -1939,7 +1892,7 @@ impl<'a> Font<'a> {
     /// matches a prefix of `glyphs` of length `consumed >= 2`. Returns
     /// `None` otherwise (no ligature, or no GSUB table).
     pub fn lookup_ligature(&self, glyphs: &[u16]) -> Option<(u16, usize)> {
-        self.gsub.as_ref().and_then(|g| g.lookup_ligature(glyphs))
+        self.gsub().and_then(|g| g.lookup_ligature(glyphs))
     }
 
     /// Resolve every GSUB feature active for `script_tag` under
@@ -1966,7 +1919,7 @@ impl<'a> Font<'a> {
         script_tag: [u8; 4],
         lang_tag: Option<[u8; 4]>,
     ) -> Vec<GsubFeature> {
-        match self.gsub.as_ref() {
+        match self.gsub() {
             Some(g) => g.features_for_script(script_tag, lang_tag),
             None => Vec::new(),
         }
@@ -1995,7 +1948,7 @@ impl<'a> Font<'a> {
         script_tag: [u8; 4],
         lang_tag: Option<[u8; 4]>,
     ) -> Vec<GsubFeature> {
-        match self.gsub.as_ref() {
+        match self.gsub() {
             Some(g) => {
                 let coords = self.normalised_coords();
                 g.features_for_script_at_coords(script_tag, lang_tag, &coords)
@@ -2009,8 +1962,7 @@ impl<'a> Font<'a> {
     /// `false`, [`Self::gsub_features_for_script_at_instance`] is
     /// identical to [`Self::gsub_features_for_script`].
     pub fn gsub_has_feature_variations(&self) -> bool {
-        self.gsub
-            .as_ref()
+        self.gsub()
             .map(|g| g.has_feature_variations())
             .unwrap_or(false)
     }
@@ -2035,7 +1987,7 @@ impl<'a> Font<'a> {
         script_tag: [u8; 4],
         lang_tag: Option<[u8; 4]>,
     ) -> Vec<GposFeature> {
-        match self.gpos.as_ref() {
+        match self.gpos() {
             Some(g) => g.features_for_script(script_tag, lang_tag),
             None => Vec::new(),
         }
@@ -2065,7 +2017,7 @@ impl<'a> Font<'a> {
         script_tag: [u8; 4],
         lang_tag: Option<[u8; 4]>,
     ) -> Vec<GposFeature> {
-        match self.gpos.as_ref() {
+        match self.gpos() {
             Some(g) => {
                 let coords = self.normalised_coords();
                 g.features_for_script_at_coords(script_tag, lang_tag, &coords)
@@ -2079,8 +2031,7 @@ impl<'a> Font<'a> {
     /// `false`, [`Self::gpos_features_for_script_at_instance`] is
     /// identical to [`Self::gpos_features_for_script`].
     pub fn gpos_has_feature_variations(&self) -> bool {
-        self.gpos
-            .as_ref()
+        self.gpos()
             .map(|g| g.has_feature_variations())
             .unwrap_or(false)
     }
@@ -2100,7 +2051,7 @@ impl<'a> Font<'a> {
     /// both supported; ExtensionSubst (LookupType 7) wrappers are
     /// unwrapped transparently.
     pub fn gsub_apply_lookup_type_1(&self, lookup_index: u16, gid: u16) -> Option<u16> {
-        self.gsub.as_ref()?.apply_lookup_type_1(lookup_index, gid)
+        self.gsub()?.apply_lookup_type_1(lookup_index, gid)
     }
 
     /// Apply GSUB LookupType 4 (Ligature Substitution) lookup
@@ -2124,7 +2075,7 @@ impl<'a> Font<'a> {
         lookup_index: u16,
         gids: &[u16],
     ) -> Option<(u16, usize)> {
-        self.gsub.as_ref()?.apply_lookup_type_4(lookup_index, gids)
+        self.gsub()?.apply_lookup_type_4(lookup_index, gids)
     }
 
     /// Apply GSUB LookupType 6 (Chained Contexts Substitution) lookup
@@ -2155,9 +2106,7 @@ impl<'a> Font<'a> {
         gids: &[u16],
         pos: usize,
     ) -> Option<Vec<u16>> {
-        self.gsub
-            .as_ref()?
-            .apply_lookup_type_6(lookup_index, gids, pos)
+        self.gsub()?.apply_lookup_type_6(lookup_index, gids, pos)
     }
 
     /// Apply GSUB LookupType 2 (Multiple Substitution) lookup
@@ -2172,7 +2121,7 @@ impl<'a> Font<'a> {
     /// permits `glyphCount = 0` (deletion); such hits surface as
     /// `Some(Vec::new())`.
     pub fn gsub_apply_lookup_type_2(&self, lookup_index: u16, gid: u16) -> Option<Vec<u16>> {
-        self.gsub.as_ref()?.apply_lookup_type_2(lookup_index, gid)
+        self.gsub()?.apply_lookup_type_2(lookup_index, gid)
     }
 
     /// Apply GSUB LookupType 3 (Alternate Substitution) lookup
@@ -2193,8 +2142,7 @@ impl<'a> Font<'a> {
         gid: u16,
         alternate_index: u16,
     ) -> Option<u16> {
-        self.gsub
-            .as_ref()?
+        self.gsub()?
             .apply_lookup_type_3(lookup_index, gid, alternate_index)
     }
 
@@ -2217,9 +2165,7 @@ impl<'a> Font<'a> {
         gids: &[u16],
         pos: usize,
     ) -> Option<Vec<u16>> {
-        self.gsub
-            .as_ref()?
-            .apply_lookup_type_5(lookup_index, gids, pos)
+        self.gsub()?.apply_lookup_type_5(lookup_index, gids, pos)
     }
 
     /// Apply GSUB LookupType 8 (Reverse Chained Context Substitution)
@@ -2241,9 +2187,7 @@ impl<'a> Font<'a> {
         gids: &[u16],
         pos: usize,
     ) -> Option<u16> {
-        self.gsub
-            .as_ref()?
-            .apply_lookup_type_8(lookup_index, gids, pos)
+        self.gsub()?.apply_lookup_type_8(lookup_index, gids, pos)
     }
 
     /// On-disk header variant of the legacy `kern` table, if present.
@@ -2260,7 +2204,7 @@ impl<'a> Font<'a> {
     /// Returns `None` for fonts that don't ship a `kern` table at all
     /// (modern OpenType fonts use GPOS LookupType 2 instead).
     pub fn kern_header_variant(&self) -> Option<KernHeaderVariant> {
-        self.kern.as_ref().map(|k| k.header_variant())
+        self.kern().map(|k| k.header_variant())
     }
 
     /// Look up the kerning between an ordered glyph pair, in font units.
@@ -2269,13 +2213,13 @@ impl<'a> Font<'a> {
     /// table (format 0). Returns 0 if neither is present or the pair has
     /// no defined kerning.
     pub fn lookup_kerning(&self, left: u16, right: u16) -> i16 {
-        if let Some(gpos) = &self.gpos {
-            let v = gpos.lookup_kerning(left, right, self.gdef.as_ref());
+        if let Some(gpos) = self.gpos() {
+            let v = gpos.lookup_kerning(left, right, self.gdef());
             if v != 0 {
                 return v;
             }
         }
-        if let Some(kern) = &self.kern {
+        if let Some(kern) = self.kern() {
             return kern.lookup(left, right);
         }
         0
@@ -2298,7 +2242,7 @@ impl<'a> Font<'a> {
     /// works for any pair the font's MarkBasePos coverage tables
     /// list, regardless of GDEF.
     pub fn lookup_mark_to_base(&self, base: u16, mark: u16) -> Option<(i16, i16)> {
-        self.gpos.as_ref()?.lookup_mark_to_base(base, mark)
+        self.gpos()?.lookup_mark_to_base(base, mark)
     }
 
     /// Look up a mark-to-mark attachment offset for a `(mark1, mark2)`
@@ -2315,7 +2259,7 @@ impl<'a> Font<'a> {
     /// build multi-mark stacks (e.g. polytonic Greek `α + tonos +
     /// dialytika`, Vietnamese `a + circumflex + acute`).
     pub fn lookup_mark_to_mark(&self, mark1: u16, mark2: u16) -> Option<(i16, i16)> {
-        self.gpos.as_ref()?.lookup_mark_to_mark(mark1, mark2)
+        self.gpos()?.lookup_mark_to_mark(mark1, mark2)
     }
 
     /// Decode the GDEF `ItemVariationStore` (v1.3+), if present. The
@@ -2323,7 +2267,7 @@ impl<'a> Font<'a> {
     /// resolution. Returns `None` for fonts without a GDEF IVS or when
     /// the embedded store is malformed.
     fn gdef_item_variation_store(&self) -> Option<ItemVariationStore> {
-        let bytes = self.gdef.as_ref()?.item_var_store_bytes()?;
+        let bytes = self.gdef()?.item_var_store_bytes()?;
         ItemVariationStore::parse(bytes).ok()
     }
 
@@ -2337,15 +2281,15 @@ impl<'a> Font<'a> {
     /// one at its default instance, the result equals
     /// [`Self::lookup_kerning`].
     pub fn lookup_kerning_var(&self, left: u16, right: u16) -> i16 {
-        if let Some(gpos) = &self.gpos {
+        if let Some(gpos) = self.gpos() {
             let ivs = self.gdef_item_variation_store();
             let coords = self.normalised_coords();
-            let v = gpos.lookup_kerning_var(left, right, self.gdef.as_ref(), ivs.as_ref(), &coords);
+            let v = gpos.lookup_kerning_var(left, right, self.gdef(), ivs.as_ref(), &coords);
             if v != 0 {
                 return v;
             }
         }
-        if let Some(kern) = &self.kern {
+        if let Some(kern) = self.kern() {
             return kern.lookup(left, right);
         }
         0
@@ -2356,7 +2300,7 @@ impl<'a> Font<'a> {
     /// `ItemVariationStore` at the current instance so the diacritic
     /// attachment point tracks the design axes.
     pub fn lookup_mark_to_base_var(&self, base: u16, mark: u16) -> Option<(i16, i16)> {
-        let gpos = self.gpos.as_ref()?;
+        let gpos = self.gpos()?;
         let ivs = self.gdef_item_variation_store();
         let coords = self.normalised_coords();
         gpos.lookup_mark_to_base_var(base, mark, ivs.as_ref(), &coords)
@@ -2367,7 +2311,7 @@ impl<'a> Font<'a> {
     /// `ItemVariationStore` at the current instance so the mark-on-mark
     /// stacking offset tracks the design axes.
     pub fn lookup_mark_to_mark_var(&self, mark1: u16, mark2: u16) -> Option<(i16, i16)> {
-        let gpos = self.gpos.as_ref()?;
+        let gpos = self.gpos()?;
         let ivs = self.gdef_item_variation_store();
         let coords = self.normalised_coords();
         gpos.lookup_mark_to_mark_var(mark1, mark2, ivs.as_ref(), &coords)
@@ -2378,7 +2322,7 @@ impl<'a> Font<'a> {
     /// anchors against the GDEF `ItemVariationStore` at the current
     /// instance.
     pub fn lookup_cursive_attachment_var(&self, gid: u16) -> Option<CursiveAttachment> {
-        let gpos = self.gpos.as_ref()?;
+        let gpos = self.gpos()?;
         let ivs = self.gdef_item_variation_store();
         let coords = self.normalised_coords();
         gpos.lookup_cursive_attachment_var(gid, ivs.as_ref(), &coords)
@@ -2388,7 +2332,7 @@ impl<'a> Font<'a> {
     /// resolves the matched ValueRecord's VariationIndex device offsets
     /// against the GDEF `ItemVariationStore` at the current instance.
     pub fn gpos_apply_lookup_type_1_var(&self, lookup_index: u16, gid: u16) -> Option<PosValue> {
-        let gpos = self.gpos.as_ref()?;
+        let gpos = self.gpos()?;
         let ivs = self.gdef_item_variation_store();
         let coords = self.normalised_coords();
         gpos.apply_lookup_type_1_var(lookup_index, gid, ivs.as_ref(), &coords)
@@ -2401,7 +2345,7 @@ impl<'a> Font<'a> {
     /// when the font has no GDEF ligature-caret list covering `gid`.
     /// See [`GdefTable::ligature_carets_resolved`].
     pub fn ligature_carets_resolved(&self, gid: u16) -> Option<Vec<Option<i16>>> {
-        let gdef = self.gdef.as_ref()?;
+        let gdef = self.gdef()?;
         let ivs = self.gdef_item_variation_store();
         let coords = self.normalised_coords();
         gdef.ligature_carets_resolved(gid, ivs.as_ref(), &coords)
@@ -2413,10 +2357,7 @@ impl<'a> Font<'a> {
     /// whether to attempt mark-to-base attachment for an adjacent
     /// glyph pair.
     pub fn is_mark_glyph(&self, glyph_id: u16) -> bool {
-        self.gdef
-            .as_ref()
-            .map(|g| g.is_mark(glyph_id))
-            .unwrap_or(false)
+        self.gdef().map(|g| g.is_mark(glyph_id)).unwrap_or(false)
     }
 
     /// Apply GPOS LookupType 1 (Single Adjustment Positioning) to
@@ -2434,7 +2375,7 @@ impl<'a> Font<'a> {
     /// `cpsp` (capital spacing) feature applies a SinglePos to every
     /// uppercase glyph to add side bearing.
     pub fn gpos_apply_lookup_type_1(&self, lookup_index: u16, gid: u16) -> Option<PosValue> {
-        self.gpos.as_ref()?.apply_lookup_type_1(lookup_index, gid)
+        self.gpos()?.apply_lookup_type_1(lookup_index, gid)
     }
 
     /// Apply GPOS LookupType 3 (Cursive Attachment) to `gid` via the
@@ -2457,7 +2398,7 @@ impl<'a> Font<'a> {
         lookup_index: u16,
         gid: u16,
     ) -> Option<CursiveAttachment> {
-        self.gpos.as_ref()?.apply_lookup_type_3(lookup_index, gid)
+        self.gpos()?.apply_lookup_type_3(lookup_index, gid)
     }
 
     /// Walk every GPOS LookupType-3 (Cursive Attachment) lookup
@@ -2466,7 +2407,7 @@ impl<'a> Font<'a> {
     /// single `curs` lookup (the common Arabic Nastaliq case). Returns
     /// the first hit in lookup order.
     pub fn lookup_cursive_attachment(&self, gid: u16) -> Option<CursiveAttachment> {
-        self.gpos.as_ref()?.lookup_cursive_attachment(gid)
+        self.gpos()?.lookup_cursive_attachment(gid)
     }
 
     /// Apply GPOS LookupType 5 (Mark-to-Ligature Attachment) to the
@@ -2491,8 +2432,7 @@ impl<'a> Font<'a> {
         ligature_component: u16,
         mark: u16,
     ) -> Option<(i16, i16)> {
-        self.gpos
-            .as_ref()?
+        self.gpos()?
             .apply_lookup_type_5(lookup_index, ligature, ligature_component, mark)
     }
 
@@ -2506,8 +2446,7 @@ impl<'a> Font<'a> {
         ligature_component: u16,
         mark: u16,
     ) -> Option<(i16, i16)> {
-        self.gpos
-            .as_ref()?
+        self.gpos()?
             .lookup_mark_to_ligature(ligature, ligature_component, mark)
     }
 
@@ -2520,7 +2459,7 @@ impl<'a> Font<'a> {
         ligature_component: u16,
         mark: u16,
     ) -> Option<(i16, i16)> {
-        let gpos = self.gpos.as_ref()?;
+        let gpos = self.gpos()?;
         let ivs = self.gdef_item_variation_store();
         let coords = self.normalised_coords();
         gpos.lookup_mark_to_ligature_var(ligature, ligature_component, mark, ivs.as_ref(), &coords)
@@ -2548,9 +2487,7 @@ impl<'a> Font<'a> {
         gids: &[u16],
         pos: usize,
     ) -> Option<Vec<PosRecord>> {
-        self.gpos
-            .as_ref()?
-            .apply_lookup_type_7(lookup_index, gids, pos)
+        self.gpos()?.apply_lookup_type_7(lookup_index, gids, pos)
     }
 
     /// Apply GPOS LookupType 8 (Chained Contexts Positioning) to the
@@ -2573,9 +2510,7 @@ impl<'a> Font<'a> {
         gids: &[u16],
         pos: usize,
     ) -> Option<Vec<PosRecord>> {
-        self.gpos
-            .as_ref()?
-            .apply_lookup_type_8(lookup_index, gids, pos)
+        self.gpos()?.apply_lookup_type_8(lookup_index, gids, pos)
     }
 
     /// Enumerate every GPOS lookup as `(lookup_index, lookup_type,
@@ -2591,7 +2526,7 @@ impl<'a> Font<'a> {
     /// `font.gpos_lookup_list().filter(|(_, t, _)| *t == 8)` enumerates
     /// the chained-context-positioning lookups.
     pub fn gpos_lookup_list(&self) -> Vec<(u16, u16, u16)> {
-        match self.gpos.as_ref() {
+        match self.gpos() {
             Some(g) => g.lookup_list().collect(),
             None => Vec::new(),
         }
@@ -2602,7 +2537,7 @@ impl<'a> Font<'a> {
     /// the reported `lookup_type` is post-unwrap of any
     /// LookupType-7 ExtensionSubst wrapper.
     pub fn gsub_lookup_list(&self) -> Vec<(u16, u16, u16)> {
-        match self.gsub.as_ref() {
+        match self.gsub() {
             Some(g) => g.lookup_list().collect(),
             None => Vec::new(),
         }
@@ -2616,8 +2551,7 @@ impl<'a> Font<'a> {
     /// skips when matching the lookup's input; the high byte is the
     /// `markAttachmentType` class. [`Self::shape`] honours these.
     pub fn gsub_lookup_flags(&self, lookup_index: u16) -> u16 {
-        self.gsub
-            .as_ref()
+        self.gsub()
             .map(|g| g.lookup_flags(lookup_index))
             .unwrap_or(0)
     }
@@ -2626,8 +2560,7 @@ impl<'a> Font<'a> {
     /// no GPOS or the index is out of range). Same bit layout as
     /// [`Self::gsub_lookup_flags`].
     pub fn gpos_lookup_flags(&self, lookup_index: u16) -> u16 {
-        self.gpos
-            .as_ref()
+        self.gpos()
             .map(|g| g.lookup_flags(lookup_index))
             .unwrap_or(0)
     }
@@ -2639,18 +2572,14 @@ impl<'a> Font<'a> {
     /// glyph *not* in that set ([`Self::shape`] honours this through the
     /// shared skip predicate).
     pub fn gsub_lookup_mark_filtering_set(&self, lookup_index: u16) -> Option<u16> {
-        self.gsub
-            .as_ref()
-            .and_then(|g| g.mark_filtering_set(lookup_index))
+        self.gsub().and_then(|g| g.mark_filtering_set(lookup_index))
     }
 
     /// The `markFilteringSet` index of GPOS lookup `lookup_index`, or
     /// `None` when the lookup does not carry `USE_MARK_FILTERING_SET`.
     /// See [`Self::gsub_lookup_mark_filtering_set`].
     pub fn gpos_lookup_mark_filtering_set(&self, lookup_index: u16) -> Option<u16> {
-        self.gpos
-            .as_ref()
-            .and_then(|g| g.mark_filtering_set(lookup_index))
+        self.gpos().and_then(|g| g.mark_filtering_set(lookup_index))
     }
 
     /// The shared §2 ("Common Table Formats") lookup skip predicate:
@@ -2683,7 +2612,7 @@ impl<'a> Font<'a> {
         mark_filtering_set: Option<u16>,
         glyph_id: u16,
     ) -> bool {
-        let gdef = match self.gdef.as_ref() {
+        let gdef = match self.gdef() {
             Some(g) => g,
             None => return false,
         };
@@ -2721,7 +2650,7 @@ impl<'a> Font<'a> {
     /// Emoji's Google-format counterparts, and most Android emoji
     /// fonts). Returns `false` for plain outline-only fonts.
     pub fn has_color_bitmaps(&self) -> bool {
-        self.cblc.is_some() && self.cbdt.is_some()
+        self.cblc().is_some() && self.cbdt().is_some()
     }
 
     /// All `(ppem_x, ppem_y)` strikes the colour-bitmap tables ship.
@@ -2729,8 +2658,7 @@ impl<'a> Font<'a> {
     /// Useful for picking a strike before calling
     /// [`Font::glyph_color_bitmap`].
     pub fn color_strike_sizes(&self) -> Vec<(u8, u8)> {
-        self.cblc
-            .as_ref()
+        self.cblc()
             .map(|c| c.ppem_sizes().collect())
             .unwrap_or_default()
     }
@@ -2745,8 +2673,8 @@ impl<'a> Font<'a> {
     /// to feed into `oxideav-png` in the consumer crate. We deliberately
     /// don't decode the PNG here so this crate stays dependency-light.
     pub fn glyph_color_bitmap(&self, glyph_id: u16, target_ppem: u8) -> Option<ColorBitmap<'a>> {
-        let cblc = self.cblc.as_ref()?;
-        let cbdt = self.cbdt.as_ref()?;
+        let cblc = self.cblc()?;
+        let cbdt = self.cbdt()?;
         let entry = cblc.lookup_glyph(glyph_id, target_ppem)?;
         cbdt.lookup(&entry).ok().flatten()
     }
@@ -2758,7 +2686,7 @@ impl<'a> Font<'a> {
     /// CJK bitmap faces, hand-hinted small-size strikes). Returns `false`
     /// for outline-only and colour-bitmap-only fonts.
     pub fn has_gray_bitmaps(&self) -> bool {
-        self.eblc.is_some() && self.ebdt.is_some()
+        self.eblc().is_some() && self.ebdt().is_some()
     }
 
     /// All `(ppem_x, ppem_y)` strikes the monochrome / grayscale bitmap
@@ -2766,8 +2694,7 @@ impl<'a> Font<'a> {
     /// EBDT/EBLC. Useful for picking a strike before calling
     /// [`Font::glyph_gray_bitmap`].
     pub fn gray_strike_sizes(&self) -> Vec<(u8, u8)> {
-        self.eblc
-            .as_ref()
+        self.eblc()
             .map(|c| c.ppem_sizes().collect())
             .unwrap_or_default()
     }
@@ -2790,8 +2717,8 @@ impl<'a> Font<'a> {
     /// mask at `(bearing_x, bearing_y)`. Bit depths 1 / 2 / 4 / 8 are all
     /// expanded to the full 0..=255 range (§5.6.2.2 / §5.6.3.1).
     pub fn glyph_gray_bitmap(&self, glyph_id: u16, target_ppem: u8) -> Option<GrayBitmap> {
-        let eblc = self.eblc.as_ref()?;
-        let ebdt = self.ebdt.as_ref()?;
+        let eblc = self.eblc()?;
+        let ebdt = self.ebdt()?;
         let entry = eblc.lookup_glyph(glyph_id, target_ppem)?;
         // Pixel formats (1/2/5/6/7) decode directly. Composite formats
         // (8/9) assemble component glyphs from the *same* strike — resolve
@@ -2817,8 +2744,8 @@ impl<'a> Font<'a> {
         if depth > Self::EBDT_COMPOSITE_MAX_DEPTH {
             return None;
         }
-        let eblc = self.eblc.as_ref()?;
-        let ebdt = self.ebdt.as_ref()?;
+        let eblc = self.eblc()?;
+        let ebdt = self.ebdt()?;
         let entry = eblc.lookup_glyph(glyph_id, ppem_y)?;
         // A non-composite component decodes directly as pixels.
         if !matches!(entry.image_format, 8 | 9) {
@@ -2879,14 +2806,14 @@ impl<'a> Font<'a> {
     /// fonts without `EBSC`, including the common case of a font that has
     /// real embedded bitmaps but never scales them.
     pub fn has_ebsc(&self) -> bool {
-        self.ebsc.is_some()
+        self.ebsc().is_some()
     }
 
     /// The parsed `EBSC` table, for tooling that wants to introspect the
     /// `BitmapScale` records directly (target / substitute ppem pairs and
     /// the per-strike line metrics).
     pub fn ebsc_table(&self) -> Option<&EbscTable> {
-        self.ebsc.as_ref()
+        self.ebsc()
     }
 
     /// All target `(ppemX, ppemY)` sizes the `EBSC` table can synthesise
@@ -2895,8 +2822,7 @@ impl<'a> Font<'a> {
     /// that ppem — [`Font::glyph_gray_bitmap_scaled`] resolves them.
     /// Empty when the font has no `EBSC`.
     pub fn ebsc_target_sizes(&self) -> Vec<(u8, u8)> {
-        self.ebsc
-            .as_ref()
+        self.ebsc()
             .map(|t| t.target_ppem_sizes().collect())
             .unwrap_or_default()
     }
@@ -2924,9 +2850,9 @@ impl<'a> Font<'a> {
     /// substitute entry is in an undecoded `EBDT` format.
     pub fn glyph_gray_bitmap_scaled(&self, glyph_id: u16, target_ppem: u8) -> Option<GrayBitmap> {
         use crate::tables::ebsc::scale_metric;
-        let ebsc = self.ebsc.as_ref()?;
-        let eblc = self.eblc.as_ref()?;
-        let ebdt = self.ebdt.as_ref()?;
+        let ebsc = self.ebsc()?;
+        let eblc = self.eblc()?;
+        let ebdt = self.ebdt()?;
         let scale = ebsc.scale_for_target_ppem(target_ppem)?;
         // Pull the real (substitute) strike's bitmap. We ask for the exact
         // substitute ppemY; `lookup_glyph` picks the strike whose ppemY is
@@ -2972,7 +2898,7 @@ impl<'a> Font<'a> {
     /// base glyph, so check [`Font::color_paint_root`] first when
     /// [`Font::has_colr_v1`] is set.
     pub fn has_color_layers(&self) -> bool {
-        self.colr.is_some() && self.cpal.is_some()
+        self.colr().is_some() && self.cpal().is_some()
     }
 
     /// All colour layers for `glyph_id`, in back-to-front paint order.
@@ -2985,7 +2911,7 @@ impl<'a> Font<'a> {
     /// `glyph_id` isn't a base glyph (i.e. it's a single-colour
     /// outline glyph or a layer-only glyph used by other bases).
     pub fn color_layers(&self, glyph_id: u16) -> Vec<ColorLayer> {
-        match self.colr.as_ref() {
+        match self.colr() {
             Some(colr) => colr.layers(glyph_id),
             None => Vec::new(),
         }
@@ -2998,10 +2924,7 @@ impl<'a> Font<'a> {
     /// graph (gradients / transforms / composites) rather than, or in
     /// addition to, a v0 flat layer stack.
     pub fn has_colr_v1(&self) -> bool {
-        self.colr
-            .as_ref()
-            .map(|c| c.has_paint_graph())
-            .unwrap_or(false)
+        self.colr().map(|c| c.has_paint_graph()).unwrap_or(false)
     }
 
     /// Resolve `glyph_id` to the root [`PaintRef`] of its COLR v1
@@ -3010,7 +2933,7 @@ impl<'a> Font<'a> {
     /// paint record — fall back to [`Font::color_layers`] then, per
     /// the spec's v1-over-v0 preference order.
     pub fn color_paint_root(&self, glyph_id: u16) -> Option<PaintRef> {
-        self.colr.as_ref()?.base_glyph_paint(glyph_id)
+        self.colr()?.base_glyph_paint(glyph_id)
     }
 
     /// Decode one Paint node of a COLR v1 graph **at the current
@@ -3030,7 +2953,7 @@ impl<'a> Font<'a> {
     /// node.
     pub fn color_paint(&self, paint: PaintRef) -> Option<Paint> {
         let coords = self.normalised_coords();
-        self.colr.as_ref()?.paint(paint, &coords)
+        self.colr()?.paint(paint, &coords)
     }
 
     /// The raw wire `format` byte of the Paint table at `paint` —
@@ -3038,7 +2961,7 @@ impl<'a> Font<'a> {
     /// [`Font::color_paint`] folds into [`Paint::Scale`], and a
     /// `PaintVar*` from its static twin.
     pub fn color_paint_format(&self, paint: PaintRef) -> Option<u8> {
-        self.colr.as_ref()?.paint_format(paint)
+        self.colr()?.paint_format(paint)
     }
 
     /// The precomputed COLR v1 clip box covering `glyph_id`, resolved
@@ -3049,7 +2972,7 @@ impl<'a> Font<'a> {
     /// then.
     pub fn color_clip_box(&self, glyph_id: u16) -> Option<ClipBox> {
         let coords = self.normalised_coords();
-        self.colr.as_ref()?.clip_box(glyph_id, &coords)
+        self.colr()?.clip_box(glyph_id, &coords)
     }
 
     /// `true` when the COLR table ships a varIndexMap that does not
@@ -3061,8 +2984,7 @@ impl<'a> Font<'a> {
     /// but every variation delta resolves to 0 (default-instance
     /// values).
     pub fn colr_var_index_map_unsupported(&self) -> bool {
-        self.colr
-            .as_ref()
+        self.colr()
             .map(|c| c.var_index_map_unsupported())
             .unwrap_or(false)
     }
@@ -3078,7 +3000,7 @@ impl<'a> Font<'a> {
     /// refuse `Some(false)` / `None` glyphs or clip them to
     /// [`Font::color_clip_box`].
     pub fn color_glyph_is_bounded(&self, glyph_id: u16) -> Option<bool> {
-        self.colr.as_ref()?.color_glyph_is_bounded(glyph_id)
+        self.colr()?.color_glyph_is_bounded(glyph_id)
     }
 
     /// Resolve a COLR colour reference — a `(palette entry, alpha)`
@@ -3117,21 +3039,21 @@ impl<'a> Font<'a> {
     /// [`Font::cpal_palette_type`] for renderers that want to pick a
     /// theme-appropriate palette.
     pub fn cpal_color(&self, palette_index: u16, color_index: u16) -> Option<[u8; 4]> {
-        self.cpal.as_ref()?.color(palette_index, color_index)
+        self.cpal()?.color(palette_index, color_index)
     }
 
     /// All colours for palette `palette_index` as an `Vec<[u8; 4]>`
     /// (RGBA byte order). `None` if the font has no CPAL table or
     /// `palette_index` is out of range.
     pub fn cpal_palette(&self, palette_index: u16) -> Option<Vec<[u8; 4]>> {
-        self.cpal.as_ref()?.palette(palette_index)
+        self.cpal()?.palette(palette_index)
     }
 
     /// Number of CPAL palettes the font ships, or `0` if there's no
     /// `CPAL` table. Mostly useful for renderers that pick a palette
     /// based on `cpal_palette_type` flags.
     pub fn cpal_num_palettes(&self) -> u16 {
-        self.cpal.as_ref().map(|c| c.num_palettes()).unwrap_or(0)
+        self.cpal().map(|c| c.num_palettes()).unwrap_or(0)
     }
 
     /// CPAL v1 palette-type flags for `palette_index`. Returns 0 when
@@ -3141,8 +3063,7 @@ impl<'a> Font<'a> {
     /// Bit 0 (`0x0001`) = USABLE_WITH_LIGHT_BACKGROUND
     /// Bit 1 (`0x0002`) = USABLE_WITH_DARK_BACKGROUND
     pub fn cpal_palette_type(&self, palette_index: u16) -> u32 {
-        self.cpal
-            .as_ref()
+        self.cpal()
             .map(|c| c.palette_type(palette_index))
             .unwrap_or(0)
     }
@@ -3155,7 +3076,7 @@ impl<'a> Font<'a> {
     /// the returned ID to a `name`-table lookup to fetch the localized
     /// string.
     pub fn cpal_palette_label(&self, palette_index: u16) -> Option<u16> {
-        self.cpal.as_ref()?.palette_label(palette_index)
+        self.cpal()?.palette_label(palette_index)
     }
 
     /// CPAL v1 palette-**entry** label: the `name` table ID of a UI
@@ -3165,7 +3086,7 @@ impl<'a> Font<'a> {
     /// is v0, the `paletteEntryLabelArray` is absent, the entry index is
     /// out of range, or the slot holds the `0xFFFF` "no label" sentinel.
     pub fn cpal_palette_entry_label(&self, entry_index: u16) -> Option<u16> {
-        self.cpal.as_ref()?.palette_entry_label(entry_index)
+        self.cpal()?.palette_entry_label(entry_index)
     }
 
     // ---- sbix bitmap glyphs (Apple Color Emoji format) -------------------
@@ -3176,7 +3097,7 @@ impl<'a> Font<'a> {
     /// outline-only fonts and for CBDT/CBLC- or COLR/CPAL-flavoured
     /// colour fonts.
     pub fn has_sbix(&self) -> bool {
-        self.sbix.is_some()
+        self.sbix().is_some()
     }
 
     /// All strike ppem sizes the `sbix` table ships, sorted ascending
@@ -3184,8 +3105,7 @@ impl<'a> Font<'a> {
     /// strikes in the 20-160 ppem range. Returns an empty `Vec` when
     /// the font has no `sbix` table.
     pub fn sbix_strikes(&self) -> Vec<u16> {
-        self.sbix
-            .as_ref()
+        self.sbix()
             .map(|s| s.all_ppems_unique_sorted())
             .unwrap_or_default()
     }
@@ -3205,7 +3125,7 @@ impl<'a> Font<'a> {
     /// [`Self::sbix_glyph_resolved`] when the caller wants the
     /// indirection chased for them.
     pub fn sbix_glyph(&self, glyph_id: u16, ppem: u16) -> Option<SbixGlyph<'a>> {
-        self.sbix.as_ref()?.lookup_best_fit(glyph_id, ppem)
+        self.sbix()?.lookup_best_fit(glyph_id, ppem)
     }
 
     /// Like [`Self::sbix_glyph`], but chases `'dupe'` indirections
@@ -3216,7 +3136,7 @@ impl<'a> Font<'a> {
     /// that need to introspect the raw `'dupe'` sentinel keep using
     /// [`Self::sbix_glyph`].
     pub fn sbix_glyph_resolved(&self, glyph_id: u16, ppem: u16) -> Option<SbixGlyph<'a>> {
-        self.sbix.as_ref()?.lookup_best_fit_resolved(glyph_id, ppem)
+        self.sbix()?.lookup_best_fit_resolved(glyph_id, ppem)
     }
 
     // ---- variable fonts (fvar / avar / gvar) -----------------------------
@@ -3224,13 +3144,13 @@ impl<'a> Font<'a> {
     /// `true` if the font ships an `fvar` table — i.e. it exposes one
     /// or more variation axes. Returns `false` for static fonts.
     pub fn is_variable(&self) -> bool {
-        self.fvar.is_some()
+        self.fvar().is_some()
     }
 
     /// All variation axes the font publishes (`fvar`), in declaration
     /// order. Returns an empty slice for static fonts.
     pub fn variation_axes(&self) -> &[VariationAxis] {
-        self.fvar.as_ref().map(|f| f.axes()).unwrap_or(&[])
+        self.fvar().map(|f| f.axes()).unwrap_or(&[])
     }
 
     /// All named instances the font ships (`fvar`), in declaration
@@ -3238,7 +3158,7 @@ impl<'a> Font<'a> {
     /// [`Self::variation_axes`] (one f32 per axis) plus a `name`
     /// table id for the human-readable subfamily label.
     pub fn named_instances(&self) -> &[NamedInstance] {
-        self.fvar.as_ref().map(|f| f.instances()).unwrap_or(&[])
+        self.fvar().map(|f| f.instances()).unwrap_or(&[])
     }
 
     /// Current user-space variation coordinates (one entry per axis,
@@ -3246,7 +3166,7 @@ impl<'a> Font<'a> {
     /// Defaults to each axis's `default` value at parse time;
     /// updated by [`Self::set_variation_coords`].
     pub fn variation_coords(&self) -> &[f32] {
-        &self.var_coords
+        self.coords()
     }
 
     /// Replace the current variation coordinates. Each entry is in
@@ -3258,16 +3178,25 @@ impl<'a> Font<'a> {
     ///
     /// No-op when the font is static (`is_variable() == false`).
     pub fn set_variation_coords(&mut self, coords: &[f32]) {
-        let axes = match self.fvar.as_ref() {
-            Some(f) => f.axes(),
-            None => return,
+        if self.fvar().is_none() {
+            return;
+        }
+        self.coords_mut();
+        // Disjoint field borrows: the cached `fvar` (shared) and the
+        // coordinate vector (exclusive).
+        let (Some(fvar), Some(current)) = (
+            self.fvar.get_with(FvarTable::parse),
+            self.var_coords.as_mut(),
+        ) else {
+            return;
         };
+        let axes = fvar.axes();
         for (i, &v) in coords.iter().enumerate() {
-            if i >= self.var_coords.len() {
+            if i >= current.len() {
                 break;
             }
             let a = &axes[i];
-            self.var_coords[i] = v.clamp(a.min, a.max);
+            current[i] = v.clamp(a.min, a.max);
         }
     }
 
@@ -3281,7 +3210,7 @@ impl<'a> Font<'a> {
     /// or `None` when the font has no such axis.
     pub fn axis_value(&self, tag: &[u8; 4]) -> Option<f32> {
         let i = self.axis_index(tag)?;
-        self.var_coords.get(i).copied()
+        self.coords().get(i).copied()
     }
 
     /// Set a single variation axis (identified by its four-byte `tag`,
@@ -3293,19 +3222,22 @@ impl<'a> Font<'a> {
     /// Returns `true` when the axis was found and updated, `false` for a
     /// static font or an unknown tag (in which case nothing changes).
     pub fn set_axis_value(&mut self, tag: &[u8; 4], value: f32) -> bool {
-        let axes = match self.fvar.as_ref() {
-            Some(f) => f.axes(),
-            None => return false,
-        };
-        let i = match axes.iter().position(|a| &a.tag == tag) {
+        let i = match self.axis_index(tag) {
             Some(i) => i,
             None => return false,
         };
-        if i >= self.var_coords.len() {
+        if i >= self.coords().len() {
             return false;
         }
-        let a = &axes[i];
-        self.var_coords[i] = value.clamp(a.min, a.max);
+        self.coords_mut();
+        let (Some(fvar), Some(current)) = (
+            self.fvar.get_with(FvarTable::parse),
+            self.var_coords.as_mut(),
+        ) else {
+            return false;
+        };
+        let a = &fvar.axes()[i];
+        current[i] = value.clamp(a.min, a.max);
         true
     }
 
@@ -3322,7 +3254,7 @@ impl<'a> Font<'a> {
     /// Returns `true` when the instance existed and was applied, `false`
     /// for a static font or an out-of-range `index`.
     pub fn apply_named_instance(&mut self, index: usize) -> bool {
-        let coords = match self.fvar.as_ref() {
+        let coords = match self.fvar() {
             Some(f) => match f.instances().get(index) {
                 Some(inst) => inst.coords.clone(),
                 None => return false,
@@ -3338,13 +3270,13 @@ impl<'a> Font<'a> {
     /// `fvar` axis triple, then through the `avar` per-axis remap.
     /// Returns an empty vec for static fonts.
     pub fn normalised_coords(&self) -> Vec<f32> {
-        let axes = match self.fvar.as_ref() {
+        let axes = match self.fvar() {
             Some(f) => f.axes(),
             None => return Vec::new(),
         };
         let mut initial = Vec::with_capacity(axes.len());
         for (i, axis) in axes.iter().enumerate() {
-            let v = self.var_coords.get(i).copied().unwrap_or(axis.default);
+            let v = self.coords().get(i).copied().unwrap_or(axis.default);
             let n = if (v - axis.default).abs() < f32::EPSILON {
                 0.0
             } else if v < axis.default {
@@ -3363,7 +3295,7 @@ impl<'a> Font<'a> {
         // avar stages 2 + 3: per-axis segment-map bending, then — for
         // an avar version-2 table — the cross-axis delta application
         // against the intermediate vector (staged v2 reference §4).
-        match self.avar.as_ref() {
+        match self.avar() {
             Some(a) => a.remap_vector(&initial),
             None => initial,
         }
@@ -3378,8 +3310,7 @@ impl<'a> Font<'a> {
     /// is skipped for the whole table (the v1 segment maps still
     /// apply).
     pub fn avar_axis_index_map_unsupported(&self) -> bool {
-        self.avar
-            .as_ref()
+        self.avar()
             .map(|a| a.axis_index_map_unsupported())
             .unwrap_or(false)
     }
@@ -3409,12 +3340,12 @@ impl<'a> Font<'a> {
 
     /// `true` if the font ships a `cvar` CVT-variations table.
     pub fn has_cvar(&self) -> bool {
-        self.cvar.is_some()
+        self.cvar().is_some()
     }
 
     /// Borrow the parsed `cvar` table, when present.
     pub fn cvar_table(&self) -> Option<&CvarTable<'a>> {
-        self.cvar.as_ref()
+        self.cvar()
     }
 
     /// Per-`cvt`-entry deltas for the current variation instance,
@@ -3425,11 +3356,11 @@ impl<'a> Font<'a> {
     /// delta to add to `cvt ` entry `i`.
     pub fn cvt_deltas(&self) -> Vec<i32> {
         let n = self.cvt_count();
-        let cvar = match self.cvar.as_ref() {
+        let cvar = match self.cvar() {
             Some(c) => c,
             None => return vec![0; n as usize],
         };
-        let axis_count = self.fvar.as_ref().map(|f| f.axes().len()).unwrap_or(0) as u16;
+        let axis_count = self.fvar().map(|f| f.axes().len()).unwrap_or(0) as u16;
         let coords = self.normalised_coords();
         cvar.cvt_deltas(axis_count, n, &coords)
             .unwrap_or_else(|_| vec![0; n as usize])
@@ -3442,9 +3373,9 @@ impl<'a> Font<'a> {
     /// [`Self::cvt_value`].
     pub fn cvt_value_varied(&self, index: u16) -> Option<i16> {
         let base = self.cvt_value(index)? as i32;
-        let delta = match self.cvar.as_ref() {
+        let delta = match self.cvar() {
             Some(cvar) => {
-                let axis_count = self.fvar.as_ref().map(|f| f.axes().len()).unwrap_or(0) as u16;
+                let axis_count = self.fvar().map(|f| f.axes().len()).unwrap_or(0) as u16;
                 let coords = self.normalised_coords();
                 cvar.cvt_deltas(axis_count, self.cvt_count(), &coords)
                     .ok()
@@ -3491,7 +3422,7 @@ impl<'a> Font<'a> {
     /// Borrow the parsed `MVAR` table, when present. Static fonts and
     /// variable fonts that omit MVAR return `None`.
     pub fn mvar_table(&self) -> Option<&MvarTable> {
-        self.mvar.as_ref()
+        self.mvar()
     }
 
     /// Interpolated `MVAR` adjustment for a four-byte metric tag (e.g.
@@ -3513,14 +3444,14 @@ impl<'a> Font<'a> {
     /// Returns `Some(0.0)` when the variation evaluates to zero at the
     /// current instance (e.g. at the axis defaults).
     pub fn metric_variation_delta(&self, tag: &[u8; 4]) -> Option<f32> {
-        let m = self.mvar.as_ref()?;
+        let m = self.mvar()?;
         let coords = self.normalised_coords();
         m.delta_for_tag(tag, &coords)
     }
 
     /// Borrow the parsed `HVAR` table, when present.
     pub fn hvar_table(&self) -> Option<&HvarTable> {
-        self.hvar.as_ref()
+        self.hvar()
     }
 
     /// Interpolated `HVAR` adjustment to the advance width of
@@ -3538,7 +3469,7 @@ impl<'a> Font<'a> {
     /// store. Returns `Some(0.0)` when the variation evaluates to
     /// zero at the current instance (e.g. at the axis defaults).
     pub fn advance_width_variation_delta(&self, glyph_id: u16) -> Option<f32> {
-        let h = self.hvar.as_ref()?;
+        let h = self.hvar()?;
         let coords = self.normalised_coords();
         h.advance_width_delta(glyph_id, &coords)
     }
@@ -3548,7 +3479,7 @@ impl<'a> Font<'a> {
     /// mapping table (§7.3.5.2 says LSB / RSB lookups always need
     /// one); returns `None` otherwise.
     pub fn lsb_variation_delta(&self, glyph_id: u16) -> Option<f32> {
-        let h = self.hvar.as_ref()?;
+        let h = self.hvar()?;
         let coords = self.normalised_coords();
         h.lsb_delta(glyph_id, &coords)
     }
@@ -3557,7 +3488,7 @@ impl<'a> Font<'a> {
     /// `glyph_id`. Requires a right-side-bearing mapping table per
     /// §7.3.5.2; returns `None` otherwise.
     pub fn rsb_variation_delta(&self, glyph_id: u16) -> Option<f32> {
-        let h = self.hvar.as_ref()?;
+        let h = self.hvar()?;
         let coords = self.normalised_coords();
         h.rsb_delta(glyph_id, &coords)
     }
@@ -3593,7 +3524,7 @@ impl<'a> Font<'a> {
 
     /// Borrow the parsed `VVAR` table, when present.
     pub fn vvar_table(&self) -> Option<&VvarTable> {
-        self.vvar.as_ref()
+        self.vvar()
     }
 
     /// Interpolated `VVAR` adjustment to the advance height of
@@ -3612,7 +3543,7 @@ impl<'a> Font<'a> {
     /// store. Returns `Some(0.0)` when the variation evaluates to zero
     /// at the current instance (e.g. at the axis defaults).
     pub fn advance_height_variation_delta(&self, glyph_id: u16) -> Option<f32> {
-        let v = self.vvar.as_ref()?;
+        let v = self.vvar()?;
         let coords = self.normalised_coords();
         v.advance_height_delta(glyph_id, &coords)
     }
@@ -3622,7 +3553,7 @@ impl<'a> Font<'a> {
     /// mapping table (§7.3.8.2 inherits the §7.3.5.2 rule that side-
     /// bearing lookups always need a map); returns `None` otherwise.
     pub fn tsb_variation_delta(&self, glyph_id: u16) -> Option<f32> {
-        let v = self.vvar.as_ref()?;
+        let v = self.vvar()?;
         let coords = self.normalised_coords();
         v.tsb_delta(glyph_id, &coords)
     }
@@ -3631,7 +3562,7 @@ impl<'a> Font<'a> {
     /// `glyph_id`. Requires a bottom-side-bearing mapping table per
     /// §7.3.8.2; returns `None` otherwise.
     pub fn bsb_variation_delta(&self, glyph_id: u16) -> Option<f32> {
-        let v = self.vvar.as_ref()?;
+        let v = self.vvar()?;
         let coords = self.normalised_coords();
         v.bsb_delta(glyph_id, &coords)
     }
@@ -3644,7 +3575,7 @@ impl<'a> Font<'a> {
     /// [`Self::glyph_advance_height`] for a font without `VVAR` or at
     /// the default instance.
     pub fn glyph_advance_height_varied(&self, glyph_id: u16) -> Option<u16> {
-        let base = self.vmtx.as_ref()?.advance_height(glyph_id) as f32;
+        let base = self.vmtx()?.advance_height(glyph_id) as f32;
         let delta = self.advance_height_variation_delta(glyph_id).unwrap_or(0.0);
         Some((base + delta).round().clamp(0.0, u16::MAX as f32) as u16)
     }
@@ -3656,7 +3587,7 @@ impl<'a> Font<'a> {
     /// CFF2 variable fonts that publish a `VORG` table. Returns
     /// `None` otherwise.
     pub fn vorg_variation_delta(&self, glyph_id: u16) -> Option<f32> {
-        let v = self.vvar.as_ref()?;
+        let v = self.vvar()?;
         let coords = self.normalised_coords();
         v.vorg_delta(glyph_id, &coords)
     }
@@ -3665,7 +3596,7 @@ impl<'a> Font<'a> {
     /// omit it; variable fonts are required by ISO/IEC 14496-22:2019
     /// §7.3.7 to ship one.
     pub fn stat_table(&self) -> Option<&StatTable> {
-        self.stat.as_ref()
+        self.stat()
     }
 
     /// `STAT.designAxes` — one record per design axis. For a variable
@@ -3673,7 +3604,7 @@ impl<'a> Font<'a> {
     /// (sort by `axis_ordering` if a stable UI order is needed).
     /// Returns an empty slice when no STAT table is present.
     pub fn stat_axes(&self) -> &[StatAxisRecord] {
-        match self.stat.as_ref() {
+        match self.stat() {
             Some(s) => s.axes(),
             None => &[],
         }
@@ -3685,7 +3616,7 @@ impl<'a> Font<'a> {
     /// R/B/I/BI, WWS, or unrestricted naming models (§7.3.7.3).
     /// Returns an empty slice when no STAT table is present.
     pub fn stat_axis_values(&self) -> &[StatAxisValue] {
-        match self.stat.as_ref() {
+        match self.stat() {
             Some(s) => s.axis_values(),
             None => &[],
         }
@@ -3697,7 +3628,7 @@ impl<'a> Font<'a> {
     /// table; returns name ID 2 ("Regular") for the deprecated v1.0
     /// header that lacked the field.
     pub fn stat_elided_fallback_name_id(&self) -> Option<u16> {
-        Some(self.stat.as_ref()?.elided_fallback_name_id())
+        Some(self.stat()?.elided_fallback_name_id())
     }
 
     /// Every STAT axis-value record whose axis is `axis_tag` (e.g.
@@ -3709,7 +3640,7 @@ impl<'a> Font<'a> {
         &self,
         axis_tag: [u8; 4],
     ) -> Box<dyn Iterator<Item = &StatAxisValue> + '_> {
-        match self.stat.as_ref() {
+        match self.stat() {
             Some(s) => Box::new(s.axis_values_for_tag(axis_tag)),
             None => Box::new(core::iter::empty()),
         }
@@ -3717,18 +3648,341 @@ impl<'a> Font<'a> {
 
     /// `true` if any current coordinate diverges from its axis default.
     fn coords_differ_from_default(&self) -> bool {
-        let axes = match self.fvar.as_ref() {
+        let axes = match self.fvar() {
             Some(f) => f.axes(),
             None => return false,
         };
         for (i, axis) in axes.iter().enumerate() {
-            if let Some(v) = self.var_coords.get(i)
+            if let Some(v) = self.coords().get(i)
                 && (v - axis.default).abs() > f32::EPSILON
             {
                 return true;
             }
         }
         false
+    }
+}
+
+/// Lazily parsed optional tables. Each accessor runs the table parser on
+/// first call and caches the outcome; a table that fails to parse reads
+/// as absent (see [`Font::validate`] for the strict check).
+impl<'a> Font<'a> {
+    /// Force-parse every table the font ships and report the first
+    /// parse failure.
+    ///
+    /// [`Font::from_bytes`] only validates the table directory and the
+    /// required tables (`head`, `hhea`, `maxp`, `cmap`, `name`, `hmtx`);
+    /// every optional table is parsed on first use, and one that fails
+    /// to parse then reads as absent through its accessors. `validate`
+    /// restores the strict all-tables check: it returns `Ok(())` only
+    /// when every present table parses. Tables are checked in a fixed
+    /// order, so the returned error is deterministic. The parsed
+    /// tables stay cached, so later accessor calls cost nothing extra.
+    pub fn validate(&self) -> Result<(), Error> {
+        let _ = self.os2();
+        let _ = self.vhea();
+        let _ = self.vmtx();
+        let _ = self.vorg();
+        let _ = self.loca();
+        let _ = self.cff();
+        let _ = self.cff2();
+        let _ = self.post();
+        let _ = self.kern();
+        let _ = self.gsub();
+        let _ = self.gpos();
+        let _ = self.gdef();
+        let _ = self.cblc();
+        let _ = self.cbdt();
+        let _ = self.eblc();
+        let _ = self.ebdt();
+        let _ = self.ebsc();
+        let _ = self.colr();
+        let _ = self.cpal();
+        let _ = self.sbix();
+        let _ = self.fvar();
+        let _ = self.avar();
+        let _ = self.gvar();
+        let _ = self.cvar();
+        let _ = self.mvar();
+        let _ = self.hvar();
+        let _ = self.vvar();
+        let _ = self.stat();
+        let _ = self.base();
+        let _ = self.gasp();
+        let _ = self.ltsh();
+        let _ = self.hdmx();
+        let _ = self.vdmx();
+        let _ = self.meta();
+        let _ = self.pclt();
+        let _ = self.svg();
+        let _ = self.math();
+        let _ = self.jstf();
+        let _ = self.dsig();
+        let _ = self.merg();
+        let errors = [
+            self.os2.error(),
+            self.vhea.error(),
+            self.vmtx.error(),
+            self.vorg.error(),
+            self.loca.error(),
+            self.cff.error(),
+            self.cff2.error(),
+            self.post.error(),
+            self.kern.error(),
+            self.gsub.error(),
+            self.gpos.error(),
+            self.gdef.error(),
+            self.cblc.error(),
+            self.cbdt.error(),
+            self.eblc.error(),
+            self.ebdt.error(),
+            self.ebsc.error(),
+            self.colr.error(),
+            self.cpal.error(),
+            self.sbix.error(),
+            self.fvar.error(),
+            self.avar.error(),
+            self.gvar.error(),
+            self.cvar.error(),
+            self.mvar.error(),
+            self.hvar.error(),
+            self.vvar.error(),
+            self.stat.error(),
+            self.base.error(),
+            self.gasp.error(),
+            self.ltsh.error(),
+            self.hdmx.error(),
+            self.vdmx.error(),
+            self.meta.error(),
+            self.pclt.error(),
+            self.svg.error(),
+            self.math.error(),
+            self.jstf.error(),
+            self.dsig.error(),
+            self.merg.error(),
+        ];
+        match errors.into_iter().flatten().next() {
+            Some(e) => Err(e.clone()),
+            None => Ok(()),
+        }
+    }
+
+    fn os2(&self) -> Option<&Os2Table> {
+        self.os2.get_with(Os2Table::parse)
+    }
+
+    fn vhea(&self) -> Option<&VheaTable> {
+        self.vhea.get_with(VheaTable::parse)
+    }
+
+    /// Parsed against the (lazily parsed) `vhea` long-metric count; reads
+    /// as absent when `vhea` itself fails to parse.
+    fn vmtx(&self) -> Option<&VmtxTable<'a>> {
+        let vhea = self.vhea()?;
+        self.vmtx
+            .get_with(|s| VmtxTable::parse(s, vhea.num_long_ver_metrics, self.maxp.num_glyphs))
+    }
+
+    fn vorg(&self) -> Option<&VorgTable> {
+        self.vorg.get_with(VorgTable::parse)
+    }
+
+    fn loca(&self) -> Option<&LocaTable<'a>> {
+        self.loca
+            .get_with(|s| LocaTable::parse(s, self.maxp.num_glyphs, self.head.index_to_loc_format))
+    }
+
+    /// `CFF ` carries PostScript outlines (OTTO fonts); the tag has a
+    /// trailing space.
+    fn cff(&self) -> Option<&CffTable<'a>> {
+        self.cff.get_with(CffTable::parse)
+    }
+
+    /// `CFF2` carries variable PostScript outlines.
+    fn cff2(&self) -> Option<&Cff2Table<'a>> {
+        self.cff2.get_with(Cff2Table::parse)
+    }
+
+    fn post(&self) -> Option<&PostTable> {
+        self.post.get_with(PostTable::parse)
+    }
+
+    fn kern(&self) -> Option<&KernTable<'a>> {
+        self.kern.get_with(KernTable::parse)
+    }
+
+    fn gsub(&self) -> Option<&GsubTable<'a>> {
+        self.gsub.get_with(GsubTable::parse)
+    }
+
+    fn gpos(&self) -> Option<&GposTable<'a>> {
+        self.gpos.get_with(GposTable::parse)
+    }
+
+    fn gdef(&self) -> Option<&GdefTable<'a>> {
+        self.gdef.get_with(GdefTable::parse)
+    }
+
+    fn cblc(&self) -> Option<&CblcTable<'a>> {
+        self.cblc.get_with(CblcTable::parse)
+    }
+
+    fn cbdt(&self) -> Option<&CbdtTable<'a>> {
+        self.cbdt.get_with(CbdtTable::parse)
+    }
+
+    fn eblc(&self) -> Option<&CblcTable<'a>> {
+        self.eblc.get_with(CblcTable::parse)
+    }
+
+    fn ebdt(&self) -> Option<&EbdtTable<'a>> {
+        self.ebdt.get_with(EbdtTable::parse)
+    }
+
+    fn ebsc(&self) -> Option<&EbscTable> {
+        self.ebsc.get_with(EbscTable::parse)
+    }
+
+    fn colr(&self) -> Option<&ColrTable<'a>> {
+        self.colr.get_with(ColrTable::parse)
+    }
+
+    fn cpal(&self) -> Option<&CpalTable<'a>> {
+        self.cpal.get_with(CpalTable::parse)
+    }
+
+    fn sbix(&self) -> Option<&SbixTable<'a>> {
+        self.sbix
+            .get_with(|s| SbixTable::parse(s, self.maxp.num_glyphs))
+    }
+
+    /// Variable-font axes; the gate for every other variation table.
+    /// A missing `gvar` is acceptable for non-outline variable fonts.
+    fn fvar(&self) -> Option<&FvarTable> {
+        self.fvar.get_with(FvarTable::parse)
+    }
+
+    fn avar(&self) -> Option<&AvarTable> {
+        self.avar.get_with(AvarTable::parse)
+    }
+
+    fn gvar(&self) -> Option<&GvarTable<'a>> {
+        self.gvar.get_with(GvarTable::parse)
+    }
+
+    fn cvar(&self) -> Option<&CvarTable<'a>> {
+        self.cvar.get_with(CvarTable::parse)
+    }
+
+    fn mvar(&self) -> Option<&MvarTable> {
+        self.mvar.get_with(MvarTable::parse)
+    }
+
+    fn hvar(&self) -> Option<&HvarTable> {
+        self.hvar.get_with(HvarTable::parse)
+    }
+
+    fn vvar(&self) -> Option<&VvarTable> {
+        self.vvar.get_with(VvarTable::parse)
+    }
+
+    fn stat(&self) -> Option<&StatTable> {
+        self.stat.get_with(StatTable::parse)
+    }
+
+    fn base(&self) -> Option<&BaseTable> {
+        self.base.get_with(BaseTable::parse)
+    }
+
+    fn gasp(&self) -> Option<&GaspTable> {
+        self.gasp.get_with(GaspTable::parse)
+    }
+
+    /// §5.7.4 says `LTSH.numGlyphs` "should be the same as the numGlyphs
+    /// field in the 'maxp' table". A mismatch would truncate or over-read
+    /// the per-glyph lookups, so the parse cross-checks it and rejects the
+    /// table as `BadStructure`.
+    fn ltsh(&self) -> Option<&LtshTable> {
+        self.ltsh
+            .get_with(|s| LtshTable::parse_with_glyph_count(s, self.maxp.num_glyphs))
+    }
+
+    /// §5.7.2 fixes the per-record `widths[]` length at `maxp.numGlyphs`;
+    /// the parse cross-checks it so under-sized records are rejected and
+    /// per-ppem lookups never over-read the slice.
+    fn hdmx(&self) -> Option<&HdmxTable> {
+        self.hdmx
+            .get_with(|s| HdmxTable::parse(s, self.maxp.num_glyphs))
+    }
+
+    /// §5.7.8 fixed-shape table (header, RatioRange + Offset16 arrays,
+    /// groups); `parse` enforces the sort + sentinel invariants. Font-wide
+    /// extents only, so no per-glyph `maxp` cross-check.
+    fn vdmx(&self) -> Option<&VdmxTable> {
+        self.vdmx.get_with(VdmxTable::parse)
+    }
+
+    /// §5.7.6 metadata table; `MetaRecord` payloads borrow from the
+    /// table slice, covered by the `'a` lifetime.
+    fn meta(&self) -> Option<&MetaTable<'a>> {
+        self.meta.get_with(MetaTable::parse)
+    }
+
+    /// §5.7.7 PCL 5 table — fixed 54-byte struct, copied out at parse time.
+    fn pclt(&self) -> Option<&PcltTable> {
+        self.pclt.get_with(PcltTable::parse)
+    }
+
+    /// §5.5.1 (Amd.1:2020) `SVG ` table (trailing space in the tag);
+    /// documents borrow from the table slice.
+    fn svg(&self) -> Option<&SvgTable<'a>> {
+        self.svg.get_with(SvgTable::parse)
+    }
+
+    /// §6.3.6 MATH table — borrows from the table slice.
+    fn math(&self) -> Option<&MathTable<'a>> {
+        self.math.get_with(MathTable::parse)
+    }
+
+    /// §6.3.5 JSTF table — borrows from the table slice.
+    fn jstf(&self) -> Option<&JstfTable<'a>> {
+        self.jstf.get_with(JstfTable::parse)
+    }
+
+    /// §8.x DSIG table — structural decode only; PKCS#7 block payloads
+    /// borrow from the table slice.
+    fn dsig(&self) -> Option<&DsigTable<'a>> {
+        self.dsig.get_with(DsigTable::parse)
+    }
+
+    /// §5.7.5 MERG table — copied out at parse time.
+    fn merg(&self) -> Option<&MergTable> {
+        self.merg.get_with(MergTable::parse)
+    }
+
+    fn glyf(&self) -> Option<&GlyfTable<'a>> {
+        self.glyf.as_ref()
+    }
+
+    /// Current user-space coordinates: the explicitly set vector, or
+    /// each axis's default when none has been set yet.
+    fn coords(&self) -> &[f32] {
+        match &self.var_coords {
+            Some(v) => v,
+            None => self.default_coords.get_or_init(|| match self.fvar() {
+                Some(f) => f.axes().iter().map(|a| a.default).collect(),
+                None => Vec::new(),
+            }),
+        }
+    }
+
+    /// Mutable view of the coordinate vector, seeded from the axis
+    /// defaults on first mutation.
+    fn coords_mut(&mut self) -> &mut Vec<f32> {
+        if self.var_coords.is_none() {
+            self.var_coords = Some(self.coords().to_vec());
+        }
+        self.var_coords.get_or_insert_with(Vec::new)
     }
 }
 

@@ -241,7 +241,7 @@ fn synth_hdmx_round_trips_through_font_accessors() {
 }
 
 #[test]
-fn synth_hdmx_stride_below_widths_length_rejected_at_font_parse() {
+fn synth_hdmx_stride_below_widths_length_rejected_by_validate() {
     // maxp.numGlyphs = 16 but the on-wire `sizeDeviceRecord` claims a
     // stride of 4 bytes — less than the 2-byte per-record header +
     // 16 widths the §5.7.2 record layout requires. The Font path runs
@@ -266,7 +266,12 @@ fn synth_hdmx_stride_below_widths_length_rejected_at_font_parse() {
         (b"hdmx", bad_hdmx),
     ];
     let font_bytes = build_minimal_sfnt(&tables);
-    let err = Font::from_bytes(&font_bytes).expect_err("undersized stride");
+    // Optional tables parse lazily: construction succeeds, the malformed
+    // `hdmx` reads as absent, and `validate()` surfaces the error.
+    let font = Font::from_bytes(&font_bytes).expect("required tables parse");
+    assert!(!font.has_hdmx());
+    assert!(font.hdmx_table().is_none());
+    let err = font.validate().expect_err("undersized stride");
     assert!(matches!(err, oxideav_ttf::Error::BadStructure(_)));
 }
 

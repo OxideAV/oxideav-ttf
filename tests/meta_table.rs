@@ -268,16 +268,21 @@ fn meta_table_with_no_records_round_trips_as_empty() {
 }
 
 #[test]
-fn malformed_meta_table_rejects_at_parse_time() {
+fn malformed_meta_table_rejected_by_validate() {
     // §5.7.6.1: version must be 1. We synth a font with a
-    // version-2 `meta` table and confirm the parse fails — i.e.
-    // the malformed table is caught at `Font::from_bytes`, not
-    // silently surfaced through the accessors.
+    // version-2 `meta` table. Optional tables parse lazily, so
+    // construction succeeds; the malformed table must read as absent
+    // through every accessor (never surface bogus records) and
+    // `Font::validate` must report the parse error.
     let mut payload = make_meta(&[(b"dlng", b"Latn")]);
     payload[0..4].copy_from_slice(&2u32.to_be_bytes());
     let font_bytes = build_font_with_meta(payload);
+    let font = Font::from_bytes(&font_bytes).expect("required tables parse");
+    assert!(!font.has_meta());
+    assert!(font.meta_table().is_none());
+    assert!(font.meta_design_languages().is_none());
     assert!(
-        Font::from_bytes(&font_bytes).is_err(),
-        "version != 1 must surface as parse error"
+        font.validate().is_err(),
+        "version != 1 must surface as a validate() error"
     );
 }

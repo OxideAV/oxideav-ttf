@@ -154,7 +154,7 @@ impl<'a> Font<'a> {
         lang: Option<[u8; 4]>,
         features: &[[u8; 4]],
     ) {
-        if self.gsub.is_none() {
+        if self.gsub().is_none() {
             return;
         }
         let resolved = self.gsub_features_for_script_at_instance(script, lang);
@@ -186,7 +186,7 @@ impl<'a> Font<'a> {
                 .find(|(idx, _, _)| *idx == li)
                 .map(|(_, k, _)| *k)
                 .unwrap_or(0);
-            let flags = self.gsub.as_ref().map(|g| g.lookup_flags(li)).unwrap_or(0);
+            let flags = self.gsub().map(|g| g.lookup_flags(li)).unwrap_or(0);
             self.apply_gsub_lookup(buf, li, kind, flags);
         }
     }
@@ -402,7 +402,7 @@ impl<'a> Font<'a> {
             })
             .collect();
 
-        if self.gpos.is_none() {
+        if self.gpos().is_none() {
             return out;
         }
         let resolved = self.gpos_features_for_script_at_instance(script, lang);
@@ -457,7 +457,7 @@ impl<'a> Font<'a> {
                 // lookup's §2 skip filter — so a kern pair separated by an
                 // (ignored) combining mark still kerns, the canonical
                 // IGNORE_MARKS-on-kern case.
-                let gdef = self.gdef.as_ref();
+                let gdef = self.gdef();
                 let flags = self.gpos_lookup_flags(li);
                 let mfs = self.gpos_lookup_mark_filtering_set(li);
                 for i in 0..out.len() {
@@ -474,8 +474,7 @@ impl<'a> Font<'a> {
                     let left = out[i].glyph_id;
                     let right = out[right_idx].glyph_id;
                     let adj = self
-                        .gpos
-                        .as_ref()
+                        .gpos()
                         .map(|g| g.lookup_kerning_at(li, left, right, gdef))
                         .unwrap_or(0);
                     out[i].x_advance += adj as i32;
@@ -576,12 +575,10 @@ impl<'a> Font<'a> {
                     continue;
                 }
                 let hit = if to_mark {
-                    self.gpos
-                        .as_ref()
+                    self.gpos()
                         .and_then(|g| g.apply_mark_to_mark_at(li, base, mark))
                 } else {
-                    self.gpos
-                        .as_ref()
+                    self.gpos()
                         .and_then(|g| g.apply_mark_to_base_at(li, base, mark))
                 };
                 if let Some((dx, dy)) = hit {
@@ -622,8 +619,7 @@ impl<'a> Font<'a> {
                     continue;
                 }
                 if let Some((dx, dy)) = self
-                    .gpos
-                    .as_ref()
+                    .gpos()
                     .and_then(|g| g.apply_lookup_type_5(li, lig, 0, mark))
                 {
                     let between: i32 = out[j..i].iter().map(|g| g.x_advance).sum();

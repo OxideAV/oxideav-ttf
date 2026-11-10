@@ -297,7 +297,7 @@ fn synth_vdmx_sentinel_catches_non_square_ratio() {
 }
 
 #[test]
-fn synth_vdmx_zero_offset_rejected_at_font_parse() {
+fn synth_vdmx_zero_offset_rejected_by_validate() {
     // Build a VDMX payload by hand whose Offset16[0] is zero (would
     // alias to the table header). The Font path must surface the
     // BadStructure rejection from VdmxTable::parse, not silently
@@ -320,6 +320,11 @@ fn synth_vdmx_zero_offset_rejected_at_font_parse() {
         (b"VDMX", vdmx),
     ];
     let font_bytes = build_minimal_sfnt(&tables);
-    let err = Font::from_bytes(&font_bytes).expect_err("zero offset");
+    // Optional tables parse lazily: construction succeeds, the malformed
+    // `VDMX` reads as absent, and `validate()` surfaces the error.
+    let font = Font::from_bytes(&font_bytes).expect("required tables parse");
+    assert!(!font.has_vdmx());
+    assert!(font.vdmx_table().is_none());
+    let err = font.validate().expect_err("zero offset");
     assert!(matches!(err, oxideav_ttf::Error::BadStructure(_)));
 }

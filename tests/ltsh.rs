@@ -259,7 +259,7 @@ fn synth_all_ones_table_short_circuits_to_always_linear() {
 }
 
 #[test]
-fn synth_ltsh_glyph_count_mismatch_rejected_at_font_parse() {
+fn synth_ltsh_glyph_count_mismatch_rejected_by_validate() {
     // numGlyphs in maxp = 3 but LTSH carries a 4-entry yPels array. The
     // Font::from_bytes path runs parse_with_glyph_count and must reject
     // the mismatch rather than silently truncating per-glyph lookups.
@@ -275,6 +275,11 @@ fn synth_ltsh_glyph_count_mismatch_rejected_at_font_parse() {
         (b"LTSH", make_ltsh(0, &[1, 1, 1, 1])),
     ];
     let font_bytes = build_minimal_sfnt(&tables);
-    let err = Font::from_bytes(&font_bytes).expect_err("LTSH/maxp mismatch");
+    // Optional tables parse lazily: construction succeeds, the malformed
+    // `LTSH` reads as absent, and `validate()` surfaces the mismatch.
+    let font = Font::from_bytes(&font_bytes).expect("required tables parse");
+    assert!(!font.has_ltsh());
+    assert!(font.ltsh_table().is_none());
+    let err = font.validate().expect_err("LTSH/maxp mismatch");
     assert!(matches!(err, oxideav_ttf::Error::BadStructure(_)));
 }

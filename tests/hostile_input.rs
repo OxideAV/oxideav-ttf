@@ -4,15 +4,17 @@
 //! ever panic a parser: every table decode and every public accessor must
 //! bottom out in a typed `Result`/`Option`, never an out-of-bounds index,
 //! integer-overflow, or unbounded recursion. This test deterministically
-//! mutates the bundled fixtures three ways and drives the eager parse path
-//! (`Font::from_bytes` decodes essentially every table) plus a broad
-//! accessor battery under each mutant, asserting no thread ever unwinds:
+//! mutates the bundled fixtures three ways and drives the parse path
+//! (`Font::from_bytes` for the directory + required tables, then
+//! `Font::validate` to force every lazily parsed optional table) plus a
+//! broad accessor battery under each mutant, asserting no thread ever
+//! unwinds:
 //!
 //! 1. **Truncation** — every prefix length, catching short-read gaps.
 //! 2. **Blind byte flips** — random multi-byte corruption anywhere, which
 //!    mostly stresses the sfnt header + table-directory walker.
 //! 3. **Structure-aware corruption** — the sfnt header and table directory
-//!    are left intact (so `from_bytes` reaches every table parser) and
+//!    are left intact (so every table parser is reached) and
 //!    bytes are flipped only inside one table body per iteration, driving
 //!    corrupt-but-in-range data deep into each individual decoder.
 //!
@@ -265,6 +267,11 @@ fn exercise(bytes: &[u8]) {
             let _ = f.cvt_value_varied(0);
         }
     }
+    // Optional tables parse lazily (on first accessor use above);
+    // `validate` forces every remaining table parser so each mutant still
+    // reaches all of them, and must agree with itself once cached.
+    let first = f.validate();
+    assert_eq!(first, f.validate());
 }
 
 /// Deterministic xorshift64 PRNG — reproducible corruption.
@@ -349,8 +356,8 @@ fn no_panic_on_mutated_fonts() {
 
         // 3. Structure-aware corruption: a fixed budget of mutants, each
         //    corrupting one randomly-chosen table body while leaving the
-        //    sfnt header + directory intact so from_bytes reaches every
-        //    parser with corrupt-but-in-range data.
+        //    sfnt header + directory intact so every table parser is
+        //    reached with corrupt-but-in-range data.
         let regions: Vec<(usize, usize)> = table_regions(&base)
             .into_iter()
             .filter(|&(_, len)| len > 0)
