@@ -14,3 +14,7 @@ categories = ["graphics", "rendering", "parsing"]
 
 [dependencies]
 oxideav-core = "0.1"
+
+[[bench]]
+name = "font_construction"
+harness = false

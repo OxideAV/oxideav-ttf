@@ -1213,6 +1213,40 @@ unwrapped transparently at both the sub-table and lookup level. Every
 base cmap subtable format (0, 2, 4, 6, 8, 10, 12, 13) plus the
 format-14 UVS sidecar is decoded.
 
+## Performance: lazy table parsing
+
+`Font::from_bytes` / `Font::from_collection_bytes` parse only the sfnt
+header, the table directory and the required tables (`head`, `hhea`,
+`maxp`, `cmap`, `name`, `hmtx` — each a header-sized read), plus the
+directory-level `vhea`/`vmtx` and `loca`/`glyf` pairing checks. Every other
+table (`post`, `kern`, `GSUB`, `GPOS`, `GDEF`, `OS/2`, the bitmap / colour /
+variation / device-metrics tables, `CFF `/`CFF2`, …) is only *located*; its
+parser runs the first time an accessor needs it and the result is cached in
+a `OnceLock` on the `Font` (which stays `Send + Sync`). Coordinate-dependent
+state (`set_variation_coords` and friends) is never cached — only the
+coordinate-independent parsed tables are.
+
+An optional table that fails to parse reads as absent through its accessors
+(`has_*()` → `false`, `*_table()` → `None`); the error is cached, not
+re-attempted. `Font::validate()` forces every present table and returns the
+first parse error — the strict check `from_bytes` used to perform.
+
+Release-build timings from `cargo bench --bench font_construction`
+(per iteration, a fresh `Font` each time):
+
+| Scenario | InterVariable.ttf | DejaVuSans.ttf |
+|---|---|---|
+| `from_bytes` (eager, before) | 66.1 µs | 100.2 µs |
+| `from_bytes` | 0.25 µs | 0.24 µs |
+| `from_bytes` + 100 × `glyph_index` | 0.91 µs | 0.76 µs |
+| `from_bytes` + 1 × `glyph_outline` | 0.64 µs | 0.44 µs |
+| `from_bytes` + GSUB feature list | 0.86 µs | 0.36 µs |
+| `from_bytes` + `validate()` (every table) | 68.3 µs | 101.4 µs |
+
+Callers that build a `Font` per operation therefore pay only for the tables
+that operation touches; the `post` glyph-name table (the bulk of the old
+construction cost) is built only when a glyph-name accessor is used.
+
 ## Robustness
 
 A font file is fully attacker-controlled, so every table decode and every
@@ -1225,7 +1259,8 @@ composite-glyph resolution is depth-bounded (`MAX_COMPOSITE_DEPTH`), and
 fixed-seed hardening harness that mutates the bundled fixtures three ways —
 prefix truncation, blind multi-byte flips, and structure-aware corruption
 confined to a single table body (leaving the sfnt header + directory intact
-so `from_bytes` reaches every parser) — then drives the eager parse path
+so every parser is reached) — then drives the parse path (`from_bytes`,
+the lazily parsed tables through their accessors, and `Font::validate`)
 plus a broad accessor battery (outlines, bitmaps, shaping, kerning,
 variable instances with out-of-range / NaN coordinates, metrics / baseline
 / math lookups, COLR v1 paint decode + clip boxes) under each mutant,

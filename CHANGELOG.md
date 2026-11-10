@@ -10,9 +10,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - `PosRecord::new(glyph_index, value)` and `PosValue::with_*` setters, so callers can stop using struct literals.
+- `Font::validate()` — forces every present table parser and returns the
+  first parse error (the strict all-tables check `from_bytes` used to do).
+- `benches/font_construction.rs` (`cargo bench --bench font_construction`,
+  std-only timing): construction, construction + 100 `glyph_index`,
+  construction + one `glyph_outline`, construction + GSUB feature list,
+  construction + `validate`.
 
 ### Changed
 
+- Lazy table parsing: `Font::from_bytes` / `from_collection_bytes` now
+  parse only the table directory and the required `head` / `hhea` / `maxp`
+  / `cmap` / `name` / `hmtx` tables (plus the `vhea`/`vmtx` and
+  `loca`/`glyf` pairing checks); every optional table is parsed on first
+  use and cached in a `OnceLock`. Construction drops from 66.1 µs to
+  0.25 µs on InterVariable.ttf and from 100.2 µs to 0.24 µs on
+  DejaVuSans.ttf (release); construction + 100 `glyph_index` is
+  0.91 / 0.76 µs, + one `glyph_outline` 0.64 / 0.44 µs, + GSUB feature
+  list 0.86 / 0.36 µs. Default-instance outlines no longer touch `gvar`.
+- Error timing: a malformed *optional* table no longer makes `from_bytes`
+  fail. It now reads as absent through its accessors (`has_*()` →
+  `false`, `*_table()` → `None`) and its parse error is reported by
+  `Font::validate()`. Missing or malformed required tables, a half
+  `vhea`/`vmtx` or `loca`/`glyf` pair, and directory errors are still
+  rejected by `from_bytes`.
 - API hygiene: the enums `Error`, `Paint` (COLRv1 paint formats) and
   `StatAxisValue` (`tables::stat::AxisValue`), and the derived records
   `ShapedGlyph`, `CollectionHeader`, `ColorBitmap`, `GrayBitmap`,
