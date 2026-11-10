@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/OxideAV/oxideav-ttf/compare/v0.1.8...v0.2.0) - 2026-11-10
+
+### Other
+
+- bench + docs: font_construction bench, lazy-table tests, README/CHANGELOG
+- lazy optional-table parsing with OnceLock caching + Font::validate
+- API hygiene: non_exhaustive Error / Paint / StatAxisValue + derived records
+- edition 2024, MSRV 1.95
+- README examples use the current registry API
+
 ### Added
 
 - `PosRecord::new(glyph_index, value)` and `PosValue::with_*` setters, so callers can stop using struct literals.
