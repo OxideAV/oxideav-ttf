@@ -12,21 +12,28 @@
 //!   Resolving these means walking ScriptList → LangSys → FeatureList
 //!   (and FeatureVariations) and is identical for every run shaped with
 //!   the same request, so plans are cached.
-//! * **Lookup accelerators** — per lookup, the set of glyphs that appear
-//!   in the *first-glyph* Coverage table of any of its sub-tables
-//!   ([`GlyphSet`]), plus a 64-bit digest of that set. A lookup can only
-//!   act at a position whose glyph is in that set (every sub-table
-//!   format of every lookup type starts its match with a Coverage test
-//!   on the current glyph — ISO/IEC 14496-22 §6.2 / GSUB / GPOS
-//!   chapters), so a miss in the set skips the position, and a run whose
-//!   digest does not intersect the lookup's digest skips the lookup.
+//! * **Lookup accelerators** — per lookup, its sub-tables resolved once
+//!   (Extension wrappers unwrapped, in the order the table walkers visit
+//!   them), each with the set of glyphs in its *first-glyph* Coverage
+//!   table ([`GlyphSet`]), plus the union of those sets and a 64-bit
+//!   digest of it. A lookup can only act at a position whose glyph is in
+//!   that set (every sub-table format of every lookup type starts its
+//!   match with a Coverage test on the current glyph — ISO/IEC 14496-22
+//!   §6.2 / GSUB / GPOS chapters), so a miss in the union skips the
+//!   position, a miss in one sub-table's set skips that sub-table, and a
+//!   run whose digest does not intersect the lookup's digest skips the
+//!   lookup. Ligature lookups also record which glyphs can be a second
+//!   component; class-based pair-positioning sub-tables carry their two
+//!   ClassDef tables flattened to per-glyph arrays.
 //! * **Glyph classes** — the GDEF GlyphClassDef class of every glyph as
-//!   a flat byte array, for the `lookupFlag` skip predicate.
+//!   a flat array, for the `lookupFlag` skip predicate.
 //!
-//! Every accelerator is a *filter in front of* the byte-walking lookup
-//! code, never a replacement for its decisions: the sets are built as
-//! supersets of what the walkers accept, and anything the builders
-//! cannot read with confidence degrades to "no filtering".
+//! Every accelerator is a *filter in front of* the byte-walking
+//! sub-table matchers, never a replacement for their decisions: the sets
+//! are built as supersets of what the matchers accept, flattened tables
+//! are only produced from tables the matchers read unambiguously, and
+//! anything the builders cannot read with confidence degrades to "no
+//! filtering".
 
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -196,18 +203,106 @@ impl GlyphSet {
     }
 }
 
+/// One resolved sub-table of a lookup.
+#[derive(Debug)]
+pub(crate) struct SubAccel {
+    /// Byte offset of the sub-table (the Extension target, when the
+    /// lookup wraps its sub-tables) from the start of the layout table.
+    pub(crate) offset: usize,
+    /// Glyphs in the sub-table's first-glyph Coverage table.
+    pub(crate) first: GlyphSet,
+    /// `true` when `first` is exactly the set the sub-table matcher
+    /// accepts for glyph ids below the font's glyph count (a well-formed
+    /// Coverage table), not merely a superset of it.
+    pub(crate) first_is_exact: bool,
+    /// PairPosFormat2 only: the flattened class tables.
+    pub(crate) pair_classes: Option<PairClasses>,
+}
+
+/// PairPosFormat2 (§6.3.3.3 class pair adjustment) with both ClassDef
+/// tables flattened: the value record of a glyph pair is addressed by
+/// two array reads instead of two ClassDef searches.
+#[derive(Debug)]
+pub(crate) struct PairClasses {
+    pub(crate) class1: Box<[u16]>,
+    pub(crate) class2: Box<[u16]>,
+    pub(crate) value_format1: u16,
+    /// Bytes of one `Class2Record` (both value records).
+    pub(crate) class2_record_size: usize,
+    /// Bytes of one `Class1Record` (`class2Count` Class2Records).
+    pub(crate) class1_record_size: usize,
+}
+
+impl PairClasses {
+    /// Offset, from the sub-table start, of the value record for a
+    /// `(class1, class2)` pair. Header is 16 bytes.
+    #[inline]
+    pub(crate) fn record_offset(&self, class1: u16, class2: u16) -> usize {
+        16 + class1 as usize * self.class1_record_size + class2 as usize * self.class2_record_size
+    }
+
+    fn build(sub: &[u8], num_glyphs: usize) -> Option<Self> {
+        if sub.len() < 16 || read_u16(sub, 0).ok()? != 2 {
+            return None;
+        }
+        let value_format1 = read_u16(sub, 4).ok()?;
+        let value_format2 = read_u16(sub, 6).ok()?;
+        let class_def1 = sub.get(read_u16(sub, 8).ok()? as usize..)?;
+        let class_def2 = sub.get(read_u16(sub, 10).ok()? as usize..)?;
+        let class2_count = read_u16(sub, 14).ok()? as usize;
+        let class2_record_size =
+            (value_format1.count_ones() + value_format2.count_ones()) as usize * 2;
+        Some(Self {
+            class1: flatten_class_def(class_def1, num_glyphs)?,
+            class2: flatten_class_def(class_def2, num_glyphs)?,
+            value_format1,
+            class2_record_size,
+            class1_record_size: class2_count * class2_record_size,
+        })
+    }
+}
+
 /// Per-lookup accelerator. See the module docs.
 #[derive(Debug)]
 pub(crate) struct LookupAccel {
     /// Glyphs at which the lookup can act (first-glyph coverage union).
     pub(crate) first: GlyphSet,
+    /// The lookup's sub-tables of its effective type, in the order — and
+    /// up to the point — the table walker visits them.
+    pub(crate) subs: Box<[SubAccel]>,
     /// GSUB LigatureSubst only: the largest `componentCount` of any
     /// Ligature record in the lookup — the longest glyph sequence one
     /// match can inspect. `usize::MAX` when it could not be determined.
     pub(crate) max_components: usize,
+    /// GSUB LigatureSubst only: every glyph that is the second component
+    /// of some Ligature record, when every record of the lookup has at
+    /// least two components and could be read. A ligature can then only
+    /// form where the next visible glyph is in this set.
+    pub(crate) second_components: Option<GlyphSet>,
+}
+
+/// How a table walker treats an Extension sub-table it cannot unwrap.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BadExtension {
+    /// Skip the sub-table and go on to the next one.
+    Skip,
+    /// Give up on the lookup: later sub-tables are never visited.
+    Stop,
 }
 
 impl LookupAccel {
+    fn empty(num_glyphs: usize) -> Self {
+        LookupAccel {
+            first: GlyphSet::with_capacity(num_glyphs),
+            subs: Box::new([]),
+            max_components: 0,
+            second_components: None,
+        }
+    }
+
+    /// Resolve lookup `lookup_index` of effective type `kind` exactly
+    /// the way the per-type table walkers in `tables::gsub` /
+    /// `tables::gpos` iterate it.
     fn build(
         table: LayoutTable,
         bytes: &[u8],
@@ -215,66 +310,129 @@ impl LookupAccel {
         lookup_index: u16,
         kind: u16,
         num_glyphs: usize,
-    ) -> Self {
-        let unfiltered = || LookupAccel {
-            first: GlyphSet::universal(),
-            max_components: usize::MAX,
-        };
-        let Some(layout) = table.coverage_layout(kind) else {
-            return unfiltered();
-        };
+    ) -> Option<Self> {
+        let layout = table.coverage_layout(kind)?;
+        // Walker preconditions: every walker but the GPOS pair /
+        // mark-to-base / mark-to-mark ones treats a zero LookupList
+        // offset as "no lookups"; all of them need a 6-byte Lookup
+        // header.
+        let zero_offset_is_empty = !(table == LayoutTable::Gpos && matches!(kind, 2 | 4 | 6));
+        if zero_offset_is_empty && lookup_list_off == 0 {
+            return Some(Self::empty(num_glyphs));
+        }
         let Some(lookup) = lookup_table_slice(bytes, lookup_list_off, lookup_index) else {
-            return unfiltered();
+            return Some(Self::empty(num_glyphs));
         };
-        let (Ok(outer_kind), Ok(sub_count)) = (read_u16(lookup, 0), read_u16(lookup, 4)) else {
-            return unfiltered();
+        if lookup.len() < 6 {
+            return Some(Self::empty(num_glyphs));
+        }
+        // `lookup` is a tail of `bytes`.
+        let lookup_start = bytes.len() - lookup.len();
+        let outer_kind = read_u16(lookup, 0).ok()?;
+        let sub_count = read_u16(lookup, 4).ok()? as usize;
+        // GPOS single / cursive / mark-to-ligature walkers abandon the
+        // lookup at an Extension record they cannot unwrap; every other
+        // walker moves on to the next sub-table.
+        let bad_extension = if table == LayoutTable::Gpos && matches!(kind, 1 | 3 | 5) {
+            BadExtension::Stop
+        } else {
+            BadExtension::Skip
         };
+        let is_ligature = table == LayoutTable::Gsub && kind == 4;
+        let is_pair = table == LayoutTable::Gpos && kind == 2;
+
         let mut first = GlyphSet::with_capacity(num_glyphs);
+        let mut subs = Vec::new();
         let mut max_components = 0usize;
-        let track_components = table == LayoutTable::Gsub && kind == 4;
-        for s in 0..sub_count as usize {
+        let mut second = is_ligature.then(|| GlyphSet::with_capacity(num_glyphs));
+        for s in 0..sub_count {
+            // An unreadable or out-of-range sub-table offset ends every
+            // walker's iteration.
             let Ok(sub_off) = read_u16(lookup, 6 + s * 2) else {
                 break;
             };
             let Some(mut sub) = lookup.get(sub_off as usize..) else {
-                continue;
+                break;
             };
             let mut sub_kind = outer_kind;
             if outer_kind == table.extension_kind() {
                 // Extension format 1: u16 format, u16 extensionLookupType,
                 // Offset32 extensionOffset.
-                let (Ok(ext_kind), Ok(ext_off)) = (read_u16(sub, 2), read_u32(sub, 4)) else {
-                    continue;
+                let target = if sub.len() < 8 {
+                    None
+                } else {
+                    match (read_u16(sub, 2), read_u32(sub, 4)) {
+                        (Ok(ext_kind), Ok(ext_off)) => {
+                            sub.get(ext_off as usize..).map(|ext| (ext_kind, ext))
+                        }
+                        _ => None,
+                    }
                 };
-                let Some(ext) = sub.get(ext_off as usize..) else {
-                    continue;
-                };
-                sub_kind = ext_kind;
-                sub = ext;
+                match (target, bad_extension) {
+                    (Some((ext_kind, ext)), _) => {
+                        sub_kind = ext_kind;
+                        sub = ext;
+                    }
+                    (None, BadExtension::Skip) => continue,
+                    (None, BadExtension::Stop) => break,
+                }
             }
             if sub_kind != kind {
                 continue;
             }
+            let mut sub_first = GlyphSet::with_capacity(num_glyphs);
+            let mut first_is_exact = false;
             match first_coverage(layout, sub) {
-                FirstCoverage::At(cov) => first.insert_coverage(cov),
+                FirstCoverage::At(cov) => {
+                    sub_first.insert_coverage(cov);
+                    first_is_exact = coverage_is_well_formed(cov);
+                    first.insert_coverage(cov);
+                }
                 FirstCoverage::None => {}
-                FirstCoverage::Unknown => return unfiltered(),
+                FirstCoverage::Unknown => {
+                    sub_first = GlyphSet::universal();
+                    first = GlyphSet::universal();
+                }
             }
-            if track_components {
-                max_components = match ligature_max_components(sub) {
-                    Some(n) => max_components.max(n),
-                    None => usize::MAX,
-                };
+            if is_ligature {
+                match ligature_components(sub, second.as_mut()) {
+                    Some(LigatureShape {
+                        max_components: n,
+                        all_multi_component,
+                    }) => {
+                        max_components = max_components.max(n);
+                        if !all_multi_component {
+                            second = None;
+                        }
+                    }
+                    None => {
+                        max_components = usize::MAX;
+                        second = None;
+                    }
+                }
             }
+            subs.push(SubAccel {
+                // `sub` is a tail of `lookup`, itself a tail of `bytes`.
+                offset: lookup_start + (lookup.len() - sub.len()),
+                first: sub_first,
+                first_is_exact,
+                pair_classes: if is_pair {
+                    PairClasses::build(sub, num_glyphs)
+                } else {
+                    None
+                },
+            });
         }
-        LookupAccel {
+        Some(LookupAccel {
             first,
-            max_components: if track_components {
+            subs: subs.into_boxed_slice(),
+            max_components: if is_ligature {
                 max_components
             } else {
                 usize::MAX
             },
-        }
+            second_components: second,
+        })
     }
 }
 
@@ -330,12 +488,23 @@ fn first_coverage(layout: CoverageLayout, sub: &[u8]) -> FirstCoverage<'_> {
     }
 }
 
-/// Largest `componentCount` over every Ligature record of a
-/// LigatureSubstFormat1 sub-table, or `None` when a record could not be
-/// read.
-fn ligature_max_components(sub: &[u8]) -> Option<usize> {
+struct LigatureShape {
+    /// Largest `componentCount` of any Ligature record.
+    max_components: usize,
+    /// Every Ligature record has `componentCount >= 2`.
+    all_multi_component: bool,
+}
+
+/// Walk every Ligature record of a LigatureSubstFormat1 sub-table,
+/// adding each record's second component to `second`. `None` when a
+/// record could not be read (the caller then stops filtering on
+/// component data).
+fn ligature_components(sub: &[u8], mut second: Option<&mut GlyphSet>) -> Option<LigatureShape> {
     let set_count = read_u16(sub, 4).ok()? as usize;
-    let mut max = 0usize;
+    let mut shape = LigatureShape {
+        max_components: 0,
+        all_multi_component: true,
+    };
     for s in 0..set_count {
         let set_off = read_u16(sub, 6 + s * 2).ok()? as usize;
         let set = sub.get(set_off..)?;
@@ -343,16 +512,58 @@ fn ligature_max_components(sub: &[u8]) -> Option<usize> {
         for l in 0..lig_count {
             let lig_off = read_u16(set, 2 + l * 2).ok()? as usize;
             let lig = set.get(lig_off..)?;
-            max = max.max(read_u16(lig, 2).ok()? as usize);
+            let components = read_u16(lig, 2).ok()? as usize;
+            shape.max_components = shape.max_components.max(components);
+            match components {
+                // Never matches (the matcher skips empty records).
+                0 => {}
+                1 => shape.all_multi_component = false,
+                _ => {
+                    let glyph = read_u16(lig, 4).ok()?;
+                    if let Some(set) = second.as_deref_mut() {
+                        set.insert(glyph);
+                    }
+                }
+            }
         }
     }
-    Some(max)
+    Some(shape)
+}
+
+/// `true` when a Coverage table is one a binary search reads
+/// unambiguously: every record readable and in strictly increasing
+/// order (format 2: non-overlapping ranges with `start <= end`).
+fn coverage_is_well_formed(cov: &[u8]) -> bool {
+    let (Ok(format), Ok(count)) = (read_u16(cov, 0), read_u16(cov, 2)) else {
+        return false;
+    };
+    let mut next_free = 0u32;
+    match format {
+        1 => (0..count as usize).all(|i| match read_u16(cov, 4 + i * 2) {
+            Ok(g) if g as u32 >= next_free => {
+                next_free = g as u32 + 1;
+                true
+            }
+            _ => false,
+        }),
+        2 => (0..count as usize).all(|i| {
+            let off = 4 + i * 6;
+            match (read_u16(cov, off), read_u16(cov, off + 2)) {
+                (Ok(s), Ok(e)) if s <= e && s as u32 >= next_free => {
+                    next_free = e as u32 + 1;
+                    true
+                }
+                _ => false,
+            }
+        }),
+        _ => false,
+    }
 }
 
 /// Lazily built accelerators for every lookup of one layout table.
 #[derive(Debug, Default)]
 struct TableAccels {
-    slots: OnceLock<Box<[OnceLock<LookupAccel>]>>,
+    slots: OnceLock<Box<[OnceLock<Option<LookupAccel>>]>>,
 }
 
 impl TableAccels {
@@ -373,7 +584,7 @@ impl TableAccels {
             (0..count).map(|_| OnceLock::new()).collect()
         });
         let slot = slots.get(lookup_index as usize)?;
-        Some(slot.get_or_init(|| {
+        slot.get_or_init(|| {
             LookupAccel::build(
                 table,
                 bytes,
@@ -382,7 +593,8 @@ impl TableAccels {
                 kind,
                 num_glyphs,
             )
-        }))
+        })
+        .as_ref()
     }
 }
 
@@ -421,7 +633,7 @@ pub(crate) struct LayoutCache {
     gpos: TableAccels,
     /// GDEF GlyphClassDef class per glyph (`None` inside: no usable
     /// flat table could be built; callers fall back to the GDEF walker).
-    glyph_classes: OnceLock<Option<Box<[u8]>>>,
+    glyph_classes: OnceLock<Option<Box<[u16]>>>,
     /// Most-recently-used first.
     plans: Mutex<Vec<PlanEntry>>,
 }
@@ -451,7 +663,10 @@ impl LayoutCache {
     }
 
     /// The flat GDEF class array, built on first use with `build`.
-    pub(crate) fn glyph_classes(&self, build: impl FnOnce() -> Option<Box<[u8]>>) -> Option<&[u8]> {
+    pub(crate) fn glyph_classes(
+        &self,
+        build: impl FnOnce() -> Option<Box<[u16]>>,
+    ) -> Option<&[u16]> {
         self.glyph_classes.get_or_init(build).as_deref()
     }
 
@@ -504,16 +719,15 @@ impl LayoutCache {
     }
 }
 
-/// Flatten a ClassDef table (§6.2.6) into one class byte per glyph for
-/// glyph ids `0..num_glyphs` (classes above 254 saturate to 255).
+/// Flatten a ClassDef table (§6.2.6) into one class per glyph for glyph
+/// ids `0..num_glyphs`.
 ///
 /// Returns `None` unless the table is one the per-glyph walker reads
 /// unambiguously — every record readable and, for format 2, ranges in
 /// strictly increasing, non-overlapping order — so the flat array and
 /// the walker always agree.
-pub(crate) fn flatten_class_def(class_def: &[u8], num_glyphs: usize) -> Option<Box<[u8]>> {
-    let mut out = vec![0u8; num_glyphs];
-    let clamp = |class: u16| class.min(255) as u8;
+pub(crate) fn flatten_class_def(class_def: &[u8], num_glyphs: usize) -> Option<Box<[u16]>> {
+    let mut out = vec![0u16; num_glyphs];
     match read_u16(class_def, 0).ok()? {
         1 => {
             let start = read_u16(class_def, 2).ok()? as usize;
@@ -521,7 +735,7 @@ pub(crate) fn flatten_class_def(class_def: &[u8], num_glyphs: usize) -> Option<B
             for i in 0..count {
                 let class = read_u16(class_def, 6 + i * 2).ok()?;
                 if let Some(slot) = out.get_mut(start + i) {
-                    *slot = clamp(class);
+                    *slot = class;
                 }
             }
         }
@@ -539,7 +753,7 @@ pub(crate) fn flatten_class_def(class_def: &[u8], num_glyphs: usize) -> Option<B
                 next_free = end as u32 + 1;
                 let hi = (end as usize + 1).min(num_glyphs);
                 if let Some(slots) = out.get_mut(start as usize..hi) {
-                    slots.fill(clamp(class));
+                    slots.fill(class);
                 }
             }
         }
@@ -592,6 +806,23 @@ mod tests {
     }
 
     #[test]
+    fn coverage_well_formedness() {
+        assert!(coverage_is_well_formed(&[0, 1, 0, 2, 0, 5, 0, 9]));
+        // Unsorted glyph array.
+        assert!(!coverage_is_well_formed(&[0, 1, 0, 2, 0, 9, 0, 5]));
+        // Truncated glyph array.
+        assert!(!coverage_is_well_formed(&[0, 1, 0, 3, 0, 5, 0, 9]));
+        assert!(coverage_is_well_formed(&[
+            0, 2, 0, 2, 0, 3, 0, 5, 0, 0, 0, 6, 0, 6, 0, 3
+        ]));
+        // Overlapping ranges.
+        assert!(!coverage_is_well_formed(&[
+            0, 2, 0, 2, 0, 3, 0, 5, 0, 0, 0, 5, 0, 6, 0, 3
+        ]));
+        assert!(!coverage_is_well_formed(&[0, 3, 0, 0]));
+    }
+
+    #[test]
     fn class_def_flattening_matches_walker() {
         use crate::tables::gdef::class_def_lookup;
         // Format 2: 2..=4 → 1, 7..=7 → 3, 9..=300 → 2.
@@ -600,19 +831,13 @@ mod tests {
         ];
         let flat = flatten_class_def(&cd, 40).unwrap();
         for g in 0..40u16 {
-            assert_eq!(
-                flat[g as usize] as u16,
-                class_def_lookup(&cd, g).unwrap_or(0)
-            );
+            assert_eq!(flat[g as usize], class_def_lookup(&cd, g).unwrap_or(0));
         }
         // Format 1: start 3, classes [1, 0, 3].
         let cd1 = [0, 1, 0, 3, 0, 3, 0, 1, 0, 0, 0, 3];
         let flat = flatten_class_def(&cd1, 10).unwrap();
         for g in 0..10u16 {
-            assert_eq!(
-                flat[g as usize] as u16,
-                class_def_lookup(&cd1, g).unwrap_or(0)
-            );
+            assert_eq!(flat[g as usize], class_def_lookup(&cd1, g).unwrap_or(0));
         }
         // Overlapping ranges: refuse to flatten.
         let bad = [0, 2, 0, 2, 0, 2, 0, 9, 0, 1, 0, 5, 0, 12, 0, 2];

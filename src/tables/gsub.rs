@@ -814,6 +814,62 @@ impl<'a> GsubTable<'a> {
         None
     }
 
+    /// Match one resolved Contextual (`chained == false`, LookupType 5)
+    /// or Chained Contexts (`chained == true`, LookupType 6) sub-table
+    /// at `pos` and, on a match, apply its SubstLookupRecords to `gids`
+    /// in place, widening `extent` over every edit. Returns whether a
+    /// rule matched. This is the per-sub-table step of
+    /// [`Self::apply_lookup_type_5`] / [`Self::apply_lookup_type_6`],
+    /// for callers that have already resolved the lookup's sub-tables.
+    /// `pos` must be in range.
+    pub(crate) fn apply_context_subtable_in_place(
+        &self,
+        chained: bool,
+        sub: &[u8],
+        gids: &mut Vec<u16>,
+        pos: usize,
+        extent: &mut EditExtent,
+    ) -> bool {
+        let Ok(format) = read_u16(sub, 0) else {
+            return false;
+        };
+        let matched = match (chained, format) {
+            (false, 1) => context_format1_match(sub, gids, pos),
+            (false, 2) => context_format2_match(sub, gids, pos),
+            (false, 3) => context_format3_match(sub, gids, pos),
+            (true, 1) => chain_context_format1_match(sub, gids, pos),
+            (true, 2) => chain_context_format2_match(sub, gids, pos),
+            (true, 3) => chain_context_format3_match(sub, gids, pos),
+            _ => None,
+        };
+        match matched {
+            Some(m) => {
+                self.apply_subst_records_in_place(gids, pos, &m, 0, extent);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Apply Contextual (`chained == false`) / Chained Contexts
+    /// (`chained == true`) lookup `lookup_index` at `pos`, rewriting
+    /// `gids` in place. The in-place form of
+    /// [`Self::apply_lookup_type_5`] / [`Self::apply_lookup_type_6`].
+    pub(crate) fn apply_context_lookup_in_place(
+        &self,
+        chained: bool,
+        lookup_index: u16,
+        gids: &mut Vec<u16>,
+        pos: usize,
+        extent: &mut EditExtent,
+    ) -> bool {
+        if chained {
+            self.apply_chain_context_in_place(lookup_index, gids, pos, 0, extent)
+        } else {
+            self.apply_context_in_place(lookup_index, gids, pos, 0, extent)
+        }
+    }
+
     fn apply_context_at(
         &self,
         lookup_index: u16,
@@ -821,6 +877,38 @@ impl<'a> GsubTable<'a> {
         pos: usize,
         depth: u8,
     ) -> Option<Vec<u16>> {
+        let m = self.match_context_at(lookup_index, gids, pos, depth)?;
+        self.apply_subst_records(gids, pos, &m, depth)
+    }
+
+    /// In-place form of [`Self::apply_context_at`]: on a match, rewrites `gids`
+    /// and widens `extent`; returns whether a rule matched.
+    fn apply_context_in_place(
+        &self,
+        lookup_index: u16,
+        gids: &mut Vec<u16>,
+        pos: usize,
+        depth: u8,
+        extent: &mut EditExtent,
+    ) -> bool {
+        match self.match_context_at(lookup_index, gids, pos, depth) {
+            Some(m) => {
+                self.apply_subst_records_in_place(gids, pos, &m, depth, extent);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Find the first sub-table rule of lookup `lookup_index` that
+    /// matches at `pos` (the matching half of [`Self::apply_context_at`]).
+    fn match_context_at(
+        &self,
+        lookup_index: u16,
+        gids: &[u16],
+        pos: usize,
+        depth: u8,
+    ) -> Option<ChainMatch> {
         if depth >= MAX_NESTED_LOOKUP_DEPTH {
             return None;
         }
@@ -866,8 +954,8 @@ impl<'a> GsubTable<'a> {
                 3 => context_format3_match(effective_sub, gids, pos),
                 _ => None,
             };
-            if let Some(m) = matched {
-                return self.apply_subst_records(gids, pos, &m, depth);
+            if matched.is_some() {
+                return matched;
             }
         }
         None
@@ -880,6 +968,38 @@ impl<'a> GsubTable<'a> {
         pos: usize,
         depth: u8,
     ) -> Option<Vec<u16>> {
+        let m = self.match_chain_context_at(lookup_index, gids, pos, depth)?;
+        self.apply_subst_records(gids, pos, &m, depth)
+    }
+
+    /// In-place form of [`Self::apply_chain_context_at`]: on a match, rewrites `gids`
+    /// and widens `extent`; returns whether a rule matched.
+    fn apply_chain_context_in_place(
+        &self,
+        lookup_index: u16,
+        gids: &mut Vec<u16>,
+        pos: usize,
+        depth: u8,
+        extent: &mut EditExtent,
+    ) -> bool {
+        match self.match_chain_context_at(lookup_index, gids, pos, depth) {
+            Some(m) => {
+                self.apply_subst_records_in_place(gids, pos, &m, depth, extent);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Find the first sub-table rule of lookup `lookup_index` that
+    /// matches at `pos` (the matching half of [`Self::apply_chain_context_at`]).
+    fn match_chain_context_at(
+        &self,
+        lookup_index: u16,
+        gids: &[u16],
+        pos: usize,
+        depth: u8,
+    ) -> Option<ChainMatch> {
         if depth >= MAX_NESTED_LOOKUP_DEPTH {
             return None;
         }
@@ -925,8 +1045,8 @@ impl<'a> GsubTable<'a> {
                 3 => chain_context_format3_match(effective_sub, gids, pos),
                 _ => None,
             };
-            if let Some(m) = matched {
-                return self.apply_subst_records(gids, pos, &m, depth);
+            if matched.is_some() {
+                return matched;
             }
         }
         None
@@ -949,6 +1069,23 @@ impl<'a> GsubTable<'a> {
     ) -> Option<Vec<u16>> {
         // Working buffer: gids with the input window mutable.
         let mut out: Vec<u16> = gids.to_vec();
+        let mut extent = EditExtent::starting_at(pos);
+        self.apply_subst_records_in_place(&mut out, pos, m, depth, &mut extent);
+        Some(out)
+    }
+
+    /// [`Self::apply_subst_records`] rewriting `out` in place. Every
+    /// edit lands at an index `>= pos`; `extent` is widened to cover
+    /// each one, so the caller can tell which part of the run changed
+    /// without comparing the whole of it.
+    fn apply_subst_records_in_place(
+        &self,
+        out: &mut Vec<u16>,
+        pos: usize,
+        m: &ChainMatch,
+        depth: u8,
+        extent: &mut EditExtent,
+    ) {
         // Track the current logical→physical remapping inside the input
         // window. Each entry maps a *logical* (pre-subst) sequenceIndex
         // to its current physical offset inside `out`. When a ligature
@@ -990,18 +1127,19 @@ impl<'a> GsubTable<'a> {
                     if let Some(replacement) = self.apply_lookup_type_1(rec.lookup_index, out[phys])
                     {
                         out[phys] = replacement;
+                        extent.record(phys, 1, 1);
                     }
                 }
                 LOOKUP_LIGATURE_SUBST => {
-                    let tail = &out[phys..];
                     if let Some((lig_glyph, consumed)) =
-                        self.apply_lookup_type_4(rec.lookup_index, tail)
+                        self.apply_lookup_type_4(rec.lookup_index, &out[phys..])
                         && consumed >= 1
                         && phys + consumed <= out.len()
                     {
                         // Replace `consumed` glyphs at `phys` with
                         // a single ligature glyph.
                         out.splice(phys..phys + consumed, std::iter::once(lig_glyph));
+                        extent.record(phys, consumed, 1);
                         // Collapse the consumed logical indices
                         // and shift later positions left.
                         let removed = consumed - 1;
@@ -1018,12 +1156,15 @@ impl<'a> GsubTable<'a> {
                     }
                 }
                 LOOKUP_CHAIN_CONTEXT_SUBST => {
-                    if let Some(rewritten) =
-                        self.apply_chain_context_at(rec.lookup_index, &out, phys, depth + 1)
-                    {
+                    let old_len = out.len();
+                    if self.apply_chain_context_in_place(
+                        rec.lookup_index,
+                        out,
+                        phys,
+                        depth + 1,
+                        extent,
+                    ) {
                         // Recompute remap based on length delta.
-                        let old_len = out.len();
-                        out = rewritten;
                         let delta = out.len() as isize - old_len as isize;
                         if delta != 0 {
                             for slot in logical_to_phys.iter_mut().skip(seq_idx + 1) {
@@ -1040,11 +1181,8 @@ impl<'a> GsubTable<'a> {
                     }
                 }
                 LOOKUP_CONTEXT_SUBST => {
-                    if let Some(rewritten) =
-                        self.apply_context_at(rec.lookup_index, &out, phys, depth + 1)
-                    {
-                        let old_len = out.len();
-                        out = rewritten;
+                    let old_len = out.len();
+                    if self.apply_context_in_place(rec.lookup_index, out, phys, depth + 1, extent) {
                         let delta = out.len() as isize - old_len as isize;
                         if delta != 0 {
                             for slot in logical_to_phys.iter_mut().skip(seq_idx + 1) {
@@ -1064,6 +1202,7 @@ impl<'a> GsubTable<'a> {
                     if let Some(seq) = self.apply_lookup_type_2(rec.lookup_index, out[phys]) {
                         let inserted = seq.len();
                         out.splice(phys..phys + 1, seq);
+                        extent.record(phys, 1, inserted);
                         // Length delta = inserted - 1.
                         let delta = inserted as isize - 1;
                         if delta != 0 {
@@ -1088,6 +1227,7 @@ impl<'a> GsubTable<'a> {
                         self.apply_lookup_type_3(rec.lookup_index, out[phys], 0)
                     {
                         out[phys] = replacement;
+                        extent.record(phys, 1, 1);
                     }
                 }
                 _ => {
@@ -1097,7 +1237,6 @@ impl<'a> GsubTable<'a> {
                 }
             }
         }
-        Some(out)
     }
 
     /// Look up a ligature substitution that matches a prefix of `glyphs`.
@@ -1169,7 +1308,7 @@ impl<'a> GsubTable<'a> {
 ///             u16 substituteGlyphIDs[glyphCount]
 ///     - if `gid` is at coverage_index `i`, return
 ///       `substituteGlyphIDs[i]`.
-fn single_subst_lookup(sub: &[u8], gid: u16) -> Option<u16> {
+pub(crate) fn single_subst_lookup(sub: &[u8], gid: u16) -> Option<u16> {
     if sub.len() < 6 {
         return None;
     }
@@ -1211,7 +1350,7 @@ fn single_subst_lookup(sub: &[u8], gid: u16) -> Option<u16> {
 ///   LigatureSet { u16 ligatureCount; Offset16 ligatureOffsets[]; }
 ///   Ligature    { u16 ligGlyph; u16 componentCount;
 ///                 u16 componentGlyphIDs[componentCount - 1]; }
-fn ligature_subst_lookup(sub: &[u8], glyphs: &[u16]) -> Option<(u16, usize)> {
+pub(crate) fn ligature_subst_lookup(sub: &[u8], glyphs: &[u16]) -> Option<(u16, usize)> {
     if sub.len() < 6 {
         return None;
     }
@@ -1282,7 +1421,7 @@ fn ligature_subst_lookup(sub: &[u8], glyphs: &[u16]) -> Option<(u16, usize)> {
 ///   Sequence { u16 glyphCount; u16 substituteGlyphIDs[glyphCount]; }
 ///
 /// All offsets are relative to the start of the sub-table.
-fn multiple_subst_lookup(sub: &[u8], gid: u16) -> Option<Vec<u16>> {
+pub(crate) fn multiple_subst_lookup(sub: &[u8], gid: u16) -> Option<Vec<u16>> {
     if sub.len() < 6 {
         return None;
     }
@@ -1324,7 +1463,7 @@ fn multiple_subst_lookup(sub: &[u8], gid: u16) -> Option<Vec<u16>> {
 ///   AlternateSet { u16 glyphCount; u16 alternateGlyphIDs[glyphCount]; }
 ///
 /// All offsets are relative to the start of the sub-table.
-fn alternate_subst_lookup(sub: &[u8], gid: u16, alternate_index: u16) -> Option<u16> {
+pub(crate) fn alternate_subst_lookup(sub: &[u8], gid: u16, alternate_index: u16) -> Option<u16> {
     if sub.len() < 6 {
         return None;
     }
@@ -1372,7 +1511,7 @@ fn alternate_subst_lookup(sub: &[u8], gid: u16, alternate_index: u16) -> Option<
 /// (`backtrackCoverageOffsets[0]` covers the glyph immediately before
 /// `gids[pos]`). Substitute glyph at `substituteGlyphIDs[cov_idx]`
 /// where `cov_idx` is the input coverage index of `gids[pos]`.
-fn reverse_chain_context_lookup(sub: &[u8], gids: &[u16], pos: usize) -> Option<u16> {
+pub(crate) fn reverse_chain_context_lookup(sub: &[u8], gids: &[u16], pos: usize) -> Option<u16> {
     if sub.len() < 6 {
         return None;
     }
@@ -1434,6 +1573,40 @@ fn reverse_chain_context_lookup(sub: &[u8], gids: &[u16], pos: usize) -> Option<
 
 /// Outcome of a chained-context match: how many input glyphs the rule
 /// covers, plus the SubstLookupRecord array to apply against them.
+/// The part of a glyph run a contextual substitution rewrote, tracked
+/// while the run is edited in place.
+///
+/// With `start` the position the rule matched at, the rewritten run
+/// `new` and the run before it `old` satisfy
+/// `new[..start] == old[..start]` and
+/// `new[end..] == old[end - delta..]`: everything outside
+/// `new[start..end]` is untouched.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct EditExtent {
+    pub(crate) start: usize,
+    /// Exclusive end of the rewritten region, in the rewritten run.
+    pub(crate) end: usize,
+    /// Rewritten length minus original length.
+    pub(crate) delta: isize,
+}
+
+impl EditExtent {
+    pub(crate) fn starting_at(pos: usize) -> Self {
+        Self {
+            start: pos,
+            end: pos,
+            delta: 0,
+        }
+    }
+
+    /// Note that `removed` glyphs at `at` were replaced by `inserted`
+    /// glyphs (indices in the run as it stood before this edit).
+    fn record(&mut self, at: usize, removed: usize, inserted: usize) {
+        self.end = self.end.max(at + removed) - removed + inserted;
+        self.delta += inserted as isize - removed as isize;
+    }
+}
+
 #[derive(Debug)]
 struct ChainMatch {
     input_len: usize,

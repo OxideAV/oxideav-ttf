@@ -2280,7 +2280,81 @@ struct ChainPosMatch {
     records: Vec<PosLookupRecord>,
 }
 
+// ---- per-sub-table entry points for the shaping accelerators ------------
+//
+// `crate::layout` resolves a lookup's sub-tables once; these run the
+// static (default-instance) matcher of one already-resolved sub-table.
+
+/// SinglePos sub-table: the value record for `gid`.
+pub(crate) fn single_pos_subtable(sub: &[u8], gid: u16) -> Option<PosValue> {
+    single_pos_lookup(sub, gid)
+}
+
+/// PairPos sub-table: the first glyph's x-advance adjustment for the
+/// `(left, right)` pair.
+pub(crate) fn pair_pos_subtable(sub: &[u8], left: u16, right: u16) -> Option<i16> {
+    pair_pos_lookup(sub, left, right)
+}
+
+/// PairPosFormat2: the first glyph's x-advance adjustment read from the
+/// value record at `record_off` (sub-table relative).
+pub(crate) fn pair_class_x_advance(sub: &[u8], record_off: usize, value_format1: u16) -> i16 {
+    extract_x_advance_var(sub, record_off, value_format1, sub, AnchorCtx::STATIC)
+}
+
+/// CursivePos sub-table: the entry / exit anchors of `gid`.
+pub(crate) fn cursive_pos_subtable(sub: &[u8], gid: u16) -> Option<CursiveAttachment> {
+    cursive_pos_lookup(sub, gid, AnchorCtx::STATIC)
+}
+
+/// MarkBasePos sub-table: the offset attaching `mark` to `base`.
+pub(crate) fn mark_base_pos_subtable(sub: &[u8], base: u16, mark: u16) -> Option<(i16, i16)> {
+    mark_base_pos_lookup(sub, base, mark, AnchorCtx::STATIC)
+}
+
+/// MarkLigPos sub-table: the offset attaching `mark` to component
+/// `component` of `ligature`.
+pub(crate) fn mark_ligature_pos_subtable(
+    sub: &[u8],
+    ligature: u16,
+    component: u16,
+    mark: u16,
+) -> Option<(i16, i16)> {
+    mark_ligature_pos_lookup(sub, ligature, component, mark, AnchorCtx::STATIC)
+}
+
+/// MarkMarkPos sub-table: the offset attaching `mark2` to the preceding
+/// `mark1`.
+pub(crate) fn mark_mark_pos_subtable(sub: &[u8], mark1: u16, mark2: u16) -> Option<(i16, i16)> {
+    mark_mark_pos_lookup(sub, mark1, mark2, AnchorCtx::STATIC)
+}
+
 impl<'a> GposTable<'a> {
+    /// Match one resolved Contextual (`chained == false`, LookupType 7)
+    /// or Chained Contexts (`chained == true`, LookupType 8) sub-table
+    /// at `pos` and, on a match, collect its positioning records. The
+    /// per-sub-table step of [`Self::apply_lookup_type_7`] /
+    /// [`Self::apply_lookup_type_8`]. `pos` must be in range.
+    pub(crate) fn apply_context_subtable(
+        &self,
+        chained: bool,
+        sub: &[u8],
+        gids: &[u16],
+        pos: usize,
+    ) -> Option<Vec<PosRecord>> {
+        let format = read_u16(sub, 0).ok()?;
+        let matched = match (chained, format) {
+            (false, 1) => context_pos_format1_match(sub, gids, pos),
+            (false, 2) => context_pos_format2_match(sub, gids, pos),
+            (false, 3) => context_pos_format3_match(sub, gids, pos),
+            (true, 1) => chain_context_pos_format1_match(sub, gids, pos),
+            (true, 2) => chain_context_pos_format2_match(sub, gids, pos),
+            (true, 3) => chain_context_pos_format3_match(sub, gids, pos),
+            _ => None,
+        }?;
+        Some(self.apply_pos_records(gids, pos, &matched, 0))
+    }
+
     /// Non-chained context dispatch (LookupType 7). Mirror of
     /// [`Self::apply_chain_context_at`] for the `SequenceContext`
     /// sub-table family — no backtrack / lookahead window, otherwise

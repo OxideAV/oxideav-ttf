@@ -67,9 +67,11 @@ use std::sync::Arc;
 
 use crate::Font;
 use crate::layout::{
-    LayoutTable, LookupAccel, PlanLookup, ShapePlan, digest_bit, flatten_class_def,
+    GlyphSet, LayoutTable, LookupAccel, PlanLookup, ShapePlan, digest_bit, flatten_class_def,
 };
-use crate::tables::gpos::PosRecord;
+use crate::tables::gdef::GdefTable;
+use crate::tables::gpos::{self, GposTable, PosRecord};
+use crate::tables::gsub::{self, EditExtent, GsubTable};
 
 /// Maximum number of GSUB lookup passes over the buffer, as a guard
 /// against a pathological self-growing lookup graph (a multiple- or
@@ -122,7 +124,8 @@ struct WorkGlyph {
 /// array where it can.
 struct SkipFilter<'f, 'a> {
     font: &'f Font<'a>,
-    classes: Option<&'f [u8]>,
+    gdef: Option<&'f GdefTable<'a>>,
+    classes: Option<&'f [u16]>,
     flags: u16,
     mark_filtering_set: Option<u16>,
     /// `false` when the lookup can never skip a glyph (no skip bit, no
@@ -135,13 +138,18 @@ struct SkipFilter<'f, 'a> {
 
 impl<'f, 'a> SkipFilter<'f, 'a> {
     fn new(font: &'f Font<'a>, flags: u16, mark_filtering_set: Option<u16>) -> Self {
-        let active = font.gdef().is_some() && (flags & 0xFF1E != 0 || mark_filtering_set.is_some());
+        let gdef = font.gdef();
         Self {
             font,
-            classes: if active { font.glyph_classes() } else { None },
+            gdef,
+            classes: if gdef.is_some() {
+                font.glyph_classes()
+            } else {
+                None
+            },
             flags,
             mark_filtering_set,
-            active,
+            active: gdef.is_some() && (flags & 0xFF1E != 0 || mark_filtering_set.is_some()),
             marks_need_walker: flags & 0xFF00 != 0 || mark_filtering_set.is_some(),
         }
     }
@@ -156,7 +164,7 @@ impl<'f, 'a> SkipFilter<'f, 'a> {
                 .font
                 .lookup_skips_glyph(self.flags, self.mark_filtering_set, gid);
         };
-        match class as u16 {
+        match class {
             crate::tables::gdef::CLASS_BASE => self.flags & 0x0002 != 0,
             crate::tables::gdef::CLASS_LIGATURE => self.flags & 0x0004 != 0,
             crate::tables::gdef::CLASS_MARK => {
@@ -169,29 +177,232 @@ impl<'f, 'a> SkipFilter<'f, 'a> {
             _ => false,
         }
     }
+
+    /// `true` when the font has a GDEF table that classes `gid` as a
+    /// mark.
+    #[inline]
+    fn is_gdef_mark(&self, gid: u16) -> bool {
+        match self.classes.and_then(|c| c.get(gid as usize)) {
+            Some(&class) => class == crate::tables::gdef::CLASS_MARK,
+            None => self.gdef.is_some_and(|g| g.is_mark(gid)),
+        }
+    }
 }
 
-/// First-glyph filter of one lookup: `None` means "no accelerator —
-/// every glyph may match".
+/// One planned lookup bound to its accelerator: the first-glyph filter
+/// plus the resolved sub-tables. `accel == None` means "no accelerator —
+/// every glyph may match, go through the table walker".
 #[derive(Clone, Copy)]
-struct StartFilter<'f>(Option<&'f LookupAccel>);
+struct Resolved<'f> {
+    accel: Option<&'f LookupAccel>,
+    /// The whole GSUB / GPOS table; sub-table offsets index into it.
+    table: &'f [u8],
+    index: u16,
+}
 
-impl StartFilter<'_> {
+impl<'f> Resolved<'f> {
     /// `false` only when the lookup provably cannot act at `gid`.
     #[inline]
     fn may_start(&self, gid: u16) -> bool {
-        self.0.is_none_or(|a| a.first.contains(gid))
+        self.accel.is_none_or(|a| a.first.contains(gid))
     }
 
     /// `true` when no glyph summarised by `run_digest` can start a match.
     #[inline]
     fn rules_out(&self, run_digest: u64) -> bool {
-        self.0.is_some_and(|a| a.first.disjoint_from(run_digest))
+        self.accel
+            .is_some_and(|a| a.first.disjoint_from(run_digest))
     }
 
     /// Longest glyph sequence one ligature match can inspect.
     fn max_components(&self) -> usize {
-        self.0.map_or(usize::MAX, |a| a.max_components)
+        self.accel.map_or(usize::MAX, |a| a.max_components)
+    }
+
+    /// Glyphs that can be the second component of a ligature, when every
+    /// ligature of the lookup is known to have one.
+    fn second_components(&self) -> Option<&'f GlyphSet> {
+        self.accel.and_then(|a| a.second_components.as_ref())
+    }
+
+    /// The sub-tables (in walker order) whose first-glyph Coverage may
+    /// list `gid`, as byte slices starting at each sub-table.
+    #[inline]
+    fn subtables_for(
+        accel: &'f LookupAccel,
+        table: &'f [u8],
+        gid: u16,
+    ) -> impl Iterator<Item = &'f [u8]> {
+        accel
+            .subs
+            .iter()
+            .filter(move |s| s.first.contains(gid))
+            .map(move |s| table.get(s.offset..).unwrap_or(&[]))
+    }
+
+    // ---- GSUB: first matching sub-table wins -------------------------
+
+    fn single(&self, gsub: &GsubTable<'_>, gid: u16) -> Option<u16> {
+        match self.accel {
+            Some(a) => Self::subtables_for(a, self.table, gid)
+                .find_map(|sub| gsub::single_subst_lookup(sub, gid)),
+            None => gsub.apply_lookup_type_1(self.index, gid),
+        }
+    }
+
+    fn multiple(&self, gsub: &GsubTable<'_>, gid: u16) -> Option<Vec<u16>> {
+        match self.accel {
+            Some(a) => Self::subtables_for(a, self.table, gid)
+                .find_map(|sub| gsub::multiple_subst_lookup(sub, gid)),
+            None => gsub.apply_lookup_type_2(self.index, gid),
+        }
+    }
+
+    fn alternate(&self, gsub: &GsubTable<'_>, gid: u16) -> Option<u16> {
+        match self.accel {
+            Some(a) => Self::subtables_for(a, self.table, gid)
+                .find_map(|sub| gsub::alternate_subst_lookup(sub, gid, 0)),
+            None => gsub.apply_lookup_type_3(self.index, gid, 0),
+        }
+    }
+
+    /// `glyphs` must be non-empty.
+    fn ligature(&self, gsub: &GsubTable<'_>, glyphs: &[u16]) -> Option<(u16, usize)> {
+        match self.accel {
+            Some(a) => Self::subtables_for(a, self.table, glyphs[0])
+                .find_map(|sub| gsub::ligature_subst_lookup(sub, glyphs)),
+            None => gsub.apply_lookup_type_4(self.index, glyphs),
+        }
+    }
+
+    /// Contextual / chained-context substitution at `pos` (in range of
+    /// `gids`): on a match, `gids` is rewritten in place and `extent`
+    /// covers the rewritten region. Returns whether a rule matched.
+    fn substitute_in_context(
+        &self,
+        gsub: &GsubTable<'_>,
+        chained: bool,
+        gids: &mut Vec<u16>,
+        pos: usize,
+        extent: &mut EditExtent,
+    ) -> bool {
+        match self.accel {
+            Some(a) => {
+                let table = self.table;
+                let glyph = gids[pos];
+                a.subs.iter().filter(|s| s.first.contains(glyph)).any(|s| {
+                    let sub = table.get(s.offset..).unwrap_or(&[]);
+                    gsub.apply_context_subtable_in_place(chained, sub, gids, pos, extent)
+                })
+            }
+            None => gsub.apply_context_lookup_in_place(chained, self.index, gids, pos, extent),
+        }
+    }
+
+    /// `pos` must be in range of `gids`.
+    fn reverse_chain(&self, gsub: &GsubTable<'_>, gids: &[u16], pos: usize) -> Option<u16> {
+        match self.accel {
+            Some(a) => Self::subtables_for(a, self.table, gids[pos])
+                .find_map(|sub| gsub::reverse_chain_context_lookup(sub, gids, pos)),
+            None => gsub.apply_lookup_type_8(self.index, gids, pos),
+        }
+    }
+
+    // ---- GPOS ----------------------------------------------------------
+
+    fn single_pos(&self, gpos: &GposTable<'_>, gid: u16) -> Option<gpos::PosValue> {
+        match self.accel {
+            Some(a) => Self::subtables_for(a, self.table, gid)
+                .find_map(|sub| gpos::single_pos_subtable(sub, gid)),
+            None => gpos.apply_lookup_type_1(self.index, gid),
+        }
+    }
+
+    /// Pair adjustment: the x-advance change of `left` when followed by
+    /// `right`. Mirrors `GposTable::lookup_kerning_at`: an IGNORE_MARKS
+    /// lookup never kerns a pair with a (GDEF) mark member.
+    fn pair(&self, gpos: &GposTable<'_>, skip: &SkipFilter<'_, '_>, left: u16, right: u16) -> i16 {
+        let Some(accel) = self.accel else {
+            return gpos.lookup_kerning_at(self.index, left, right, skip.gdef);
+        };
+        if skip.flags & 0x0008 != 0 && (skip.is_gdef_mark(left) || skip.is_gdef_mark(right)) {
+            return 0;
+        }
+        for sub in accel.subs.iter().filter(|s| s.first.contains(left)) {
+            let bytes = self.table.get(sub.offset..).unwrap_or(&[]);
+            let flat = match &sub.pair_classes {
+                // `first` is exact here, so `left` is covered; the pair's
+                // value record is addressed by the two flattened classes.
+                Some(classes) if sub.first_is_exact => classes
+                    .class1
+                    .get(left as usize)
+                    .zip(classes.class2.get(right as usize))
+                    .map(|(&c1, &c2)| (classes, c1, c2)),
+                _ => None,
+            };
+            let hit = match flat {
+                // An empty first value record carries no adjustment: the
+                // sub-table does not apply.
+                Some((classes, _, _)) if classes.value_format1 == 0 => None,
+                Some((classes, c1, c2)) => Some(gpos::pair_class_x_advance(
+                    bytes,
+                    classes.record_offset(c1, c2),
+                    classes.value_format1,
+                )),
+                None => gpos::pair_pos_subtable(bytes, left, right),
+            };
+            if let Some(adjust) = hit {
+                return adjust;
+            }
+        }
+        0
+    }
+
+    fn cursive(&self, gpos: &GposTable<'_>, gid: u16) -> Option<gpos::CursiveAttachment> {
+        match self.accel {
+            Some(a) => Self::subtables_for(a, self.table, gid)
+                .find_map(|sub| gpos::cursive_pos_subtable(sub, gid)),
+            None => gpos.apply_lookup_type_3(self.index, gid),
+        }
+    }
+
+    /// Mark attachment of lookup type `kind` (4 mark-to-base, 5
+    /// mark-to-ligature component 0, 6 mark-to-mark): the offset placing
+    /// `mark` on `target`.
+    fn mark_attachment(
+        &self,
+        gpos: &GposTable<'_>,
+        kind: u16,
+        target: u16,
+        mark: u16,
+    ) -> Option<(i16, i16)> {
+        match (self.accel, kind) {
+            (Some(a), 4) => Self::subtables_for(a, self.table, mark)
+                .find_map(|sub| gpos::mark_base_pos_subtable(sub, target, mark)),
+            (Some(a), 5) => Self::subtables_for(a, self.table, mark)
+                .find_map(|sub| gpos::mark_ligature_pos_subtable(sub, target, 0, mark)),
+            (Some(a), _) => Self::subtables_for(a, self.table, mark)
+                .find_map(|sub| gpos::mark_mark_pos_subtable(sub, target, mark)),
+            (None, 4) => gpos.apply_mark_to_base_at(self.index, target, mark),
+            (None, 5) => gpos.apply_lookup_type_5(self.index, target, 0, mark),
+            (None, _) => gpos.apply_mark_to_mark_at(self.index, target, mark),
+        }
+    }
+
+    /// `pos` must be in range of `gids`.
+    fn position_in_context(
+        &self,
+        gpos: &GposTable<'_>,
+        chained: bool,
+        gids: &[u16],
+        pos: usize,
+    ) -> Option<Vec<PosRecord>> {
+        match self.accel {
+            Some(a) => Self::subtables_for(a, self.table, gids[pos])
+                .find_map(|sub| gpos.apply_context_subtable(chained, sub, gids, pos)),
+            None if chained => gpos.apply_lookup_type_8(self.index, gids, pos),
+            None => gpos.apply_lookup_type_7(self.index, gids, pos),
+        }
     }
 }
 
@@ -335,72 +546,58 @@ impl<'a> Font<'a> {
             .collect()
     }
 
-    /// Flat GDEF GlyphClassDef classes (one byte per glyph), or `None`
+    /// Flat GDEF GlyphClassDef classes (one entry per glyph), or `None`
     /// when the font has no GDEF or its class table is not one the flat
     /// form reproduces exactly.
-    fn glyph_classes(&self) -> Option<&[u8]> {
+    fn glyph_classes(&self) -> Option<&[u16]> {
         self.layout.glyph_classes(|| {
             let gdef = self.gdef()?;
             let num_glyphs = self.maxp.num_glyphs as usize;
             match gdef.glyph_class_def_bytes() {
                 Some(class_def) => flatten_class_def(class_def, num_glyphs),
                 // No GlyphClassDef: every glyph is class 0.
-                None => Some(vec![0u8; num_glyphs].into_boxed_slice()),
+                None => Some(vec![0u16; num_glyphs].into_boxed_slice()),
             }
         })
     }
 
-    fn gsub_start_filter(&self, lookup: &PlanLookup) -> StartFilter<'_> {
-        StartFilter(self.gsub().and_then(|g| {
-            let (bytes, lookup_list_off) = g.lookup_list_location();
-            self.layout.lookup_accel(
-                LayoutTable::Gsub,
+    fn resolve<'f>(
+        &'f self,
+        table: LayoutTable,
+        location: (&'f [u8], u32),
+        lookup: &PlanLookup,
+    ) -> Resolved<'f> {
+        let (bytes, lookup_list_off) = location;
+        Resolved {
+            accel: self.layout.lookup_accel(
+                table,
                 bytes,
                 lookup_list_off,
                 lookup.index,
                 lookup.kind,
                 self.maxp.num_glyphs as usize,
-            )
-        }))
-    }
-
-    fn gpos_start_filter(&self, lookup: &PlanLookup) -> StartFilter<'_> {
-        StartFilter(self.gpos().and_then(|g| {
-            let (bytes, lookup_list_off) = g.lookup_list_location();
-            self.layout.lookup_accel(
-                LayoutTable::Gpos,
-                bytes,
-                lookup_list_off,
-                lookup.index,
-                lookup.kind,
-                self.maxp.num_glyphs as usize,
-            )
-        }))
+            ),
+            table: bytes,
+            index: lookup.index,
+        }
     }
 
     /// Apply the planned GSUB lookups, in LookupList order, across `buf`.
     fn run_gsub(&self, buf: &mut Vec<WorkGlyph>, lookups: &[PlanLookup]) {
+        let Some(gsub) = self.gsub() else {
+            return;
+        };
+        let location = gsub.lookup_list_location();
         // Digest of every glyph id the buffer holds (or has held — bits
         // are only ever added, which keeps it a superset).
         let mut run_digest = digest_of(buf.iter().map(|w| w.gid));
-        // Scratch reused across lookups.
-        let mut gids: Vec<u16> = Vec::new();
-        let mut cand_gids: Vec<u16> = Vec::new();
-        let mut cand_idx: Vec<usize> = Vec::new();
+        let mut scratch = GsubScratch::default();
         for lookup in lookups {
-            let filter = self.gsub_start_filter(lookup);
-            if filter.rules_out(run_digest) {
+            let resolved = self.resolve(LayoutTable::Gsub, location, lookup);
+            if resolved.rules_out(run_digest) {
                 continue;
             }
-            self.apply_gsub_lookup(
-                buf,
-                lookup,
-                filter,
-                &mut run_digest,
-                &mut gids,
-                &mut cand_gids,
-                &mut cand_idx,
-            );
+            self.apply_gsub_lookup(gsub, buf, lookup, resolved, &mut run_digest, &mut scratch);
         }
     }
 
@@ -410,27 +607,24 @@ impl<'a> Font<'a> {
     /// IGNORE_MARKS on ligature lookups, so a combining mark sitting
     /// between two ligature components doesn't block the ligature).
     ///
-    /// `filter` prunes positions whose glyph the lookup's first-glyph
+    /// `resolved` prunes positions whose glyph the lookup's first-glyph
     /// Coverage tables do not list; the match code would reject those
     /// anyway. `run_digest` gains the digest bit of every glyph written.
-    #[allow(clippy::too_many_arguments)]
     fn apply_gsub_lookup(
         &self,
+        gsub: &GsubTable<'_>,
         buf: &mut Vec<WorkGlyph>,
         lookup: &PlanLookup,
-        filter: StartFilter<'_>,
+        resolved: Resolved<'_>,
         run_digest: &mut u64,
-        gids: &mut Vec<u16>,
-        cand_gids: &mut Vec<u16>,
-        cand_idx: &mut Vec<usize>,
+        scratch: &mut GsubScratch,
     ) {
-        let li = lookup.index;
         match lookup.kind {
             1 => {
                 // Single substitution: 1:1, no length change.
                 for w in buf.iter_mut() {
-                    if filter.may_start(w.gid)
-                        && let Some(g) = self.gsub_apply_lookup_type_1(li, w.gid)
+                    if resolved.may_start(w.gid)
+                        && let Some(g) = resolved.single(gsub, w.gid)
                     {
                         w.gid = g;
                         *run_digest |= digest_bit(g);
@@ -440,14 +634,14 @@ impl<'a> Font<'a> {
             2 => {
                 // Multiple substitution: 1 → N (or 0 = deletion). All
                 // outputs inherit the source cluster.
-                if !buf.iter().any(|w| filter.may_start(w.gid)) {
+                if !buf.iter().any(|w| resolved.may_start(w.gid)) {
                     return;
                 }
                 let mut out: Vec<WorkGlyph> = Vec::with_capacity(buf.len());
                 let mut growth = 0usize;
                 for w in buf.iter() {
-                    let expansion = if filter.may_start(w.gid) {
-                        self.gsub_apply_lookup_type_2(li, w.gid)
+                    let expansion = if resolved.may_start(w.gid) {
+                        resolved.multiple(gsub, w.gid)
                     } else {
                         None
                     };
@@ -477,8 +671,8 @@ impl<'a> Font<'a> {
             3 => {
                 // Alternate substitution: default to alternate 0.
                 for w in buf.iter_mut() {
-                    if filter.may_start(w.gid)
-                        && let Some(g) = self.gsub_apply_lookup_type_3(li, w.gid, 0)
+                    if resolved.may_start(w.gid)
+                        && let Some(g) = resolved.alternate(gsub, w.gid)
                     {
                         w.gid = g;
                         *run_digest |= digest_bit(g);
@@ -499,11 +693,30 @@ impl<'a> Font<'a> {
                 let skip = SkipFilter::new(self, lookup.flags, lookup.mark_filtering_set);
                 // No Ligature record inspects more than this many
                 // visible glyphs, so the candidate run stops there.
-                let window = filter.max_components().max(1);
+                let window = resolved.max_components().max(1);
+                let second = resolved.second_components();
+                let GsubScratch {
+                    cand_gids,
+                    cand_idx,
+                    ..
+                } = scratch;
                 let mut i = 0usize;
                 while i < buf.len() {
                     let first = buf[i].gid;
-                    if !filter.may_start(first) || skip.skips(first) {
+                    if !resolved.may_start(first) || skip.skips(first) {
+                        i += 1;
+                        continue;
+                    }
+                    // Every ligature of this lookup has a second
+                    // component: nothing can form unless the next
+                    // visible glyph is one of them.
+                    if let Some(second) = second
+                        && !buf[i + 1..]
+                            .iter()
+                            .map(|w| w.gid)
+                            .find(|&g| !skip.skips(g))
+                            .is_some_and(|g| second.contains(g))
+                    {
                         i += 1;
                         continue;
                     }
@@ -521,7 +734,7 @@ impl<'a> Font<'a> {
                             break;
                         }
                     }
-                    if let Some((lig, consumed)) = self.gsub_apply_lookup_type_4(li, cand_gids)
+                    if let Some((lig, consumed)) = resolved.ligature(gsub, cand_gids)
                         && consumed >= 1
                     {
                         let cluster = buf[i].cluster;
@@ -540,26 +753,20 @@ impl<'a> Font<'a> {
                 }
             }
             5 | 6 => {
-                // Contextual (5) / chained-context (6) substitution. The
-                // per-type apply returns the rewritten run (full buffer)
-                // on a hit at `pos`. `gids` mirrors the buffer's glyph
-                // ids and is refreshed only when a rewrite changes them.
+                // Contextual (5) / chained-context (6) substitution. A
+                // hit at `pos` rewrites `gids` — the glyph-id mirror of
+                // the buffer — in place; the buffer then takes over the
+                // rewritten region.
+                let gids = &mut scratch.gids;
                 gids.clear();
                 gids.extend(buf.iter().map(|w| w.gid));
+                let chained = lookup.kind == 6;
                 let mut pos = 0usize;
                 while pos < buf.len() {
-                    if filter.may_start(gids[pos]) {
-                        let rewritten = if lookup.kind == 5 {
-                            self.gsub_apply_lookup_type_5(li, gids, pos)
-                        } else {
-                            self.gsub_apply_lookup_type_6(li, gids, pos)
-                        };
-                        if let Some(rewritten) = rewritten
-                            && rewritten != *gids
-                        {
-                            self.reconcile_context_rewrite(buf, gids, &rewritten, pos);
-                            *run_digest |= digest_of(rewritten.iter().copied());
-                            *gids = rewritten;
+                    if resolved.may_start(gids[pos]) {
+                        let mut extent = EditExtent::starting_at(pos);
+                        if resolved.substitute_in_context(gsub, chained, gids, pos, &mut extent) {
+                            *run_digest |= reconcile_context_rewrite(buf, gids, pos, extent);
                         }
                     }
                     pos += 1;
@@ -569,11 +776,12 @@ impl<'a> Font<'a> {
                 // Reverse chained-context single substitution: 1:1, walked
                 // right-to-left so a later substitution's lookahead sees
                 // the original (not yet substituted) glyphs.
+                let gids = &mut scratch.gids;
                 gids.clear();
                 gids.extend(buf.iter().map(|w| w.gid));
                 for pos in (0..buf.len()).rev() {
-                    if filter.may_start(gids[pos])
-                        && let Some(g) = self.gsub_apply_lookup_type_8(li, gids, pos)
+                    if resolved.may_start(gids[pos])
+                        && let Some(g) = resolved.reverse_chain(gsub, gids, pos)
                     {
                         buf[pos].gid = g;
                         *run_digest |= digest_bit(g);
@@ -582,52 +790,6 @@ impl<'a> Font<'a> {
             }
             _ => {}
         }
-    }
-
-    /// Reconcile a contextual/chained GSUB rewrite (which returns a full
-    /// rewritten gid run) back into the `WorkGlyph` buffer, preserving
-    /// clusters as best we can. The rewrite may change the buffer length
-    /// (a nested multiple- or ligature-substitution record). We align the
-    /// unchanged prefix/suffix and assign the source cluster of `pos` to
-    /// any glyphs in the changed middle.
-    fn reconcile_context_rewrite(
-        &self,
-        buf: &mut Vec<WorkGlyph>,
-        old: &[u16],
-        new: &[u16],
-        pos: usize,
-    ) {
-        // Common unchanged prefix.
-        let mut pre = 0usize;
-        while pre < old.len() && pre < new.len() && old[pre] == new[pre] {
-            pre += 1;
-        }
-        // Common unchanged suffix.
-        let mut suf = 0usize;
-        while suf < (old.len() - pre)
-            && suf < (new.len() - pre)
-            && old[old.len() - 1 - suf] == new[new.len() - 1 - suf]
-        {
-            suf += 1;
-        }
-        let cluster = buf.get(pos).map(|w| w.cluster).unwrap_or(0);
-        let mut rebuilt: Vec<WorkGlyph> = Vec::with_capacity(new.len());
-        for &g in &new[..pre] {
-            let c = buf.get(rebuilt.len()).map(|w| w.cluster).unwrap_or(cluster);
-            rebuilt.push(WorkGlyph { gid: g, cluster: c });
-        }
-        for &g in &new[pre..new.len() - suf] {
-            rebuilt.push(WorkGlyph { gid: g, cluster });
-        }
-        let suffix_start_old = old.len() - suf;
-        for (k, &g) in new[new.len() - suf..].iter().enumerate() {
-            let c = buf
-                .get(suffix_start_old + k)
-                .map(|w| w.cluster)
-                .unwrap_or(cluster);
-            rebuilt.push(WorkGlyph { gid: g, cluster: c });
-        }
-        *buf = rebuilt;
     }
 
     /// GPOS positioning stage. Seeds advances from `hmtx`, then applies
@@ -645,41 +807,45 @@ impl<'a> Font<'a> {
                 y_advance: 0,
             })
             .collect();
+        let Some(gpos) = self.gpos() else {
+            return out;
+        };
         if lookups.is_empty() {
             return out;
         }
+        let location = gpos.lookup_list_location();
         // Positioning never changes glyph ids: one digest and one glyph
         // id array serve every lookup.
         let run_digest = digest_of(out.iter().map(|g| g.glyph_id));
         let mut gids: Vec<u16> = Vec::new();
         for lookup in lookups {
-            let filter = self.gpos_start_filter(lookup);
-            if filter.rules_out(run_digest) {
+            let resolved = self.resolve(LayoutTable::Gpos, location, lookup);
+            if resolved.rules_out(run_digest) {
                 continue;
             }
-            self.apply_gpos_lookup(&mut out, lookup, filter, &mut gids);
+            self.apply_gpos_lookup(gpos, &mut out, lookup, resolved, &mut gids);
         }
         out
     }
 
-    /// Apply one GPOS lookup across the positioned buffer. `filter`
+    /// Apply one GPOS lookup across the positioned buffer. `resolved`
     /// prunes positions whose glyph is not in the lookup's first-glyph
     /// Coverage tables (for the mark-attachment types that is the
     /// MarkCoverage — the attaching mark is the "current" glyph).
     fn apply_gpos_lookup(
         &self,
+        gpos: &GposTable<'_>,
         out: &mut [ShapedGlyph],
         lookup: &PlanLookup,
-        filter: StartFilter<'_>,
+        resolved: Resolved<'_>,
         gids: &mut Vec<u16>,
     ) {
-        let li = lookup.index;
         match lookup.kind {
             1 => {
                 // Single adjustment.
                 for g in out.iter_mut() {
-                    if filter.may_start(g.glyph_id)
-                        && let Some(v) = self.gpos_apply_lookup_type_1(li, g.glyph_id)
+                    if resolved.may_start(g.glyph_id)
+                        && let Some(v) = resolved.single_pos(gpos, g.glyph_id)
                     {
                         g.x_offset += v.x_placement as i32;
                         g.y_offset += v.y_placement as i32;
@@ -689,31 +855,27 @@ impl<'a> Font<'a> {
                 }
             }
             2 => {
-                // Pair adjustment (kerning). The legacy single-value
-                // `lookup_kerning` path extracts the x-advance applied to
-                // the left glyph of each pair. The pair members are the
+                // Pair adjustment (kerning): the x-advance applied to the
+                // left glyph of each pair. The pair members are the
                 // current glyph and the *next non-skipped* glyph per the
                 // lookup's §2 skip filter — so a kern pair separated by an
                 // (ignored) combining mark still kerns, the canonical
                 // IGNORE_MARKS-on-kern case.
-                let gdef = self.gdef();
                 let skip = SkipFilter::new(self, lookup.flags, lookup.mark_filtering_set);
-                let Some(gpos) = self.gpos() else {
-                    return;
-                };
                 for i in 0..out.len() {
                     let left = out[i].glyph_id;
-                    if !filter.may_start(left) || skip.skips(left) {
+                    if !resolved.may_start(left) || skip.skips(left) {
                         continue;
                     }
                     // Find the next glyph the lookup does not skip.
-                    let Some(right_idx) =
-                        ((i + 1)..out.len()).find(|&k| !skip.skips(out[k].glyph_id))
+                    let Some(right) = out[i + 1..]
+                        .iter()
+                        .map(|g| g.glyph_id)
+                        .find(|&g| !skip.skips(g))
                     else {
                         break;
                     };
-                    let right = out[right_idx].glyph_id;
-                    out[i].x_advance += gpos.lookup_kerning_at(li, left, right, gdef) as i32;
+                    out[i].x_advance += resolved.pair(gpos, &skip, left, right) as i32;
                 }
             }
             3 => {
@@ -730,8 +892,8 @@ impl<'a> Font<'a> {
                     if skip.skips(g.glyph_id) {
                         continue;
                     }
-                    let attachment = if filter.may_start(g.glyph_id) {
-                        self.gpos_apply_lookup_type_3(li, g.glyph_id)
+                    let attachment = if resolved.may_start(g.glyph_id) {
+                        resolved.cursive(gpos, g.glyph_id)
                     } else {
                         None
                     };
@@ -753,21 +915,17 @@ impl<'a> Font<'a> {
             // per-component cluster tracking from the substitution
             // stage). Mark-to-mark (6): a mark attaches to the
             // immediately preceding mark.
-            4..=6 => self.apply_mark_attach(out, lookup, filter),
+            4..=6 => self.apply_mark_attach(gpos, out, lookup, resolved),
             7 | 8 => {
                 // Contextual (7) / chained-context (8) positioning.
                 gids.clear();
                 gids.extend(out.iter().map(|g| g.glyph_id));
+                let chained = lookup.kind == 8;
                 for pos in 0..out.len() {
-                    if !filter.may_start(gids[pos]) {
-                        continue;
-                    }
-                    let records = if lookup.kind == 7 {
-                        self.gpos_apply_lookup_type_7(li, gids, pos)
-                    } else {
-                        self.gpos_apply_lookup_type_8(li, gids, pos)
-                    };
-                    if let Some(records) = records {
+                    if resolved.may_start(gids[pos])
+                        && let Some(records) =
+                            resolved.position_in_context(gpos, chained, gids, pos)
+                    {
                         apply_pos_records(out, &records);
                     }
                 }
@@ -791,20 +949,17 @@ impl<'a> Font<'a> {
     /// current mark itself is left unattached when the lookup skips it.
     fn apply_mark_attach(
         &self,
+        gpos: &GposTable<'_>,
         out: &mut [ShapedGlyph],
         lookup: &PlanLookup,
-        filter: StartFilter<'_>,
+        resolved: Resolved<'_>,
     ) {
-        let li = lookup.index;
-        let Some(gpos) = self.gpos() else {
-            return;
-        };
         let skip = SkipFilter::new(self, lookup.flags, lookup.mark_filtering_set);
         for i in 0..out.len() {
             let mark = out[i].glyph_id;
             // Only a glyph in one of the lookup's MarkCoverage tables can
             // attach.
-            if !filter.may_start(mark) || skip.skips(mark) {
+            if !resolved.may_start(mark) || skip.skips(mark) {
                 continue;
             }
             // The nearest non-skipped predecessor is the only attachment
@@ -813,12 +968,7 @@ impl<'a> Font<'a> {
                 continue;
             };
             let target = out[j].glyph_id;
-            let hit = match lookup.kind {
-                4 => gpos.apply_mark_to_base_at(li, target, mark),
-                5 => gpos.apply_lookup_type_5(li, target, 0, mark),
-                _ => gpos.apply_mark_to_mark_at(li, target, mark),
-            };
-            if let Some((dx, dy)) = hit {
+            if let Some((dx, dy)) = resolved.mark_attachment(gpos, lookup.kind, target, mark) {
                 // Place the mark relative to the attachment glyph's pen
                 // origin. That glyph sits at the accumulated advance from
                 // j to i; a mark has (typically) zero advance, so its
@@ -832,6 +982,66 @@ impl<'a> Font<'a> {
             }
         }
     }
+}
+
+/// Scratch vectors the substitution stage reuses across lookups.
+#[derive(Default)]
+struct GsubScratch {
+    /// Glyph-id mirror of the buffer (contextual lookups).
+    gids: Vec<u16>,
+    /// Visible glyphs of a ligature candidate run, and their buffer
+    /// indices.
+    cand_gids: Vec<u16>,
+    cand_idx: Vec<usize>,
+}
+
+/// Bring the `WorkGlyph` buffer in line with `new`, the glyph-id run a
+/// contextual / chained GSUB rule at `pos` just rewrote (`buf` still
+/// holds the run as it was), preserving clusters as best we can. The
+/// rewrite may change the run length (a nested multiple- or
+/// ligature-substitution record). The longest unchanged prefix and
+/// suffix keep their glyphs' clusters; every glyph in the changed middle
+/// takes the cluster of the glyph at `pos`.
+///
+/// `extent` bounds where `new` can differ from the old run, so the
+/// comparison touches the rewritten region rather than the whole run.
+/// Returns the digest of the glyph ids written into the buffer.
+fn reconcile_context_rewrite(
+    buf: &mut Vec<WorkGlyph>,
+    new: &[u16],
+    pos: usize,
+    extent: EditExtent,
+) -> u64 {
+    let (old_len, new_len) = (buf.len(), new.len());
+    // Per `EditExtent`: new[..pos] == old[..pos] and
+    // new[extent.end..] == old[old_end..].
+    let old_end = extent.end.wrapping_add_signed(-extent.delta);
+    debug_assert!(extent.start == pos && old_end <= old_len && extent.end <= new_len);
+    if extent.delta == 0 && (pos..extent.end).all(|k| buf[k].gid == new[k]) {
+        // The rule matched but left every glyph as it was.
+        return 0;
+    }
+    // Longest common prefix (everything before `pos` is known equal).
+    let mut pre = pos;
+    while pre < old_len && pre < new_len && buf[pre].gid == new[pre] {
+        pre += 1;
+    }
+    // Longest common suffix that stays clear of the prefix (everything
+    // from the end of the rewritten region on is known equal).
+    let mut suf = (old_len - old_end).min(old_len - pre).min(new_len - pre);
+    while suf < old_len - pre
+        && suf < new_len - pre
+        && buf[old_len - 1 - suf].gid == new[new_len - 1 - suf]
+    {
+        suf += 1;
+    }
+    let cluster = buf[pos].cluster;
+    let middle = &new[pre..new_len - suf];
+    buf.splice(
+        pre..old_len - suf,
+        middle.iter().map(|&gid| WorkGlyph { gid, cluster }),
+    );
+    digest_of(middle.iter().copied())
 }
 
 /// Effective type of lookup `index` in a `(index, type, subtable count)`
@@ -852,6 +1062,82 @@ fn apply_pos_records(out: &mut [ShapedGlyph], records: &[PosRecord]) {
             g.y_offset += r.value.y_placement as i32;
             g.x_advance += r.value.x_advance as i32;
             g.y_advance += r.value.y_advance as i32;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The whole-run formulation of the contextual-rewrite reconcile:
+    /// align the longest unchanged prefix / suffix of `old` and `new`
+    /// and give the changed middle the cluster of the glyph at `pos`.
+    fn reconcile_whole_run(buf: &[WorkGlyph], new: &[u16], pos: usize) -> Vec<WorkGlyph> {
+        let old: Vec<u16> = buf.iter().map(|w| w.gid).collect();
+        if new == old {
+            return buf.to_vec();
+        }
+        let mut pre = 0usize;
+        while pre < old.len() && pre < new.len() && old[pre] == new[pre] {
+            pre += 1;
+        }
+        let mut suf = 0usize;
+        while suf < (old.len() - pre)
+            && suf < (new.len() - pre)
+            && old[old.len() - 1 - suf] == new[new.len() - 1 - suf]
+        {
+            suf += 1;
+        }
+        let cluster = buf[pos].cluster;
+        let mut rebuilt = buf[..pre].to_vec();
+        for &gid in &new[pre..new.len() - suf] {
+            rebuilt.push(WorkGlyph { gid, cluster });
+        }
+        rebuilt.extend_from_slice(&buf[old.len() - suf..]);
+        rebuilt
+    }
+
+    /// The extent-bounded reconcile gives exactly what the whole-run
+    /// comparison gives, for random in-place edits at or after `pos` —
+    /// replacements, deletions and insertions over a two-glyph alphabet,
+    /// so coincidentally equal neighbours are the norm.
+    #[test]
+    fn extent_bounded_reconcile_matches_whole_run_comparison() {
+        let mut state = 0x2545_f491_4f6c_dd1du64;
+        let mut next = |n: usize| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state % n as u64) as usize
+        };
+        for _ in 0..20_000 {
+            let len = 1 + next(12);
+            let buf: Vec<WorkGlyph> = (0..len)
+                .map(|i| WorkGlyph {
+                    gid: next(2) as u16,
+                    cluster: i as u32 * 3,
+                })
+                .collect();
+            let pos = next(len);
+            let mut new: Vec<u16> = buf.iter().map(|w| w.gid).collect();
+            let mut extent = EditExtent::starting_at(pos);
+            for _ in 0..next(4) {
+                if new.len() <= pos {
+                    break;
+                }
+                let at = pos + next(new.len() - pos);
+                let removed = 1 + next((new.len() - at).min(3));
+                let inserted = next(4);
+                new.splice(at..at + removed, (0..inserted).map(|_| next(2) as u16));
+                extent.end = extent.end.max(at + removed) - removed + inserted;
+                extent.delta += inserted as isize - removed as isize;
+            }
+            let expected = reconcile_whole_run(&buf, &new, pos);
+            let mut actual = buf.clone();
+            reconcile_context_rewrite(&mut actual, &new, pos, extent);
+            let key = |b: &[WorkGlyph]| b.iter().map(|w| (w.gid, w.cluster)).collect::<Vec<_>>();
+            assert_eq!(key(&actual), key(&expected), "pos {pos}, new {new:?}");
         }
     }
 }
