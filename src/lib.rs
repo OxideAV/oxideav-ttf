@@ -323,6 +323,11 @@ impl<T: core::fmt::Debug> core::fmt::Debug for LazyTable<'_, T> {
     }
 }
 
+/// One `nameID` and its lazily decoded best-ranked string (`None` once
+/// decoded: no record of that id decodes). Like [`LazyTable`], only ever
+/// filled from the font's own bytes.
+type NameSlot<'a> = (u16, OnceLock<Option<std::borrow::Cow<'a, str>>>);
+
 /// A parsed TrueType / OpenType font, lifetime-bound to the input bytes.
 ///
 /// `Font::from_bytes` walks the sfnt header + table directory once and
@@ -559,6 +564,12 @@ pub struct Font<'a> {
     /// coordinate has been set. A property of the font (not of the
     /// current instance), so caching it is coordinate-independent.
     default_coords: OnceLock<Vec<f32>>,
+    /// Best-ranked decoded string per `nameID`, one slot per id the
+    /// `name` table lists (ascending), each decoded on first request.
+    /// UTF-16 records have to be transcoded; keeping the result here is
+    /// what lets the name accessors return `&str` without allocating
+    /// per call.
+    name_strings: OnceLock<Box<[NameSlot<'a>]>>,
     /// Shaping accelerators (shape plans, per-lookup glyph sets, flat
     /// GDEF classes), built on demand by [`Font::shape`] and kept for
     /// the life of the font. Derived data only — no borrow of `bytes`.
@@ -716,6 +727,7 @@ impl<'a> Font<'a> {
             merg: LazyTable::new(dir.find(b"MERG", bytes)),
             var_coords: None,
             default_coords: OnceLock::new(),
+            name_strings: OnceLock::new(),
             layout: layout::LayoutCache::default(),
         })
     }
@@ -731,19 +743,19 @@ impl<'a> Font<'a> {
     /// to Mac Roman if that's all the font has).
     pub fn family_name(&self) -> Option<&str> {
         // 1 = Family name
-        self.name.find(1)
+        self.name_str(1)
     }
 
     /// Full name (typically family + style) from the `name` table.
     pub fn full_name(&self) -> Option<&str> {
         // 4 = Full name
-        self.name.find(4)
+        self.name_str(4)
     }
 
     /// Subfamily (style) name from the `name` table — e.g. "Bold",
     /// "Italic", "Regular". `nameID` 2 (Adobe TN5149 §1.4).
     pub fn subfamily_name(&self) -> Option<&str> {
-        self.name.find(name_id::SUBFAMILY)
+        self.name_str(name_id::SUBFAMILY)
     }
 
     /// Typographic (preferred) family name — `nameID` 16 — falling back to
@@ -753,7 +765,7 @@ impl<'a> Font<'a> {
     pub fn typographic_family_name(&self) -> Option<&str> {
         self.name
             .find(name_id::TYPOGRAPHIC_FAMILY)
-            .or_else(|| self.name.find(name_id::FAMILY))
+            .or_else(|| self.name_str(name_id::FAMILY))
     }
 
     /// Typographic (preferred) subfamily name — `nameID` 17 — falling back
@@ -762,63 +774,79 @@ impl<'a> Font<'a> {
     pub fn typographic_subfamily_name(&self) -> Option<&str> {
         self.name
             .find(name_id::TYPOGRAPHIC_SUBFAMILY)
-            .or_else(|| self.name.find(name_id::SUBFAMILY))
+            .or_else(|| self.name_str(name_id::SUBFAMILY))
     }
 
     /// PostScript name — `nameID` 6 (TN5149 §1.5). The unique name a
     /// PostScript interpreter uses to select the font.
     pub fn postscript_name(&self) -> Option<&str> {
-        self.name.find(name_id::POSTSCRIPT)
+        self.name_str(name_id::POSTSCRIPT)
     }
 
     /// Version string — `nameID` 5 (TN5149 §1.9), e.g. "Version 1.000".
     pub fn version_string(&self) -> Option<&str> {
-        self.name.find(name_id::VERSION)
+        self.name_str(name_id::VERSION)
     }
 
     /// Copyright notice — `nameID` 0 (TN5149 §1.3).
     pub fn copyright(&self) -> Option<&str> {
-        self.name.find(name_id::COPYRIGHT)
+        self.name_str(name_id::COPYRIGHT)
     }
 
     /// Trademark — `nameID` 7 (TN5149 §1.10).
     pub fn trademark(&self) -> Option<&str> {
-        self.name.find(name_id::TRADEMARK)
+        self.name_str(name_id::TRADEMARK)
     }
 
     /// Manufacturer name — `nameID` 8 (TN5149 §1.10).
     pub fn manufacturer(&self) -> Option<&str> {
-        self.name.find(name_id::MANUFACTURER)
+        self.name_str(name_id::MANUFACTURER)
     }
 
     /// Designer name — `nameID` 9 (TN5149 §1.10).
     pub fn designer(&self) -> Option<&str> {
-        self.name.find(name_id::DESIGNER)
+        self.name_str(name_id::DESIGNER)
     }
 
     /// Description — `nameID` 10 (TN5149 §1.10).
     pub fn description(&self) -> Option<&str> {
-        self.name.find(name_id::DESCRIPTION)
+        self.name_str(name_id::DESCRIPTION)
     }
 
     /// Font vendor URL — `nameID` 11 (TN5149 §1.10).
     pub fn vendor_url(&self) -> Option<&str> {
-        self.name.find(name_id::VENDOR_URL)
+        self.name_str(name_id::VENDOR_URL)
     }
 
     /// Font designer URL — `nameID` 12 (TN5149 §1.10).
     pub fn designer_url(&self) -> Option<&str> {
-        self.name.find(name_id::DESIGNER_URL)
+        self.name_str(name_id::DESIGNER_URL)
     }
 
     /// Licence description — `nameID` 13 (TN5149 §1.10).
     pub fn license_description(&self) -> Option<&str> {
-        self.name.find(name_id::LICENSE)
+        self.name_str(name_id::LICENSE)
     }
 
     /// Licence URL — `nameID` 14 (TN5149 §1.10).
     pub fn license_url(&self) -> Option<&str> {
-        self.name.find(name_id::LICENSE_URL)
+        self.name_str(name_id::LICENSE_URL)
+    }
+
+    /// Best-ranked string for `name_id`, decoded at most once per font.
+    fn name_str(&self, name_id: u16) -> Option<&str> {
+        let slots = self.name_strings.get_or_init(|| {
+            self.name
+                .name_ids()
+                .into_iter()
+                .map(|id| (id, OnceLock::new()))
+                .collect()
+        });
+        let at = slots.binary_search_by_key(&name_id, |slot| slot.0).ok()?;
+        slots[at]
+            .1
+            .get_or_init(|| self.name.find_decoded(name_id))
+            .as_deref()
     }
 
     /// Arbitrary `name`-table string by `nameID`, picking the best-ranked
@@ -826,7 +854,7 @@ impl<'a> Font<'a> {
     /// [`name_id`] constants. Use [`Self::name_string_for`] to target a
     /// specific platform + language.
     pub fn name_string(&self, name_id: u16) -> Option<&str> {
-        self.name.find(name_id)
+        self.name_str(name_id)
     }
 
     /// A specific `(nameID, platformID, languageID)` string — no ranking,

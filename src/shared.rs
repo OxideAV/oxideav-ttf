@@ -123,8 +123,9 @@ impl SharedFont {
         // SAFETY: this narrows `&'s Font<'static>` to `&'s Font<'s>`.
         // `Font<'a>` only ever *produces* `'a` data: its constructors are
         // the sole functions taking `&'a` input, and its interior
-        // caches (`LazyTable`'s `OnceLock`s — the reason the compiler
-        // treats `'a` as invariant rather than covariant) are filled
+        // caches (the `OnceLock`s of `LazyTable` and of the decoded
+        // name strings — the reason the compiler treats `'a` as
+        // invariant rather than covariant) are filled
         // exclusively by `Font`'s own parsers from the font's own
         // bytes, never from caller-supplied borrows. So no value with a
         // lifetime shorter than the data can be written through the

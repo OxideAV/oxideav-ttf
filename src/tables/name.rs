@@ -210,11 +210,26 @@ impl<'a> NameTable<'a> {
 
     /// Find the value of a name record by its `name_id`. Selects the
     /// best-ranked encoding (Windows/Unicode/English first).
+    ///
+    /// A record stored as UTF-16 has to be transcoded, and a `&'a str`
+    /// cannot point at a temporary: **every call that resolves to such a
+    /// record allocates the decoded string and leaks it.** Call
+    /// [`find_decoded`](Self::find_decoded) instead, which returns the
+    /// string by value; [`Font`](crate::Font)'s name accessors decode
+    /// each name once and keep it for the life of the font.
     pub fn find(&self, name_id: u16) -> Option<&'a str> {
-        // We don't return owned strings: instead we look for a record
-        // whose payload is already valid UTF-8 (or transcodable to it via
-        // the trivial UTF-16-BE path). We return the *highest-ranked*
-        // record we can decode.
+        Some(match self.find_decoded(name_id)? {
+            std::borrow::Cow::Borrowed(s) => s,
+            std::borrow::Cow::Owned(s) => Box::leak(s.into_boxed_str()),
+        })
+    }
+
+    /// Find the value of a name record by its `name_id`, selecting the
+    /// best-ranked encoding (Windows/Unicode/English first) among the
+    /// records that decode. Borrows when the record's bytes are already
+    /// valid UTF-8 (ASCII Macintosh Roman), owns the transcoded string
+    /// otherwise.
+    pub fn find_decoded(&self, name_id: u16) -> Option<std::borrow::Cow<'a, str>> {
         let mut best: Option<(i32, std::borrow::Cow<'a, str>)> = None;
 
         for i in 0..self.count as usize {
@@ -238,15 +253,17 @@ impl<'a> NameTable<'a> {
                 _ => best = Some((rank, decoded)),
             }
         }
-        // Leak the decoded Cow into a 'a str: only safe for the borrowed
-        // case. For owned strings (re-encoded UTF-16) we Box::leak so the
-        // returned str outlives the call. Names are tiny (< 100 bytes
-        // typically); leak cost is negligible per font load.
-        let (_, c) = best?;
-        Some(match c {
-            std::borrow::Cow::Borrowed(s) => s,
-            std::borrow::Cow::Owned(s) => Box::leak(s.into_boxed_str()),
-        })
+        best.map(|(_, decoded)| decoded)
+    }
+
+    /// Every distinct `nameID` the table has a record for, ascending.
+    pub fn name_ids(&self) -> Vec<u16> {
+        let mut ids: Vec<u16> = (0..self.count as usize)
+            .filter_map(|i| self.record_header(i).map(|h| h.3))
+            .collect();
+        ids.sort_unstable();
+        ids.dedup();
+        ids
     }
 
     /// Find the value of a specific `(name_id, platform_id, language_id)`

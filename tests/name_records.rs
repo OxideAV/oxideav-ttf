@@ -105,3 +105,33 @@ fn name_records_enumerates_with_locator_tuples() {
         }
     }
 }
+
+/// The name accessors decode a UTF-16 record once per font and hand out
+/// the same string on every later call, instead of allocating per call.
+#[test]
+fn name_accessors_return_one_cached_string_per_name() {
+    let f = Font::from_bytes(include_bytes!("fixtures/DejaVuSans.ttf")).unwrap();
+    let first = f.family_name().expect("family name");
+    assert_eq!(first, "DejaVu Sans");
+    for _ in 0..1000 {
+        let again = f.family_name().unwrap();
+        assert_eq!(again.as_ptr(), first.as_ptr(), "same backing string");
+    }
+    assert_eq!(f.name_string(oxideav_ttf::name_id::FAMILY), Some(first));
+    assert_eq!(
+        f.name_string(oxideav_ttf::name_id::FAMILY)
+            .unwrap()
+            .as_ptr(),
+        first.as_ptr()
+    );
+    // An id the table has no record for.
+    assert_eq!(f.name_string(0x7fff), None);
+    // Every accessor agrees with the per-record listing's best match.
+    let full = f.full_name().unwrap();
+    assert!(
+        f.name_records()
+            .iter()
+            .any(|r| r.name_id == oxideav_ttf::name_id::FULL_NAME
+                && r.string.as_deref() == Some(full))
+    );
+}
