@@ -136,6 +136,12 @@ impl<'a> GdefTable<'a> {
         class_def_lookup(sub, glyph_id).unwrap_or(0)
     }
 
+    /// The GlyphClassDef table bytes (from its format word to the end
+    /// of GDEF), when the header carries a non-NULL offset in range.
+    pub(crate) fn glyph_class_def_bytes(&self) -> Option<&'a [u8]> {
+        self.bytes.get(self.glyph_class_def_off? as usize..)
+    }
+
     /// Convenience: is this glyph a mark per the spec?
     pub fn is_mark(&self, glyph_id: u16) -> bool {
         self.glyph_class(glyph_id) == CLASS_MARK

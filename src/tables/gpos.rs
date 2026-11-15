@@ -535,6 +535,12 @@ impl<'a> GposTable<'a> {
         out
     }
 
+    /// The raw table bytes and the LookupList offset, for the shaping
+    /// accelerators in [`crate::layout`].
+    pub(crate) fn lookup_list_location(&self) -> (&'a [u8], u32) {
+        (self.bytes, self.lookup_list_off)
+    }
+
     /// Enumerate every lookup in the LookupList as
     /// `(lookup_index, lookup_type, subtable_count)`.
     ///

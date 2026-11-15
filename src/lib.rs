@@ -50,6 +50,7 @@
 
 pub mod agl;
 pub mod collection;
+mod layout;
 pub mod outline;
 // internal — exposed for tests/fuzz; not part of the stable API
 #[doc(hidden)]
@@ -550,6 +551,10 @@ pub struct Font<'a> {
     /// coordinate has been set. A property of the font (not of the
     /// current instance), so caching it is coordinate-independent.
     default_coords: OnceLock<Vec<f32>>,
+    /// Shaping accelerators (shape plans, per-lookup glyph sets, flat
+    /// GDEF classes), built on demand by [`Font::shape`] and kept for
+    /// the life of the font. Derived data only — no borrow of `bytes`.
+    layout: layout::LayoutCache,
 }
 
 impl<'a> Font<'a> {
@@ -703,6 +708,7 @@ impl<'a> Font<'a> {
             merg: LazyTable::new(dir.find(b"MERG", bytes)),
             var_coords: None,
             default_coords: OnceLock::new(),
+            layout: layout::LayoutCache::default(),
         })
     }
 
@@ -3979,6 +3985,9 @@ impl<'a> Font<'a> {
     /// Mutable view of the coordinate vector, seeded from the axis
     /// defaults on first mutation.
     fn coords_mut(&mut self) -> &mut Vec<f32> {
+        // The instance is about to change: FeatureVariations may map
+        // features to different lookups, so cached shape plans are stale.
+        self.layout.clear_plans();
         if self.var_coords.is_none() {
             self.var_coords = Some(self.coords().to_vec());
         }
