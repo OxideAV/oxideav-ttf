@@ -1247,6 +1247,144 @@ Callers that build a `Font` per operation therefore pay only for the tables
 that operation touches; the `post` glyph-name table (the bulk of the old
 construction cost) is built only when a glyph-name accessor is used.
 
+## Performance: shaping
+
+`Font::shape` used to resolve the feature → lookup lists on every call and
+then offer every active lookup to every position of the buffer. Profile of
+that implementation (release build, `InterVariable.ttf` /
+`NotoSansArabic-Regular.ttf`, the texts and feature sets in
+`tests/common/mod.rs`; share of one `shape` call):
+
+| Stage | Latin paragraph, 669 glyphs | Ligature / kerning-dense Latin, 354 glyphs | Vocalised Arabic, 189 glyphs | Latin paragraph, word by word |
+|---|---|---|---|---|
+| `cmap` mapping | 0.1 % | 0.1 % | 0.5 % | 1.0 % |
+| GSUB feature / lookup-list resolution | 0.0 % | 0.1 % | 0.1 % | 13.5 % |
+| GSUB ligature lookups (type 4) | 94.7 % | 92.0 % | 88.4 % | 41.0 % |
+| GSUB contextual + chained lookups (types 5, 6) | 4.1 % | 5.9 % | — | 29.3 % |
+| GSUB single substitution (type 1) | — | — | 2.4 % | — |
+| `hmtx` advances | 0.0 % | 0.1 % | 0.3 % | 0.7 % |
+| GPOS feature / lookup-list resolution | 0.0 % | 0.0 % | 0.1 % | 2.1 % |
+| GPOS pair adjustment (type 2) | 0.7 % | 1.2 % | — | 7.5 % |
+| GPOS mark attachment (types 4, 5, 6) | 0.4 % | 0.6 % | 7.2 % | 4.8 % |
+| GPOS chained context (type 8) | — | — | 1.0 % | — |
+
+The ligature share was quadratic: at every position the lookup rebuilt the
+candidate run from the whole rest of the buffer, with a GDEF class search per
+glyph, before the Coverage test could say "not a ligature start". Contextual
+lookups re-collected the glyph id array per position and cloned the run per
+match. On short runs the per-call ScriptList → LangSys → FeatureList walk and
+the per-glyph Lookup-header / sub-table walk dominated instead.
+
+What `shape` does now — all of it derived once per `Font`, on demand, and
+kept (`src/layout.rs`, `src/memo.rs`):
+
+- **Shape plans.** The lookups behind a `(script, language, features)`
+  request, in LookupList order with their type, `lookupFlag` and mark
+  filtering set, are resolved once and cached (dropped when the variation
+  instance changes, since FeatureVariations can swap lookups).
+- **First-glyph sets.** Every lookup records the union of the Coverage
+  tables its sub-tables test against the current glyph, as a bitmap plus a
+  64-bit digest. A run keeps the list of its distinct glyphs; a lookup none
+  of them can start is dismissed without visiting a position, and inside a
+  run only positions whose glyph is in the set reach the matching code.
+- **Resolved sub-tables.** A lookup's sub-tables are located once (Extension
+  records unwrapped) with a first-glyph set each, so a candidate position
+  goes straight to the sub-tables that can accept its glyph.
+- **Flattened tables.** Well-formed Coverage tables of Single / Alternate /
+  Ligature substitution and glyph-pair kerning become a per-glyph Coverage
+  index array; the two ClassDef tables of class-pair kerning and the GDEF
+  GlyphClassDef become per-glyph class arrays. Lookups then index, they do
+  not search.
+- **Ligatures.** A candidate run stops at the lookup's longest component
+  count, and a position whose next visible glyph is no ligature's second
+  component is skipped outright.
+- **Contextual rewrites** edit the glyph run in place and report the extent
+  they touched; the buffer is reconciled against that extent, not against the
+  whole run.
+- **Memo tables** (lock-free, direct-mapped, allocated after a warm-up):
+  character → glyph id, glyph → advance, and per kerning lookup
+  `(left, right)` → adjustment.
+- **No per-call allocation** beyond the returned `Vec`: the working buffers
+  are recycled per thread.
+
+Output is unchanged. `tests/shape_corpus.rs` pins glyph ids, clusters,
+offsets and advances for curated Latin / Greek / Cyrillic / Arabic / Hebrew
+runs, 960 generated runs and three variable-font instances across the four
+fixture fonts, in a golden file written by the implementation profiled
+above; `tests/shape_synthetic_lookups.rs` covers the lookup types the
+fixtures lack with tables built byte by byte.
+
+`cargo bench --bench shaping` (release, Apple-silicon laptop shared with other
+builds; each figure is the median over five interleaved runs of the bench's
+median-of-15-batches figure, µs per call). "Run" shapes the text as one run,
+"words" shapes it one whitespace-separated word at a time; both on a `Font`
+that is parsed once and reused, so caches are warm:
+
+| Scenario | Run, before | Run, after | | Words, before | Words, after | |
+|---|---|---|---|---|---|---|
+| `latin_paragraph/inter` (669 chars) | 16289 | 13.2 | 1231× | 1078 | 16.9 | 64× |
+| `latin_paragraph/dejavu` (669 chars) | 2476 | 8.0 | 311× | 291 | 12.7 | 23× |
+| `latin_rich/inter` (669 chars, 22 features) | 23710 | 21.8 | 1089× | 1471 | 33.2 | 44× |
+| `liga_kern_heavy/inter` (361 chars) | 5749 | 17.2 | 334× | 583 | 15.1 | 39× |
+| `liga_kern_heavy/dejavu` (361 chars) | 885 | 5.3 | 166× | 173 | 7.7 | 23× |
+| `latin_combining/dejavu` (47 chars) | 44 | 2.5 | 17× | 25 | 2.9 | 8× |
+| `arabic_paragraph/noto` (198 chars) | 542 | 4.7 | 116× | 117 | 5.9 | 20× |
+| `arabic_paragraph/dejavu` (198 chars) | 1250 | 6.7 | 187× | 184 | 8.2 | 22× |
+
+A font's *first* shaping call builds what it needs (parse + shape on a fresh
+`Font` per iteration):
+
+| Scenario | Before | After | |
+|---|---|---|---|
+| `cold_words/inter` (13 chars) | 28.0 | 28.0 | 1.0× |
+| `cold_paragraph/inter` (669 chars) | 17317 | 49.6 | 349× |
+| `cold_paragraph/noto` (198 chars) | 540 | 16.7 | 32× |
+
+**Memory.** The derived data is built only for lookups a requested feature
+set actually runs: a glyph-set bitmap per sub-table (one bit per glyph), a
+two-byte-per-glyph array per flattened Coverage / ClassDef table, a 32 KiB
+pair memo per kerning lookup and two 8 KiB memo tables. Heap retained by a
+`Font` after shaping the bench texts (counting allocator, release):
+
+| Font, feature set | Accelerators on (default) | Accelerators off |
+|---|---|---|
+| InterVariable, default Latin (6 features) | 178 KiB | < 2 KiB |
+| InterVariable, rich Latin (22 features) | 275 KiB | < 2 KiB |
+| DejaVuSans, default Latin | 151 KiB | < 1 KiB |
+| DejaVuSans, Arabic | 196 KiB | < 1 KiB |
+| NotoSansArabic, Arabic | 46 KiB | < 1 KiB |
+
+A caller that would rather spend time than memory turns all of it off with
+`Font::set_shaping_accelerators(false)` (or
+`SharedFont::with_shaping_accelerators(false)`). Shaping then walks the table
+bytes for every lookup at every position, with identical results (the corpus
+is checked on both paths) — `latin_paragraph/inter` takes 2095 µs as one run
+and 397 µs word by word that way, `arabic_paragraph/noto` 203 µs and 42 µs
+(only the shape-plan cache remains).
+
+### Keeping a parsed font: `SharedFont`
+
+Everything above lives on the `Font`, so it pays off when the font is kept.
+`Font<'a>` borrows the file bytes; `SharedFont` owns them (`Arc<[u8]>`)
+together with the `Font` parsed from them. It is `Clone` (one reference
+count), `Send + Sync` and `'static`; every clone shares the same parsed
+tables, shape plans and accelerators.
+
+```rust
+use oxideav_ttf::SharedFont;
+
+let font = SharedFont::from_bytes(std::fs::read("Inter.ttf")?)?; // or an Arc<[u8]>, shared without a copy
+let cached = font.clone();                                        // e.g. into a face cache, another thread
+let glyphs = cached.shape("office", *b"latn", None, &[*b"liga", *b"kern"]);
+let upem = font.font().units_per_em();                            // the whole borrowed `Font` API
+let bold = font.with_variation_coords(&[700.0]);                  // another instance, same bytes
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+The crate is `#![deny(unsafe_code)]` apart from the two lifetime re-bindings
+inside `SharedFont` (`src/shared.rs`), each documented with the invariant it
+relies on; the handle's tests pass under Miri with strict provenance.
+
 ## Robustness
 
 A font file is fully attacker-controlled, so every table decode and every

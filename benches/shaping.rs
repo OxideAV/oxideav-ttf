@@ -13,7 +13,9 @@
 //! batches, with the fastest batch in parentheses (the figure least
 //! disturbed by other load on the machine). The `*/words` scenarios shape the same text one
 //! whitespace-separated word at a time — the short-run pattern of a
-//! line breaker — instead of as one long run.
+//! line breaker — instead of as one long run. The `cold_*` scenarios
+//! parse a fresh `Font` and shape once per iteration: the cost of a
+//! font's first shaping call, with nothing cached.
 
 use std::hint::black_box;
 use std::time::{Duration, Instant};
@@ -141,13 +143,38 @@ fn main() {
         ARAB_DEFAULT,
     );
 
-    // One-shot use: parse + shape a short string on a fresh `Font`.
-    let cold = measure(|| {
-        let f = Font::from_bytes(black_box(INTER)).unwrap();
-        black_box(f.shape("Waffle office", *b"latn", None, LATN_DEFAULT));
-    });
-    println!(
-        "{:<24} parse + shape 13 chars    {:>9.2} us ({:>9.2})",
-        "cold/inter", cold.0, cold.1
+    // One-shot use: parse a fresh `Font` and shape once, so everything
+    // the font builds lazily is built inside the measurement.
+    let one_shot =
+        |label: &str, bytes: &'static [u8], text: &str, script: Tag, features: &[Tag]| {
+            let (median, fastest) = measure(|| {
+                let f = Font::from_bytes(black_box(bytes)).unwrap();
+                black_box(f.shape(text, script, None, features));
+            });
+            println!(
+                "{label:<24} parse + shape {:>4} chars   {median:>9.2} us ({fastest:>9.2})",
+                text.chars().count()
+            );
+        };
+    one_shot(
+        "cold_words/inter",
+        INTER,
+        "Waffle office",
+        *b"latn",
+        LATN_DEFAULT,
+    );
+    one_shot(
+        "cold_paragraph/inter",
+        INTER,
+        LATIN_PARAGRAPH,
+        *b"latn",
+        LATN_DEFAULT,
+    );
+    one_shot(
+        "cold_paragraph/noto",
+        NOTO_ARABIC,
+        ARABIC_PARAGRAPH,
+        *b"arab",
+        ARAB_DEFAULT,
     );
 }

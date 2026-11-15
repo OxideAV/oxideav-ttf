@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `SharedFont` — an owned, `Arc`-backed, `Clone + Send + Sync + 'static`
+  font handle: it owns the file bytes together with the `Font` parsed from
+  them, so every clone shares the same lazily parsed tables, shape plans and
+  shaping accelerators. `from_bytes` / `from_collection_bytes` take anything
+  `Into<Arc<[u8]>>` (an existing `Arc` is shared without a copy); `font()`
+  hands out the borrowed `Font` API unchanged; `with_variation_coords` and
+  `with_shaping_accelerators` derive handles over the same allocation;
+  `shape` forwards to `Font::shape`.
+- `Font::set_shaping_accelerators` / `Font::shaping_accelerators` — switch
+  the derived shaping structures and memo tables off (and back on) for
+  callers that prefer a minimal footprint to speed. Results are identical.
+- `NameTable::find_decoded` (best-ranked name as a `Cow`, no leak) and
+  `NameTable::name_ids`.
+- `benches/shaping.rs` (`cargo bench --bench shaping`, std-only timing):
+  whole-run and word-by-word shaping of Latin, ligature / kerning-dense,
+  combining-mark and Arabic text on a reused font, plus first-call costs.
+- `tests/shape_corpus.rs` + `tests/fixtures/shape_corpus.golden` — glyph
+  ids, clusters, offsets and advances pinned for curated and generated runs
+  across the fixture fonts, on both the accelerated path and the plain
+  table walk; `tests/shape_synthetic_lookups.rs` — the lookup types the
+  fixtures lack, over hand-built GSUB / GPOS tables.
+
 - `PosRecord::new(glyph_index, value)` and `PosValue::with_*` setters, so callers can stop using struct literals.
 - `Font::validate()` — forces every present table parser and returns the
   first parse error (the strict all-tables check `from_bytes` used to do).
@@ -18,6 +40,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   construction + `validate`.
 
 ### Changed
+
+- `Font::shape` lookup application restructured, output unchanged: shape
+  plans cached per `(script, language, features)`; per-lookup first-glyph
+  sets (bitmap + digest) with a per-run distinct-glyph list, so lookups and
+  positions that cannot match are never visited; sub-tables resolved once
+  per lookup; Coverage and ClassDef tables flattened to per-glyph arrays for
+  Single / Alternate / Ligature substitution, pair kerning and the GDEF
+  glyph classes; ligature candidate runs bounded by the longest component
+  count and filtered on the second component; contextual substitutions edit
+  the run in place; lock-free memo tables for `cmap` lookups, glyph advances
+  and kerning pairs; per-thread scratch instead of per-call allocation.
+  Median `cargo bench --bench shaping` figures, before → after: Latin
+  paragraph on InterVariable 16289 → 13.2 µs as one run (1231×) and
+  1078 → 16.9 µs word by word (64×); vocalised Arabic on NotoSansArabic
+  542 → 4.7 µs (116×) and 117 → 5.9 µs (20×); slowest case (47-char
+  combining-mark run on DejaVu, word by word) 25 → 2.9 µs (8×). The first
+  shaping call on a fresh font: 13 chars 28.0 → 28.0 µs, a 669-char
+  paragraph 17317 → 49.6 µs.
+- `Font::glyph_index` and `Font::glyph_advance` are memoised per font.
+- The crate is `#![deny(unsafe_code)]`, with one audited exception
+  (`SharedFont`'s two lifetime re-bindings in `src/shared.rs`).
 
 - Lazy table parsing: `Font::from_bytes` / `from_collection_bytes` now
   parse only the table directory and the required `head` / `hhea` / `maxp`
@@ -52,6 +95,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `PosValue` / `PosRecord` stay exhaustive for now because a sibling
   crate builds them by struct literal.
 - edition 2024, MSRV 1.95
+
+### Fixed
+
+- `Font::family_name`, `full_name`, `name_string` and the other name
+  accessors leaked a newly transcoded `String` on every call that resolved
+  to a UTF-16 record (the usual case). Each name is now decoded once per
+  font and borrowed from there. `NameTable::find` keeps its signature (and
+  therefore still leaks for UTF-16 records); its documentation says so and
+  points at `find_decoded`.
 
 ## [0.1.8](https://github.com/OxideAV/oxideav-ttf/compare/v0.1.7...v0.1.8) - 2026-08-15
 

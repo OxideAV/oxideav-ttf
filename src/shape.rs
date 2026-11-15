@@ -59,9 +59,11 @@
 //! glyph digest misses the lookup's digest skips the lookup outright,
 //! and within a run only positions whose glyph is in the set reach the
 //! table-walking match code. The `lookupFlag` skip predicate reads a
-//! flat per-glyph GDEF class array. See [`crate::layout`] internals for
-//! the invariants that keep the filtered path output-identical to
-//! walking every lookup at every position.
+//! flat per-glyph GDEF class array. The filters only ever discard
+//! positions the table-walking match code would reject, so the output
+//! is identical to walking every lookup at every position —
+//! [`Font::set_shaping_accelerators`](crate::Font::set_shaping_accelerators)
+//! switches them off, and the test suite compares the two.
 
 use std::sync::Arc;
 

@@ -341,7 +341,12 @@ type NameSlot<'a> = (u16, OnceLock<Option<std::borrow::Cow<'a, str>>>);
 /// table that fails to parse reads as absent; [`Font::validate`] forces
 /// every table and reports the first failure. Lookup methods
 /// (`glyph_index`, `glyph_outline`, etc.) are O(log n) or O(n) over the
-/// raw table bytes — no glyphs are pre-decoded or cached.
+/// raw table bytes — no glyph outlines are pre-decoded or cached.
+/// [`Font::shape`] additionally builds, on demand, small per-lookup
+/// accelerators and memo tables that it keeps for the life of the `Font`
+/// (see [`Font::set_shaping_accelerators`]), so a font that is kept —
+/// directly or as a [`SharedFont`] — shapes much faster than one that is
+/// re-parsed per call.
 #[derive(Debug)]
 pub struct Font<'a> {
     bytes: &'a [u8],
@@ -748,13 +753,13 @@ impl<'a> Font<'a> {
     /// use and keep them for the life of the font: per-lookup glyph
     /// sets and flattened Coverage / ClassDef tables (a few bytes per
     /// glyph for each lookup a requested feature set actually runs —
-    /// tens to a few hundred KiB for a text font with rich features), a
+    /// 50 to 300 KiB on the text fonts this crate is tested with), a
     /// 32 KiB pair memo per kerning lookup, and two 8 KiB memo tables
     /// (each memo is allocated only once it has seen a few hundred
     /// queries).
     /// With them off, nothing is retained beyond the resolved lookup
     /// lists; every lookup walks the table bytes at every position,
-    /// which is one to three orders of magnitude slower on long runs.
+    /// which is one to two orders of magnitude slower.
     ///
     /// Results are identical either way. Switching drops whatever was
     /// built so far.
