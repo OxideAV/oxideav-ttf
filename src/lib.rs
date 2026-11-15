@@ -47,6 +47,8 @@
 
 #![deny(missing_debug_implementations)]
 #![warn(rust_2018_idioms)]
+// One audited exception: `shared` (the owned font handle).
+#![deny(unsafe_code)]
 
 pub mod agl;
 pub mod collection;
@@ -56,11 +58,13 @@ pub mod outline;
 #[doc(hidden)]
 pub mod parser;
 pub mod shape;
+mod shared;
 pub mod tables;
 
 pub use agl::{glyph_name_to_char, glyph_name_to_codepoints};
 pub use collection::{CollectionHeader, TTC_MAGIC, is_collection};
 pub use shape::ShapedGlyph;
+pub use shared::SharedFont;
 
 use std::sync::OnceLock;
 
@@ -274,6 +278,10 @@ impl std::error::Error for Error {}
 /// table *or* the parse error — so a malformed table is parsed exactly
 /// once and then reads as absent. [`Font::validate`] surfaces the
 /// cached errors.
+///
+/// Invariant relied on by [`SharedFont`]: the cell is only ever filled
+/// by a parser run on `slice` — the font's own bytes. Nothing a caller
+/// passes in is stored here.
 struct LazyTable<'a, T> {
     slice: Option<&'a [u8]>,
     cell: OnceLock<Result<T, Error>>,
