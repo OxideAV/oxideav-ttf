@@ -37,6 +37,7 @@
 
 use std::sync::{Arc, Mutex, OnceLock};
 
+use crate::memo::Memo;
 use crate::parser::read_u16;
 use crate::parser::read_u32;
 use crate::tables::gdef::lookup_table_slice;
@@ -316,7 +317,15 @@ pub(crate) struct LookupAccel {
     /// least two components and could be read. A ligature can then only
     /// form where the next visible glyph is in this set.
     pub(crate) second_components: Option<GlyphSet>,
+    /// GPOS PairPos only: memo of the lookup's adjustment per
+    /// `(left, right)` glyph pair. Text repeats letter pairs heavily, so
+    /// most pairs are answered here without visiting a sub-table.
+    pub(crate) pair_memo: Memo,
 }
+
+/// log2 of the pair memo's slot count: 4096 slots, 32 KiB, allocated
+/// the first time the lookup positions a pair.
+const PAIR_MEMO_BITS: u32 = 12;
 
 /// How a table walker treats an Extension sub-table it cannot unwrap.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -334,6 +343,7 @@ impl LookupAccel {
             subs: Box::new([]),
             max_components: 0,
             second_components: None,
+            pair_memo: Memo::with_bits(PAIR_MEMO_BITS),
         }
     }
 
@@ -471,6 +481,7 @@ impl LookupAccel {
                 usize::MAX
             },
             second_components: second,
+            pair_memo: Memo::with_bits(PAIR_MEMO_BITS),
         })
     }
 }

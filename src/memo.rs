@@ -1,6 +1,6 @@
 //! A small lock-free memo table for pure `u32 -> Option<u16>` font
-//! queries (character → glyph id), shared by every thread using a
-//! [`Font`](crate::Font).
+//! queries (character → glyph id, glyph → advance, glyph pair → kerning
+//! adjustment), shared by every thread using a [`Font`](crate::Font).
 //!
 //! Direct-mapped: each key hashes to one slot, a newer key overwrites an
 //! older one that lands on the same slot. A slot is a single `AtomicU64`
@@ -13,17 +13,19 @@
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// Slot count (a power of two). 8 KiB per font, allocated on first use.
-const SLOTS: usize = 1024;
-
 pub(crate) struct Memo {
     slots: OnceLock<Box<[AtomicU64]>>,
+    /// log2 of the slot count.
+    bits: u32,
 }
 
 impl Memo {
-    pub(crate) const fn new() -> Self {
+    /// A memo with `2^bits` slots (8 bytes each), allocated on first
+    /// use. `bits` must be in `1..=24`.
+    pub(crate) const fn with_bits(bits: u32) -> Self {
         Self {
             slots: OnceLock::new(),
+            bits,
         }
     }
 
@@ -35,11 +37,13 @@ impl Memo {
         key: u32,
         compute: impl FnOnce() -> Option<u16>,
     ) -> Option<u16> {
-        let slots = self
-            .slots
-            .get_or_init(|| (0..SLOTS).map(|_| AtomicU64::new(0)).collect());
+        let slots = self.slots.get_or_init(|| {
+            (0..1usize << self.bits)
+                .map(|_| AtomicU64::new(0))
+                .collect()
+        });
         // Fibonacci hashing: the top bits of key * 2^32 / phi.
-        let index = (key.wrapping_mul(0x9E37_79B9) >> (32 - SLOTS.trailing_zeros())) as usize;
+        let index = (key.wrapping_mul(0x9E37_79B9) >> (32 - self.bits)) as usize;
         let slot = &slots[index];
         // Entry layout: (key + 1) in bits 17.., "value present" in bit
         // 16, the value in bits 0..16. Zero is the empty slot (the
@@ -75,7 +79,7 @@ mod tests {
 
     #[test]
     fn memo_returns_what_the_function_returns() {
-        let memo = Memo::new();
+        let memo = Memo::with_bits(10);
         let f = |k: u32| (!k.is_multiple_of(7)).then_some((k.wrapping_mul(31) % 65_521) as u16);
         // Far more keys than slots, each asked several times, so hits,
         // misses and evictions all occur; include the extreme keys.

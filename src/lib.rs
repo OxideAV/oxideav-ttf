@@ -573,6 +573,9 @@ pub struct Font<'a> {
     name_strings: OnceLock<Box<[NameSlot<'a>]>>,
     /// Memo of [`Font::glyph_index`] results (`cmap` lookups).
     glyph_index_memo: memo::Memo,
+    /// Memo of [`Font::glyph_advance`] results (`hmtx` advance of the
+    /// glyph's metrics source).
+    glyph_advance_memo: memo::Memo,
     /// Shaping accelerators (shape plans, per-lookup glyph sets, flat
     /// GDEF classes), built on demand by [`Font::shape`] and kept for
     /// the life of the font. Derived data only — no borrow of `bytes`.
@@ -731,7 +734,8 @@ impl<'a> Font<'a> {
             var_coords: None,
             default_coords: OnceLock::new(),
             name_strings: OnceLock::new(),
-            glyph_index_memo: memo::Memo::new(),
+            glyph_index_memo: memo::Memo::with_bits(10),
+            glyph_advance_memo: memo::Memo::with_bits(10),
             layout: layout::LayoutCache::default(),
         })
     }
@@ -1420,8 +1424,12 @@ impl<'a> Font<'a> {
     /// component's (e.g. dotless-`i`) metrics. The last flagged component
     /// wins; the chase is depth-bounded.
     pub fn glyph_advance(&self, glyph_id: u16) -> i16 {
-        let effective = self.metrics_source_glyph(glyph_id);
-        self.hmtx.advance(effective) as i16
+        self.glyph_advance_memo
+            .get_or_compute(glyph_id as u32, || {
+                let effective = self.metrics_source_glyph(glyph_id);
+                Some(self.hmtx.advance(effective))
+            })
+            .unwrap_or(0) as i16
     }
 
     /// Per-glyph left-side bearing in font units. Honours `USE_MY_METRICS`

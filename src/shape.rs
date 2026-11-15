@@ -336,6 +336,23 @@ impl<'f> Resolved<'f> {
         let Some(accel) = self.accel else {
             return gpos.lookup_kerning_at(self.index, left, right, skip.gdef);
         };
+        // The adjustment is a pure function of the pair for this lookup.
+        let pair_key = (left as u32) << 16 | right as u32;
+        accel
+            .pair_memo
+            .get_or_compute(pair_key, || {
+                Some(self.pair_uncached(accel, skip, left, right) as u16)
+            })
+            .unwrap_or(0) as i16
+    }
+
+    fn pair_uncached(
+        &self,
+        accel: &LookupAccel,
+        skip: &SkipFilter<'_, '_>,
+        left: u16,
+        right: u16,
+    ) -> i16 {
         if skip.flags & 0x0008 != 0 && (skip.is_gdef_mark(left) || skip.is_gdef_mark(right)) {
             return 0;
         }
@@ -427,31 +444,102 @@ impl<'f> Resolved<'f> {
     }
 }
 
-/// Runs at least this long track their distinct glyphs with a bitmap;
-/// shorter ones search the (short) list itself.
-const BITMAP_MIN_RUN: usize = 32;
-
 /// Which glyph ids a run holds, for ruling whole lookups out. Always a
 /// superset: a glyph substituted away stays listed (that only costs a
 /// missed shortcut), a glyph written into the run is added.
-struct RunGlyphs {
+struct RunGlyphs<'s> {
     /// OR of [`digest_bit`] over the run.
     digest: u64,
     /// Each distinct glyph id once. Text repeats glyphs heavily, so
     /// probing a lookup's first-glyph set with this list is far cheaper
     /// than probing it at every position of a long run.
-    distinct: Vec<u16>,
-    /// Long runs only: membership bitmap of `distinct` over the whole
-    /// glyph id space.
-    seen: Option<Vec<u64>>,
+    distinct: &'s mut Vec<u16>,
+    /// Membership bitmap of `distinct` over the whole glyph id space.
+    seen: &'s mut [u64],
 }
 
-impl RunGlyphs {
-    fn of(buf: &[WorkGlyph]) -> Self {
+/// Words in a bitmap over every glyph id.
+const GLYPH_BITMAP_WORDS: usize = 1 << 10;
+
+/// Working storage of one shaping call, recycled per thread so a call
+/// allocates nothing but its result (see [`ShapeScratch::take`]).
+#[derive(Default)]
+struct ShapeScratch {
+    /// The glyph buffer.
+    buf: Vec<WorkGlyph>,
+    /// [`RunGlyphs::distinct`].
+    distinct: Vec<u16>,
+    /// [`RunGlyphs::seen`]: `GLYPH_BITMAP_WORDS` words, all zero between
+    /// calls.
+    seen: Vec<u64>,
+    lookups: LookupScratch,
+}
+
+/// Scratch vectors individual lookups reuse.
+#[derive(Default)]
+struct LookupScratch {
+    /// Glyph-id mirror of the buffer (contextual lookups).
+    gids: Vec<u16>,
+    /// Visible glyphs of a ligature candidate run, and their buffer
+    /// indices.
+    cand_gids: Vec<u16>,
+    cand_idx: Vec<usize>,
+}
+
+thread_local! {
+    static SHAPE_SCRATCH: std::cell::Cell<ShapeScratch> = const {
+        std::cell::Cell::new(ShapeScratch {
+            buf: Vec::new(),
+            distinct: Vec::new(),
+            seen: Vec::new(),
+            lookups: LookupScratch {
+                gids: Vec::new(),
+                cand_gids: Vec::new(),
+                cand_idx: Vec::new(),
+            },
+        })
+    };
+}
+
+/// Largest glyph buffer (in glyphs) kept for the thread's next call; a
+/// longer one is released rather than pinned.
+const SCRATCH_KEEP_GLYPHS: usize = 1 << 14;
+
+impl ShapeScratch {
+    /// This thread's recycled scratch (or a fresh one: first call on the
+    /// thread, a nested call, or thread teardown).
+    fn take() -> Self {
+        let mut scratch = SHAPE_SCRATCH
+            .try_with(|cell| cell.take())
+            .unwrap_or_default();
+        if scratch.seen.len() != GLYPH_BITMAP_WORDS {
+            scratch.seen = vec![0u64; GLYPH_BITMAP_WORDS];
+        }
+        scratch
+    }
+
+    /// Hand the scratch back for the thread's next call.
+    fn recycle(mut self) {
+        if self.buf.capacity() > SCRATCH_KEEP_GLYPHS {
+            return;
+        }
+        // Restore the all-zero bitmap by clearing only the touched words.
+        for &gid in &self.distinct {
+            self.seen[(gid >> 6) as usize] = 0;
+        }
+        self.distinct.clear();
+        self.buf.clear();
+        let _ = SHAPE_SCRATCH.try_with(|cell| cell.set(self));
+    }
+}
+
+impl<'s> RunGlyphs<'s> {
+    /// Summarise `buf`. `distinct` must be empty and `seen` all zero.
+    fn of(buf: &[WorkGlyph], distinct: &'s mut Vec<u16>, seen: &'s mut [u64]) -> Self {
         let mut run = RunGlyphs {
             digest: 0,
-            distinct: Vec::with_capacity(buf.len().min(64)),
-            seen: (buf.len() >= BITMAP_MIN_RUN).then(|| vec![0u64; 1 << 10]),
+            distinct,
+            seen,
         };
         for w in buf {
             run.add(w.gid);
@@ -462,22 +550,12 @@ impl RunGlyphs {
     #[inline]
     fn add(&mut self, gid: u16) {
         let bit = digest_bit(gid);
-        match &mut self.seen {
-            Some(seen) => {
-                let word = &mut seen[(gid >> 6) as usize];
-                if *word & bit == 0 {
-                    *word |= bit;
-                    self.distinct.push(gid);
-                }
-            }
-            // The digest rules most glyphs in without a search.
-            None => {
-                if self.digest & bit == 0 || !self.distinct.contains(&gid) {
-                    self.distinct.push(gid);
-                }
-            }
+        let word = &mut self.seen[(gid >> 6) as usize];
+        if *word & bit == 0 {
+            *word |= bit;
+            self.distinct.push(gid);
+            self.digest |= bit;
         }
-        self.digest |= bit;
     }
 
     /// `true` when `lookup` provably cannot act anywhere in the run.
@@ -518,8 +596,22 @@ impl<'a> Font<'a> {
         lang: Option<[u8; 4]>,
         features: &[[u8; 4]],
     ) -> Vec<ShapedGlyph> {
+        let mut scratch = ShapeScratch::take();
+        let shaped = self.shape_in(&mut scratch, text, script, lang, features);
+        scratch.recycle();
+        shaped
+    }
+
+    fn shape_in(
+        &self,
+        scratch: &mut ShapeScratch,
+        text: &str,
+        script: [u8; 4],
+        lang: Option<[u8; 4]>,
+        features: &[[u8; 4]],
+    ) -> Vec<ShapedGlyph> {
         // --- 1. character-to-glyph mapping --------------------------------
-        let mut buf: Vec<WorkGlyph> = Vec::with_capacity(text.len());
+        let buf = &mut scratch.buf;
         for (byte_idx, ch) in text.char_indices() {
             let gid = self.glyph_index(ch).unwrap_or(0);
             buf.push(WorkGlyph {
@@ -530,17 +622,17 @@ impl<'a> Font<'a> {
 
         let plan = self.shape_plan(script, lang, features);
         if plan.gsub.is_empty() && plan.gpos.is_empty() {
-            return self.seed_advances(&buf);
+            return self.seed_advances(buf);
         }
-        let mut run = RunGlyphs::of(&buf);
+        let mut run = RunGlyphs::of(buf, &mut scratch.distinct, &mut scratch.seen);
 
         // --- 2. GSUB substitution stage -----------------------------------
         if !plan.gsub.is_empty() {
-            self.run_gsub(&mut buf, &plan.gsub, &mut run);
+            self.run_gsub(buf, &plan.gsub, &mut run, &mut scratch.lookups);
         }
 
         // --- 3. GPOS positioning stage ------------------------------------
-        self.run_gpos(buf, &plan.gpos, &run)
+        self.run_gpos(buf, &plan.gpos, &run, &mut scratch.lookups.gids)
     }
 
     /// The (cached) shape plan for a request: the GSUB and GPOS lookups
@@ -681,18 +773,23 @@ impl<'a> Font<'a> {
     }
 
     /// Apply the planned GSUB lookups, in LookupList order, across `buf`.
-    fn run_gsub(&self, buf: &mut Vec<WorkGlyph>, lookups: &[PlanLookup], run: &mut RunGlyphs) {
+    fn run_gsub(
+        &self,
+        buf: &mut Vec<WorkGlyph>,
+        lookups: &[PlanLookup],
+        run: &mut RunGlyphs<'_>,
+        scratch: &mut LookupScratch,
+    ) {
         let Some(gsub) = self.gsub() else {
             return;
         };
         let (table, _) = gsub.lookup_list_location();
-        let mut scratch = GsubScratch::default();
         for lookup in lookups {
             let resolved = Resolved::new(lookup, table);
             if run.rules_out(&resolved) {
                 continue;
             }
-            self.apply_gsub_lookup(gsub, buf, lookup, resolved, run, &mut scratch);
+            self.apply_gsub_lookup(gsub, buf, lookup, resolved, run, scratch);
         }
     }
 
@@ -711,8 +808,8 @@ impl<'a> Font<'a> {
         buf: &mut Vec<WorkGlyph>,
         lookup: &PlanLookup,
         resolved: Resolved<'_>,
-        run: &mut RunGlyphs,
-        scratch: &mut GsubScratch,
+        run: &mut RunGlyphs<'_>,
+        scratch: &mut LookupScratch,
     ) {
         match lookup.kind {
             1 => {
@@ -792,7 +889,7 @@ impl<'a> Font<'a> {
                 // visible glyphs, so the candidate run stops there.
                 let window = resolved.max_components().max(1);
                 let second = resolved.second_components();
-                let GsubScratch {
+                let LookupScratch {
                     cand_gids,
                     cand_idx,
                     ..
@@ -893,11 +990,12 @@ impl<'a> Font<'a> {
     /// the planned GPOS lookups in LookupList order.
     fn run_gpos(
         &self,
-        buf: Vec<WorkGlyph>,
+        buf: &[WorkGlyph],
         lookups: &[PlanLookup],
-        run: &RunGlyphs,
+        run: &RunGlyphs<'_>,
+        gids: &mut Vec<u16>,
     ) -> Vec<ShapedGlyph> {
-        let mut out = self.seed_advances(&buf);
+        let mut out = self.seed_advances(buf);
         let Some(gpos) = self.gpos() else {
             return out;
         };
@@ -907,13 +1005,12 @@ impl<'a> Font<'a> {
         let (table, _) = gpos.lookup_list_location();
         // Positioning never changes glyph ids: the run summary and one
         // glyph id array serve every lookup.
-        let mut gids: Vec<u16> = Vec::new();
         for lookup in lookups {
             let resolved = Resolved::new(lookup, table);
             if run.rules_out(&resolved) {
                 continue;
             }
-            self.apply_gpos_lookup(gpos, &mut out, lookup, resolved, &mut gids);
+            self.apply_gpos_lookup(gpos, &mut out, lookup, resolved, gids);
         }
         out
     }
@@ -1074,17 +1171,6 @@ impl<'a> Font<'a> {
     }
 }
 
-/// Scratch vectors the substitution stage reuses across lookups.
-#[derive(Default)]
-struct GsubScratch {
-    /// Glyph-id mirror of the buffer (contextual lookups).
-    gids: Vec<u16>,
-    /// Visible glyphs of a ligature candidate run, and their buffer
-    /// indices.
-    cand_gids: Vec<u16>,
-    cand_idx: Vec<usize>,
-}
-
 /// Bring the `WorkGlyph` buffer in line with `new`, the glyph-id run a
 /// contextual / chained GSUB rule at `pos` just rewrote (`buf` still
 /// holds the run as it was), preserving clusters as best we can. The
@@ -1101,7 +1187,7 @@ fn reconcile_context_rewrite(
     new: &[u16],
     pos: usize,
     extent: EditExtent,
-    run: &mut RunGlyphs,
+    run: &mut RunGlyphs<'_>,
 ) {
     let (old_len, new_len) = (buf.len(), new.len());
     // Per `EditExtent`: new[..pos] == old[..pos] and
@@ -1228,7 +1314,8 @@ mod tests {
             }
             let expected = reconcile_whole_run(&buf, &new, pos);
             let mut actual = buf.clone();
-            let mut run = RunGlyphs::of(&actual);
+            let (mut distinct, mut seen) = (Vec::new(), vec![0u64; GLYPH_BITMAP_WORDS]);
+            let mut run = RunGlyphs::of(&actual, &mut distinct, &mut seen);
             reconcile_context_rewrite(&mut actual, &new, pos, extent, &mut run);
             let key = |b: &[WorkGlyph]| b.iter().map(|w| (w.gid, w.cluster)).collect::<Vec<_>>();
             assert_eq!(key(&actual), key(&expected), "pos {pos}, new {new:?}");
