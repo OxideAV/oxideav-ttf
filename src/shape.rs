@@ -142,17 +142,16 @@ struct SkipFilter<'f, 'a> {
 impl<'f, 'a> SkipFilter<'f, 'a> {
     fn new(font: &'f Font<'a>, flags: u16, mark_filtering_set: Option<u16>) -> Self {
         let gdef = font.gdef();
+        let active = gdef.is_some() && (flags & 0xFF1E != 0 || mark_filtering_set.is_some());
         Self {
             font,
             gdef,
-            classes: if gdef.is_some() {
-                font.glyph_classes()
-            } else {
-                None
-            },
+            // The flat class array is only consulted when a skip bit is
+            // set (every use below is behind `active` or IGNORE_MARKS).
+            classes: if active { font.glyph_classes() } else { None },
             flags,
             mark_filtering_set,
-            active: gdef.is_some() && (flags & 0xFF1E != 0 || mark_filtering_set.is_some()),
+            active,
             marks_need_walker: flags & 0xFF00 != 0 || mark_filtering_set.is_some(),
         }
     }

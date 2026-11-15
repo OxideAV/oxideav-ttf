@@ -171,6 +171,19 @@ impl GlyphSet {
         }
     }
 
+    /// Add every member of `other` (a set of the same capacity; a
+    /// universal `other` makes `self` universal).
+    fn union_with(&mut self, other: &GlyphSet) {
+        self.digest |= other.digest;
+        if other.words.len() != self.words.len() {
+            *self = GlyphSet::universal();
+            return;
+        }
+        for (word, &more) in self.words.iter_mut().zip(other.words.iter()) {
+            *word |= more;
+        }
+    }
+
     /// Add every glyph a Coverage table (§6.2.5) lists. Reads as far as
     /// the bytes allow; an unreadable tail or unknown format adds
     /// nothing (the byte-walking lookup rejects those too).
@@ -442,7 +455,7 @@ impl LookupAccel {
                 FirstCoverage::At(cov) => {
                     sub_first.insert_coverage(cov);
                     first_is_exact = coverage_is_well_formed(cov);
-                    first.insert_coverage(cov);
+                    first.union_with(&sub_first);
                     // The matchers want a 6-byte sub-table header.
                     if wants_coverage_index && sub.len() >= 6 {
                         coverage_index = flatten_coverage(cov, num_glyphs);
@@ -916,6 +929,15 @@ mod tests {
         assert!(s.contains(300));
         assert!(s.contains(u16::MAX));
         assert!(!s.disjoint_from(digest_bit(3)));
+        let mut union = GlyphSet::with_capacity(200);
+        union.insert(5);
+        union.union_with(&s);
+        for g in 0..200u16 {
+            assert_eq!(union.contains(g), s.contains(g) || g == 5, "gid {g}");
+        }
+        assert!(!union.disjoint_from(digest_bit(5)));
+        union.union_with(&GlyphSet::universal());
+        assert!(union.contains(1) && !union.disjoint_from(1));
         assert!(GlyphSet::universal().contains(7));
         assert!(!GlyphSet::universal().disjoint_from(1));
         let mut small = GlyphSet::with_capacity(4096);
