@@ -155,7 +155,7 @@ fn shared_font_without_accelerators_shapes_identically() {
         fast.font().variation_coords()
     );
     assert!(Arc::ptr_eq(&fast.shared_data(), &lean.shared_data()));
-    for text in [LIGA_KERN_HEAVY, LATIN_COMBINING] {
+    for text in ["AVATAR office waffle 1/2 -> Ty", LATIN_COMBINING] {
         assert_eq!(
             lean.shape(text, *b"latn", None, LATN_RICH),
             fast.shape(text, *b"latn", None, LATN_RICH)

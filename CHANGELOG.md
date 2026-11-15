@@ -29,7 +29,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ids, clusters, offsets and advances pinned for curated and generated runs
   across the fixture fonts, on both the accelerated path and the plain
   table walk; `tests/shape_synthetic_lookups.rs` — the lookup types the
-  fixtures lack, over hand-built GSUB / GPOS tables.
+  fixtures lack, over hand-built GSUB / GPOS tables;
+  `tests/shape_hostile_tables.rs` — both paths compared over corrupted
+  GSUB / GPOS / GDEF tables.
 
 - `PosRecord::new(glyph_index, value)` and `PosValue::with_*` setters, so callers can stop using struct literals.
 - `Font::validate()` — forces every present table parser and returns the
@@ -104,6 +106,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   font and borrowed from there. `NameTable::find` keeps its signature (and
   therefore still leaks for UTF-16 records); its documentation says so and
   points at `find_decoded`.
+- A Coverage range record whose `startCoverageIndex` plus the glyph's
+  position in the range exceeds 16 bits no longer overflows (a panic in
+  debug builds on corrupt fonts); the index wraps, as it already did in
+  release builds, and is then bounded by each caller's record count.
 
 ## [0.1.8](https://github.com/OxideAV/oxideav-ttf/compare/v0.1.7...v0.1.8) - 2026-08-15
 

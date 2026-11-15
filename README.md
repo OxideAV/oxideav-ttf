@@ -1312,7 +1312,11 @@ offsets and advances for curated Latin / Greek / Cyrillic / Arabic / Hebrew
 runs, 960 generated runs and three variable-font instances across the four
 fixture fonts, in a golden file written by the implementation profiled
 above; `tests/shape_synthetic_lookups.rs` covers the lookup types the
-fixtures lack with tables built byte by byte.
+fixtures lack with tables built byte by byte; and
+`tests/shape_hostile_tables.rs` corrupts the GSUB / GPOS / GDEF tables of
+every fixture (unsorted Coverage, overlapping class ranges, dangling offsets,
+bogus lookup types) and requires the accelerated path and the plain table
+walk to agree on whatever results.
 
 `cargo bench --bench shaping` (release, Apple-silicon laptop shared with other
 builds; each figure is the median over five interleaved runs of the bench's

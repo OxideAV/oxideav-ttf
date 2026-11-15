@@ -540,7 +540,10 @@ pub(crate) fn coverage_lookup(bytes: &[u8], glyph_id: u16) -> Option<u16> {
                 } else if glyph_id > e {
                     lo = mid + 1;
                 } else {
-                    return Some(start_idx + (glyph_id - s));
+                    // A corrupt startCoverageIndex can push the sum past
+                    // 16 bits; wrap rather than overflow (callers bound
+                    // the index against their own record counts).
+                    return Some(start_idx.wrapping_add(glyph_id - s));
                 }
             }
             None
@@ -622,6 +625,16 @@ mod tests {
         assert_eq!(coverage_lookup(&b, 10), Some(1));
         assert_eq!(coverage_lookup(&b, 15), Some(2));
         assert_eq!(coverage_lookup(&b, 11), None);
+    }
+
+    #[test]
+    fn coverage_format2_start_index_overflow_wraps() {
+        // One range 10..=20 with startCoverageIndex 0xFFFE: glyph 13
+        // would be index 0x10001.
+        let cov = [0, 2, 0, 1, 0, 10, 0, 20, 0xFF, 0xFE];
+        assert_eq!(coverage_lookup(&cov, 10), Some(0xFFFE));
+        assert_eq!(coverage_lookup(&cov, 13), Some(1));
+        assert_eq!(coverage_lookup(&cov, 21), None);
     }
 
     #[test]
