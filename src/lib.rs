@@ -740,6 +740,36 @@ impl<'a> Font<'a> {
         })
     }
 
+    /// Switch the lookup accelerators and memo tables on (the default)
+    /// or off.
+    ///
+    /// With them on, [`Font::shape`], [`Font::glyph_index`] and
+    /// [`Font::glyph_advance`] build small derived structures on first
+    /// use and keep them for the life of the font: per-lookup glyph
+    /// sets and flattened Coverage / ClassDef tables (a few bytes per
+    /// glyph for each lookup a requested feature set actually runs —
+    /// tens to a few hundred KiB for a text font with rich features), a
+    /// 32 KiB pair memo per kerning lookup, and two 8 KiB memo tables.
+    /// With them off, nothing is retained beyond the resolved lookup
+    /// lists; every lookup walks the table bytes at every position,
+    /// which is one to three orders of magnitude slower on long runs.
+    ///
+    /// Results are identical either way. Switching drops whatever was
+    /// built so far.
+    pub fn set_shaping_accelerators(&mut self, enabled: bool) {
+        if self.layout.is_lean() == enabled {
+            self.layout = layout::LayoutCache::with_lean(!enabled);
+            self.glyph_index_memo = memo::Memo::with_bits(10);
+            self.glyph_advance_memo = memo::Memo::with_bits(10);
+        }
+    }
+
+    /// `true` when the lookup accelerators are on (the default); see
+    /// [`Font::set_shaping_accelerators`].
+    pub fn shaping_accelerators(&self) -> bool {
+        !self.layout.is_lean()
+    }
+
     /// Raw bytes used to build this `Font`. Mostly useful for debugging.
     pub fn bytes(&self) -> &'a [u8] {
         self.bytes
@@ -1240,6 +1270,9 @@ impl<'a> Font<'a> {
     /// Map a Unicode codepoint to its glyph id.
     pub fn glyph_index(&self, codepoint: char) -> Option<u16> {
         let codepoint = codepoint as u32;
+        if self.layout.is_lean() {
+            return self.cmap.lookup(codepoint);
+        }
         self.glyph_index_memo
             .get_or_compute(codepoint, || self.cmap.lookup(codepoint))
     }
@@ -1424,6 +1457,10 @@ impl<'a> Font<'a> {
     /// component's (e.g. dotless-`i`) metrics. The last flagged component
     /// wins; the chase is depth-bounded.
     pub fn glyph_advance(&self, glyph_id: u16) -> i16 {
+        if self.layout.is_lean() {
+            let effective = self.metrics_source_glyph(glyph_id);
+            return self.hmtx.advance(effective) as i16;
+        }
         self.glyph_advance_memo
             .get_or_compute(glyph_id as u32, || {
                 let effective = self.metrics_source_glyph(glyph_id);

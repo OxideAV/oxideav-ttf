@@ -141,3 +141,31 @@ fn shared_font_reports_parse_errors() {
         Font::from_collection_bytes(DEJAVU, 0).err()
     );
 }
+
+#[test]
+fn shared_font_without_accelerators_shapes_identically() {
+    let fast = SharedFont::from_bytes(INTER)
+        .unwrap()
+        .with_variation_coords(&[650.0, 20.0]);
+    let lean = fast.with_shaping_accelerators(false);
+    assert!(fast.font().shaping_accelerators());
+    assert!(!lean.font().shaping_accelerators());
+    assert_eq!(
+        lean.font().variation_coords(),
+        fast.font().variation_coords()
+    );
+    assert!(Arc::ptr_eq(&fast.shared_data(), &lean.shared_data()));
+    for text in [LIGA_KERN_HEAVY, LATIN_COMBINING] {
+        assert_eq!(
+            lean.shape(text, *b"latn", None, LATN_RICH),
+            fast.shape(text, *b"latn", None, LATN_RICH)
+        );
+    }
+    // Derived instances keep the setting.
+    assert!(
+        !lean
+            .with_variation_coords(&[400.0, 14.0])
+            .font()
+            .shaping_accelerators()
+    );
+}

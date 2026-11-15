@@ -701,6 +701,10 @@ const MAX_CACHED_PLANS: usize = 32;
 /// All shaping accelerators of one font.
 #[derive(Debug, Default)]
 pub(crate) struct LayoutCache {
+    /// When set, no accelerator is built or handed out: shaping walks
+    /// the table bytes for every lookup at every position. Shape plans
+    /// are still cached (they are a few dozen bytes).
+    lean: bool,
     gsub: TableAccels,
     gpos: TableAccels,
     /// GDEF GlyphClassDef class per glyph (`None` inside: no usable
@@ -720,6 +724,9 @@ impl LayoutCache {
         kind: u16,
         num_glyphs: usize,
     ) -> Option<Arc<LookupAccel>> {
+        if self.lean {
+            return None;
+        }
         let accels = match table {
             LayoutTable::Gsub => &self.gsub,
             LayoutTable::Gpos => &self.gpos,
@@ -739,7 +746,24 @@ impl LayoutCache {
         &self,
         build: impl FnOnce() -> Option<Box<[u16]>>,
     ) -> Option<&[u16]> {
+        if self.lean {
+            return None;
+        }
         self.glyph_classes.get_or_init(build).as_deref()
+    }
+
+    /// `true` when accelerators are switched off.
+    pub(crate) fn is_lean(&self) -> bool {
+        self.lean
+    }
+
+    /// A cache with accelerators on (`lean == false`) or off, holding
+    /// nothing yet.
+    pub(crate) fn with_lean(lean: bool) -> Self {
+        Self {
+            lean,
+            ..Self::default()
+        }
     }
 
     /// The cached plan for a request, or the one `build` produces.

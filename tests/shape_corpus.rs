@@ -13,6 +13,9 @@
 //!   marks) under pseudo-random feature subsets. Each is pinned by a
 //!   64-bit FNV-1a digest of the full shaped output.
 //!
+//! Both the accelerated path and the plain table walk
+//! ([`Font::set_shaping_accelerators`]) are held to the same file.
+//!
 //! The golden file is a behaviour snapshot, not a correctness oracle:
 //! its job is to prove that performance work on the lookup machinery
 //! leaves shaping output unchanged. To regenerate it after an
@@ -155,8 +158,9 @@ fn alphabets() -> Vec<Alphabet> {
     ]
 }
 
-/// Build every corpus line (without comparing).
-fn build_corpus() -> Vec<String> {
+/// Build every corpus line (without comparing), with the shaping
+/// accelerators on or off.
+fn build_corpus(accelerators: bool) -> Vec<String> {
     let fonts: [(&str, &[u8]); 4] = [
         ("inter", INTER),
         ("dejavu", DEJAVU),
@@ -196,7 +200,9 @@ fn build_corpus() -> Vec<String> {
 
     let mut lines = Vec::new();
     for (font_name, bytes) in fonts {
-        let font = Font::from_bytes(bytes).expect("fixture parses");
+        let mut font = Font::from_bytes(bytes).expect("fixture parses");
+        font.set_shaping_accelerators(accelerators);
+        assert_eq!(font.shaping_accelerators(), accelerators);
 
         // --- curated runs: whole text, then word by word -----------------
         for (name, text, script, features) in curated {
@@ -256,6 +262,7 @@ fn build_corpus() -> Vec<String> {
 
     // --- variable-font instance: FeatureVariations-aware resolution ------
     let mut inter = Font::from_bytes(INTER).expect("fixture parses");
+    inter.set_shaping_accelerators(accelerators);
     for coords in [[100.0f32, 14.0], [900.0, 32.0], [650.0, 20.0]] {
         inter.set_variation_coords(&coords);
         let sh = inter.shape(LIGA_KERN_HEAVY, *b"latn", None, LATN_RICH);
@@ -269,37 +276,47 @@ fn build_corpus() -> Vec<String> {
     lines
 }
 
-#[test]
-fn shaping_output_matches_golden_corpus() {
-    let lines = build_corpus();
-    let actual = lines.join("\n") + "\n";
-    if std::env::var_os("OXIDEAV_TTF_BLESS").is_some() {
-        std::fs::write(GOLDEN_PATH, &actual).expect("write golden");
-        return;
-    }
+fn assert_matches_golden(lines: &[String], what: &str) {
     let golden = std::fs::read_to_string(GOLDEN_PATH).expect("golden corpus present");
     let golden_lines: Vec<&str> = golden.lines().collect();
     assert_eq!(
         golden_lines.len(),
         lines.len(),
-        "corpus line count changed (golden {} vs actual {})",
+        "{what}: corpus line count changed (golden {} vs actual {})",
         golden_lines.len(),
         lines.len()
     );
-    let mut mismatches = Vec::new();
-    for (g, a) in golden_lines.iter().zip(&lines) {
-        if g != a {
-            let key = a.split(" :").next().unwrap_or("");
-            mismatches.push(key.to_string());
-        }
-    }
+    let mismatches: Vec<&str> = golden_lines
+        .iter()
+        .zip(lines)
+        .filter(|(g, a)| *g != a)
+        .map(|(_, a)| a.split(" :").next().unwrap_or(""))
+        .collect();
     assert!(
         mismatches.is_empty(),
-        "{} of {} corpus entries differ from the golden file; first: {:?}",
+        "{what}: {} of {} corpus entries differ from the golden file; first: {:?}",
         mismatches.len(),
         lines.len(),
         &mismatches[..mismatches.len().min(12)]
     );
+}
+
+#[test]
+fn shaping_output_matches_golden_corpus() {
+    let lines = build_corpus(true);
+    if std::env::var_os("OXIDEAV_TTF_BLESS").is_some() {
+        std::fs::write(GOLDEN_PATH, lines.join("\n") + "\n").expect("write golden");
+        return;
+    }
+    assert_matches_golden(&lines, "accelerated");
+}
+
+/// With the accelerators off, every lookup walks the table bytes at
+/// every position — no glyph sets, no flattened tables, no memo tables.
+/// The output is the same corpus.
+#[test]
+fn shaping_without_accelerators_matches_golden_corpus() {
+    assert_matches_golden(&build_corpus(false), "table walk");
 }
 
 /// Shaping the same run twice on one `Font` (second call served from

@@ -70,14 +70,14 @@ impl SharedFont {
     ///
     /// Same validation and same errors as [`Font::from_bytes`].
     pub fn from_bytes(data: impl Into<Arc<[u8]>>) -> Result<Self, Error> {
-        Self::build(data.into(), None, None)
+        Self::build(data.into(), None, None, true)
     }
 
     /// Parse the `index`-th subfont of a TrueType Collection (`.ttc`).
     /// Same validation and same errors as
     /// [`Font::from_collection_bytes`].
     pub fn from_collection_bytes(data: impl Into<Arc<[u8]>>, index: u32) -> Result<Self, Error> {
-        Self::build(data.into(), Some(index), None)
+        Self::build(data.into(), Some(index), None, true)
     }
 
     #[allow(unsafe_code)]
@@ -85,6 +85,7 @@ impl SharedFont {
         data: Arc<[u8]>,
         collection_index: Option<u32>,
         coords: Option<&[f32]>,
+        accelerators: bool,
     ) -> Result<Self, Error> {
         // SAFETY: `bytes` points into the heap allocation owned by
         // `data`. That allocation is neither moved nor freed while any
@@ -104,6 +105,7 @@ impl SharedFont {
         if let Some(coords) = coords {
             font.set_variation_coords(coords);
         }
+        font.set_shaping_accelerators(accelerators);
         Ok(Self {
             inner: Arc::new(Inner {
                 font,
@@ -168,8 +170,31 @@ impl SharedFont {
             Arc::clone(&self.inner.data),
             self.inner.collection_index,
             Some(coords),
+            self.font().shaping_accelerators(),
         )
         .expect("bytes that parsed once parse again")
+    }
+
+    /// A handle over the same byte allocation with the shaping
+    /// accelerators and memo tables switched on or off (see
+    /// [`Font::set_shaping_accelerators`]), at the same variation
+    /// instance. Results are identical either way; "off" retains almost
+    /// nothing and shapes far more slowly.
+    pub fn with_shaping_accelerators(&self, enabled: bool) -> SharedFont {
+        let derived = Self::build(
+            Arc::clone(&self.inner.data),
+            self.inner.collection_index,
+            Some(self.font().variation_coords()),
+            enabled,
+        )
+        .expect("bytes that parsed once parse again");
+        // `build` re-clamps coordinates that were already clamped: same
+        // instance.
+        debug_assert_eq!(
+            derived.font().variation_coords(),
+            self.font().variation_coords()
+        );
+        derived
     }
 
     /// Shape a run of text; see [`Font::shape`].
