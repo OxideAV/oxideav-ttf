@@ -67,7 +67,8 @@ use std::sync::Arc;
 
 use crate::Font;
 use crate::layout::{
-    GlyphSet, LayoutTable, LookupAccel, PlanLookup, ShapePlan, digest_bit, flatten_class_def,
+    GlyphSet, LayoutTable, LookupAccel, PairAccel, PlanLookup, ShapePlan, digest_bit,
+    flatten_class_def,
 };
 use crate::tables::gdef::GdefTable;
 use crate::tables::gpos::{self, GposTable, PosRecord};
@@ -330,26 +331,36 @@ impl<'f> Resolved<'f> {
         }
         for sub in accel.subs.iter().filter(|s| s.first.contains(left)) {
             let bytes = self.table.get(sub.offset..).unwrap_or(&[]);
-            let flat = match &sub.pair_classes {
-                // `first` is exact here, so `left` is covered; the pair's
-                // value record is addressed by the two flattened classes.
-                Some(classes) if sub.first_is_exact => classes
-                    .class1
-                    .get(left as usize)
-                    .zip(classes.class2.get(right as usize))
-                    .map(|(&c1, &c2)| (classes, c1, c2)),
-                _ => None,
-            };
-            let hit = match flat {
-                // An empty first value record carries no adjustment: the
-                // sub-table does not apply.
-                Some((classes, _, _)) if classes.value_format1 == 0 => None,
-                Some((classes, c1, c2)) => Some(gpos::pair_class_x_advance(
-                    bytes,
-                    classes.record_offset(c1, c2),
-                    classes.value_format1,
-                )),
-                None => gpos::pair_pos_subtable(bytes, left, right),
+            // `first` being exact means `left` is covered, which is all
+            // the flattened forms need to know before addressing the
+            // pair's value record directly.
+            let glyphs = (left as usize, right as usize);
+            let hit = match &sub.pair {
+                PairAccel::Classes(classes) if sub.first_is_exact => {
+                    match (classes.class1.get(glyphs.0), classes.class2.get(glyphs.1)) {
+                        // An empty first value record carries no
+                        // adjustment: the sub-table does not apply.
+                        (Some(_), Some(_)) if classes.value_format1 == 0 => None,
+                        (Some(&c1), Some(&c2)) => Some(gpos::pair_class_x_advance(
+                            bytes,
+                            classes.record_offset(c1, c2),
+                            classes.value_format1,
+                        )),
+                        _ => gpos::pair_pos_subtable(bytes, left, right),
+                    }
+                }
+                PairAccel::Sets(sets) => match sets.coverage_index.get(glyphs.0) {
+                    Some(0) => None,
+                    Some(&index) => gpos::pair_set_x_advance(
+                        bytes,
+                        index - 1,
+                        right,
+                        sets.value_format1,
+                        sets.value_format2,
+                    ),
+                    None => gpos::pair_pos_subtable(bytes, left, right),
+                },
+                _ => gpos::pair_pos_subtable(bytes, left, right),
             };
             if let Some(adjust) = hit {
                 return adjust;

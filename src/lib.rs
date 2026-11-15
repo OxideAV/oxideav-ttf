@@ -53,6 +53,7 @@
 pub mod agl;
 pub mod collection;
 mod layout;
+mod memo;
 pub mod outline;
 // internal — exposed for tests/fuzz; not part of the stable API
 #[doc(hidden)]
@@ -570,6 +571,8 @@ pub struct Font<'a> {
     /// what lets the name accessors return `&str` without allocating
     /// per call.
     name_strings: OnceLock<Box<[NameSlot<'a>]>>,
+    /// Memo of [`Font::glyph_index`] results (`cmap` lookups).
+    glyph_index_memo: memo::Memo,
     /// Shaping accelerators (shape plans, per-lookup glyph sets, flat
     /// GDEF classes), built on demand by [`Font::shape`] and kept for
     /// the life of the font. Derived data only — no borrow of `bytes`.
@@ -728,6 +731,7 @@ impl<'a> Font<'a> {
             var_coords: None,
             default_coords: OnceLock::new(),
             name_strings: OnceLock::new(),
+            glyph_index_memo: memo::Memo::new(),
             layout: layout::LayoutCache::default(),
         })
     }
@@ -1231,7 +1235,9 @@ impl<'a> Font<'a> {
 
     /// Map a Unicode codepoint to its glyph id.
     pub fn glyph_index(&self, codepoint: char) -> Option<u16> {
-        self.cmap.lookup(codepoint as u32)
+        let codepoint = codepoint as u32;
+        self.glyph_index_memo
+            .get_or_compute(codepoint, || self.cmap.lookup(codepoint))
     }
 
     /// Look up the variant glyph for a `(codepoint, variation_selector)`

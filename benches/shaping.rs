@@ -10,7 +10,8 @@
 //! Every scenario shapes on a `Font` that was parsed once and is kept
 //! alive across calls (the way a text stack that caches its fonts uses
 //! the crate), and reports the median per-call time over several
-//! batches. The `*/words` scenarios shape the same text one
+//! batches, with the fastest batch in parentheses (the figure least
+//! disturbed by other load on the machine). The `*/words` scenarios shape the same text one
 //! whitespace-separated word at a time — the short-run pattern of a
 //! line breaker — instead of as one long run.
 
@@ -26,8 +27,9 @@ use common::*;
 const BATCHES: usize = 15;
 const TARGET_BATCH: Duration = Duration::from_millis(40);
 
-/// Median per-iteration time of `f`, in microseconds.
-fn measure(mut f: impl FnMut()) -> f64 {
+/// Per-iteration time of `f` in microseconds: (median batch, fastest
+/// batch).
+fn measure(mut f: impl FnMut()) -> (f64, f64) {
     let mut iters = 1usize;
     loop {
         let t = Instant::now();
@@ -52,7 +54,7 @@ fn measure(mut f: impl FnMut()) -> f64 {
         })
         .collect();
     samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    samples[samples.len() / 2]
+    (samples[samples.len() / 2], samples[0])
 }
 
 fn run(label: &str, font: &Font<'_>, text: &str, script: Tag, features: &[Tag]) {
@@ -67,8 +69,12 @@ fn run(label: &str, font: &Font<'_>, text: &str, script: Tag, features: &[Tag]) 
         }
     });
     println!(
-        "{label:<28} {:>4} chars {glyphs:>4} glyphs   run {whole:>10.2} us   words {by_word:>10.2} us",
-        text.chars().count()
+        "{label:<24} {:>4} chars {glyphs:>4} glyphs   run {:>9.2} us ({:>9.2})   words {:>9.2} us ({:>9.2})",
+        text.chars().count(),
+        whole.0,
+        whole.1,
+        by_word.0,
+        by_word.1
     );
 }
 
@@ -77,7 +83,7 @@ fn main() {
     let dejavu = Font::from_bytes(DEJAVU).unwrap();
     let arabic = Font::from_bytes(NOTO_ARABIC).unwrap();
 
-    println!("shaping, median of {BATCHES} batches, font parsed once and reused");
+    println!("shaping: median of {BATCHES} batches (fastest batch), font parsed once and reused");
     run(
         "latin_paragraph/inter",
         &inter,
@@ -141,7 +147,7 @@ fn main() {
         black_box(f.shape("Waffle office", *b"latn", None, LATN_DEFAULT));
     });
     println!(
-        "{:<28} parse + shape 13 chars         {cold:>10.2} us",
-        "cold/inter"
+        "{:<24} parse + shape 13 chars    {:>9.2} us ({:>9.2})",
+        "cold/inter", cold.0, cold.1
     );
 }

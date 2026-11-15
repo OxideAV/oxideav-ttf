@@ -215,8 +215,45 @@ pub(crate) struct SubAccel {
     /// accepts for glyph ids below the font's glyph count (a well-formed
     /// Coverage table), not merely a superset of it.
     pub(crate) first_is_exact: bool,
-    /// PairPosFormat2 only: the flattened class tables.
-    pub(crate) pair_classes: Option<PairClasses>,
+    /// PairPos only: the flattened glyph → value-record addressing.
+    pub(crate) pair: PairAccel,
+}
+
+/// Flattened addressing data of one PairPos sub-table.
+#[derive(Debug)]
+pub(crate) enum PairAccel {
+    /// Not a PairPos sub-table, or one whose tables are not well-formed
+    /// enough to flatten: go through the sub-table matcher.
+    None,
+    /// PairPosFormat1 (glyph pairs).
+    Sets(PairSets),
+    /// PairPosFormat2 (class pairs).
+    Classes(PairClasses),
+}
+
+/// PairPosFormat1 (§6.3.3.3 pair adjustment, glyph pairs) with its
+/// Coverage table flattened: `coverage_index[g]` is one more than the
+/// Coverage index of glyph `g` — the index of its PairSet — or 0 when
+/// the sub-table does not cover `g`.
+#[derive(Debug)]
+pub(crate) struct PairSets {
+    pub(crate) coverage_index: Box<[u16]>,
+    pub(crate) value_format1: u16,
+    pub(crate) value_format2: u16,
+}
+
+impl PairSets {
+    fn build(sub: &[u8], num_glyphs: usize) -> Option<Self> {
+        if sub.len() < 8 || read_u16(sub, 0).ok()? != 1 {
+            return None;
+        }
+        let coverage = sub.get(read_u16(sub, 2).ok()? as usize..)?;
+        Some(Self {
+            coverage_index: flatten_coverage(coverage, num_glyphs)?,
+            value_format1: read_u16(sub, 4).ok()?,
+            value_format2: read_u16(sub, 6).ok()?,
+        })
+    }
 }
 
 /// PairPosFormat2 (§6.3.3.3 class pair adjustment) with both ClassDef
@@ -416,10 +453,12 @@ impl LookupAccel {
                 offset: lookup_start + (lookup.len() - sub.len()),
                 first: sub_first,
                 first_is_exact,
-                pair_classes: if is_pair {
-                    PairClasses::build(sub, num_glyphs)
-                } else {
-                    None
+                pair: match is_pair {
+                    true => PairClasses::build(sub, num_glyphs)
+                        .map(PairAccel::Classes)
+                        .or_else(|| PairSets::build(sub, num_glyphs).map(PairAccel::Sets))
+                        .unwrap_or(PairAccel::None),
+                    false => PairAccel::None,
                 },
             });
         }
@@ -719,6 +758,45 @@ impl LayoutCache {
     }
 }
 
+/// Flatten a well-formed Coverage table (§6.2.5) into one entry per
+/// glyph for glyph ids `0..num_glyphs`: Coverage index plus one, or 0
+/// for a glyph the table does not list. `None` when the table is not
+/// [well-formed](coverage_is_well_formed) (a binary search over it would
+/// not be a plain membership test) or an index does not fit.
+fn flatten_coverage(cov: &[u8], num_glyphs: usize) -> Option<Box<[u16]>> {
+    if !coverage_is_well_formed(cov) {
+        return None;
+    }
+    let mut out = vec![0u16; num_glyphs];
+    let count = read_u16(cov, 2).ok()? as usize;
+    match read_u16(cov, 0).ok()? {
+        1 => {
+            for i in 0..count {
+                let glyph = read_u16(cov, 4 + i * 2).ok()? as usize;
+                if let Some(slot) = out.get_mut(glyph) {
+                    *slot = u16::try_from(i + 1).ok()?;
+                }
+            }
+        }
+        2 => {
+            for i in 0..count {
+                let off = 4 + i * 6;
+                let start = read_u16(cov, off).ok()?;
+                let end = read_u16(cov, off + 2).ok()?;
+                let start_index = read_u16(cov, off + 4).ok()? as usize;
+                for glyph in start..=end {
+                    let Some(slot) = out.get_mut(glyph as usize) else {
+                        break;
+                    };
+                    *slot = u16::try_from(start_index + (glyph - start) as usize + 1).ok()?;
+                }
+            }
+        }
+        _ => return None,
+    }
+    Some(out.into_boxed_slice())
+}
+
 /// Flatten a ClassDef table (§6.2.6) into one class per glyph for glyph
 /// ids `0..num_glyphs`.
 ///
@@ -803,6 +881,24 @@ mod tests {
         s.insert_coverage(&f2);
         let members: Vec<u16> = (0..64).filter(|&g| s.contains(g)).collect();
         assert_eq!(members, [5, 9, 20, 21, 22]);
+    }
+
+    #[test]
+    fn coverage_flattening_matches_walker() {
+        use crate::tables::gdef::coverage_lookup;
+        let f1 = [0, 1, 0, 3, 0, 5, 0, 9, 0, 40];
+        let f2 = [0, 2, 0, 2, 0, 3, 0, 5, 0, 7, 0, 20, 0, 60, 0, 0];
+        for cov in [&f1[..], &f2[..]] {
+            let flat = flatten_coverage(cov, 50).unwrap();
+            for g in 0..50u16 {
+                assert_eq!(
+                    flat[g as usize].checked_sub(1),
+                    coverage_lookup(cov, g),
+                    "gid {g}"
+                );
+            }
+        }
+        assert!(flatten_coverage(&[0, 1, 0, 2, 0, 9, 0, 5], 50).is_none());
     }
 
     #[test]

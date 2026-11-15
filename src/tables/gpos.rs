@@ -2302,6 +2302,27 @@ pub(crate) fn pair_class_x_advance(sub: &[u8], record_off: usize, value_format1:
     extract_x_advance_var(sub, record_off, value_format1, sub, AnchorCtx::STATIC)
 }
 
+/// PairPosFormat1: the first glyph's x-advance adjustment for the pair
+/// whose first glyph has Coverage index `coverage_index` and whose
+/// second glyph is `right`. `sub` must be at least 8 bytes.
+pub(crate) fn pair_set_x_advance(
+    sub: &[u8],
+    coverage_index: u16,
+    right: u16,
+    value_format1: u16,
+    value_format2: u16,
+) -> Option<i16> {
+    pair_pos_format1(
+        sub,
+        coverage_index,
+        right,
+        value_format1,
+        popcount_u16(value_format1) * 2,
+        popcount_u16(value_format2) * 2,
+        AnchorCtx::STATIC,
+    )
+}
+
 /// CursivePos sub-table: the entry / exit anchors of `gid`.
 pub(crate) fn cursive_pos_subtable(sub: &[u8], gid: u16) -> Option<CursiveAttachment> {
     cursive_pos_lookup(sub, gid, AnchorCtx::STATIC)
