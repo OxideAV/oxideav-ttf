@@ -1399,6 +1399,17 @@ The crate is `#![deny(unsafe_code)]` apart from the two lifetime re-bindings
 inside `SharedFont` (`src/shared.rs`), each documented with the invariant it
 relies on; the handle's tests pass under Miri with strict provenance.
 
+### Collections with CFF members
+
+`Font::from_collection_bytes` is not limited to `glyf` members: a
+collection (`ttcf`, `.ttc` / `.otc`) whose members are `OTTO`-flavoured
+with `CFF ` or `CFF2` outlines opens the same way, member by member,
+including members that share one outline table and differ only in
+`cmap` / `name`. `Font::has_cff_outlines()` / `has_cff2_outlines()`
+tell the flavours apart, and `glyph_outline` returns the member's
+PostScript outline flattened to this crate's contour type exactly as it
+does for a standalone file.
+
 ## Robustness
 
 A font file is fully attacker-controlled, so every table decode and every
@@ -1467,6 +1478,11 @@ array under-counted `numPoints`, now rejected per §5.3.3).
   drive one paint-graph parameter, with a wire `LONG_WORDS`
   ItemVariationStore — under the Apache License 2.0
   (see `tests/fixtures/COLOR-FONTS-APACHE-LICENSE.txt`).
+
+- `tests/fixtures/SourceSans3-Regular.otf` is Source Sans 3 Regular
+  (`CFF ` outlines, 335 KB) under the SIL Open Font License 1.1
+  (see `tests/fixtures/SOURCE-SANS-LICENSE`); the CFF collection tests
+  assemble their collections from it in memory.
 
 ## License
 

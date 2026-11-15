@@ -33,6 +33,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `tests/shape_hostile_tables.rs` — both paths compared over corrupted
   GSUB / GPOS / GDEF tables.
 
+- `tests/cff_collection.rs` — collections (`ttcf`) with `CFF ` / `CFF2`
+  members, assembled in memory from the new Source Sans 3 fixture: shared
+  tables, a member with its own `cmap` / `name`, both header versions,
+  glyph-for-glyph outline and metric equality with the standalone font,
+  typed errors for damaged headers / directories / offsets, a corruption
+  campaign over the collection structure, and a walk over three system
+  collections where they exist. `tests/hostile_input.rs` now also mutates
+  the `CFF ` fixture.
+
 - `PosRecord::new(glyph_index, value)` and `PosValue::with_*` setters, so callers can stop using struct literals.
 - `Font::validate()` — forces every present table parser and returns the
   first parse error (the strict all-tables check `from_bytes` used to do).
