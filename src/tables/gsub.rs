@@ -1316,6 +1316,16 @@ pub(crate) fn single_subst_lookup(sub: &[u8], gid: u16) -> Option<u16> {
     let coverage_off = read_u16(sub, 2).ok()? as usize;
     let coverage = sub.get(coverage_off..)?;
     let cov_idx = coverage_lookup(coverage, gid)?;
+    single_subst_at(sub, format, gid, cov_idx)
+}
+
+/// SingleSubst for a glyph already known to be covered, at Coverage
+/// index `cov_idx`. `sub` must be at least 6 bytes.
+pub(crate) fn single_subst_covered(sub: &[u8], gid: u16, cov_idx: u16) -> Option<u16> {
+    single_subst_at(sub, read_u16(sub, 0).ok()?, gid, cov_idx)
+}
+
+fn single_subst_at(sub: &[u8], format: u16, gid: u16, cov_idx: u16) -> Option<u16> {
     match format {
         1 => {
             // delta is signed; spec adds modulo 65536.
@@ -1361,7 +1371,25 @@ pub(crate) fn ligature_subst_lookup(sub: &[u8], glyphs: &[u16]) -> Option<(u16, 
     let coverage_off = read_u16(sub, 2).ok()? as usize;
     let coverage = sub.get(coverage_off..)?;
     let cov_idx = coverage_lookup(coverage, glyphs[0])? as usize;
+    ligature_set_match(sub, cov_idx, glyphs)
+}
 
+/// LigatureSubst for a first glyph already known to be covered, at
+/// Coverage index `cov_idx`. `sub` must be at least 6 bytes and
+/// `glyphs` non-empty.
+pub(crate) fn ligature_subst_covered(
+    sub: &[u8],
+    cov_idx: u16,
+    glyphs: &[u16],
+) -> Option<(u16, usize)> {
+    if read_u16(sub, 0).ok()? != 1 {
+        return None;
+    }
+    ligature_set_match(sub, cov_idx as usize, glyphs)
+}
+
+/// Match `glyphs` against the LigatureSet at index `cov_idx`.
+fn ligature_set_match(sub: &[u8], cov_idx: usize, glyphs: &[u16]) -> Option<(u16, usize)> {
     let lig_set_count = read_u16(sub, 4).ok()? as usize;
     if cov_idx >= lig_set_count {
         return None;
@@ -1474,6 +1502,25 @@ pub(crate) fn alternate_subst_lookup(sub: &[u8], gid: u16, alternate_index: u16)
     let coverage_off = read_u16(sub, 2).ok()? as usize;
     let coverage = sub.get(coverage_off..)?;
     let cov_idx = coverage_lookup(coverage, gid)? as usize;
+    alternate_set_pick(sub, cov_idx, alternate_index)
+}
+
+/// AlternateSubst for a glyph already known to be covered, at Coverage
+/// index `cov_idx`. `sub` must be at least 6 bytes.
+pub(crate) fn alternate_subst_covered(
+    sub: &[u8],
+    cov_idx: u16,
+    alternate_index: u16,
+) -> Option<u16> {
+    if read_u16(sub, 0).ok()? != 1 {
+        return None;
+    }
+    alternate_set_pick(sub, cov_idx as usize, alternate_index)
+}
+
+/// Pick alternate `alternate_index` from the AlternateSet at index
+/// `cov_idx`.
+fn alternate_set_pick(sub: &[u8], cov_idx: usize, alternate_index: u16) -> Option<u16> {
     let alt_count = read_u16(sub, 4).ok()? as usize;
     if cov_idx >= alt_count {
         return None;

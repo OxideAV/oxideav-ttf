@@ -216,6 +216,11 @@ pub(crate) struct SubAccel {
     /// accepts for glyph ids below the font's glyph count (a well-formed
     /// Coverage table), not merely a superset of it.
     pub(crate) first_is_exact: bool,
+    /// GSUB Single / Alternate / Ligature substitution with a
+    /// well-formed Coverage table: Coverage index plus one per glyph (0:
+    /// not covered) — the index of the glyph's substitute, AlternateSet
+    /// or LigatureSet.
+    pub(crate) coverage_index: Option<Box<[u16]>>,
     /// PairPos only: the flattened glyph → value-record addressing.
     pub(crate) pair: PairAccel,
 }
@@ -386,6 +391,9 @@ impl LookupAccel {
             BadExtension::Skip
         };
         let is_ligature = table == LayoutTable::Gsub && kind == 4;
+        // Sub-table formats whose matcher is "Coverage index of the
+        // current glyph, then index an array with it".
+        let wants_coverage_index = table == LayoutTable::Gsub && matches!(kind, 1 | 3 | 4);
         let is_pair = table == LayoutTable::Gpos && kind == 2;
 
         let mut first = GlyphSet::with_capacity(num_glyphs);
@@ -429,11 +437,16 @@ impl LookupAccel {
             }
             let mut sub_first = GlyphSet::with_capacity(num_glyphs);
             let mut first_is_exact = false;
+            let mut coverage_index = None;
             match first_coverage(layout, sub) {
                 FirstCoverage::At(cov) => {
                     sub_first.insert_coverage(cov);
                     first_is_exact = coverage_is_well_formed(cov);
                     first.insert_coverage(cov);
+                    // The matchers want a 6-byte sub-table header.
+                    if wants_coverage_index && sub.len() >= 6 {
+                        coverage_index = flatten_coverage(cov, num_glyphs);
+                    }
                 }
                 FirstCoverage::None => {}
                 FirstCoverage::Unknown => {
@@ -463,6 +476,7 @@ impl LookupAccel {
                 offset: lookup_start + (lookup.len() - sub.len()),
                 first: sub_first,
                 first_is_exact,
+                coverage_index,
                 pair: match is_pair {
                     true => PairClasses::build(sub, num_glyphs)
                         .map(PairAccel::Classes)

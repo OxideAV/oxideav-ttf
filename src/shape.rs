@@ -251,12 +251,44 @@ impl<'f> Resolved<'f> {
             .map(move |s| table.get(s.offset..).unwrap_or(&[]))
     }
 
+    /// Run `matcher` on each sub-table (in walker order) whose
+    /// first-glyph Coverage may list `gid`, until one answers. The
+    /// matcher gets the sub-table bytes and, where the sub-table's
+    /// Coverage table is flattened, the Coverage index of `gid`
+    /// (`Some`: `gid` is covered at that index; `None`: not flattened —
+    /// search the Coverage table). A sub-table whose flattened Coverage
+    /// does not list `gid` is passed over.
+    #[inline]
+    fn first_hit<T>(
+        &self,
+        accel: &'f LookupAccel,
+        gid: u16,
+        mut matcher: impl FnMut(&'f [u8], Option<u16>) -> Option<T>,
+    ) -> Option<T> {
+        for sub in accel.subs.iter().filter(|s| s.first.contains(gid)) {
+            let bytes = self.table.get(sub.offset..).unwrap_or(&[]);
+            let covered = match sub.coverage_index.as_deref().map(|ci| ci.get(gid as usize)) {
+                // Flattened and not covered.
+                Some(Some(0)) => continue,
+                Some(Some(&index)) => Some(index - 1),
+                // Not flattened, or a glyph id beyond the flattened range.
+                Some(None) | None => None,
+            };
+            if let Some(hit) = matcher(bytes, covered) {
+                return Some(hit);
+            }
+        }
+        None
+    }
+
     // ---- GSUB: first matching sub-table wins -------------------------
 
     fn single(&self, gsub: &GsubTable<'_>, gid: u16) -> Option<u16> {
         match self.accel {
-            Some(a) => Self::subtables_for(a, self.table, gid)
-                .find_map(|sub| gsub::single_subst_lookup(sub, gid)),
+            Some(a) => self.first_hit(a, gid, |sub, covered| match covered {
+                Some(index) => gsub::single_subst_covered(sub, gid, index),
+                None => gsub::single_subst_lookup(sub, gid),
+            }),
             None => gsub.apply_lookup_type_1(self.index, gid),
         }
     }
@@ -271,8 +303,10 @@ impl<'f> Resolved<'f> {
 
     fn alternate(&self, gsub: &GsubTable<'_>, gid: u16) -> Option<u16> {
         match self.accel {
-            Some(a) => Self::subtables_for(a, self.table, gid)
-                .find_map(|sub| gsub::alternate_subst_lookup(sub, gid, 0)),
+            Some(a) => self.first_hit(a, gid, |sub, covered| match covered {
+                Some(index) => gsub::alternate_subst_covered(sub, index, 0),
+                None => gsub::alternate_subst_lookup(sub, gid, 0),
+            }),
             None => gsub.apply_lookup_type_3(self.index, gid, 0),
         }
     }
@@ -280,8 +314,10 @@ impl<'f> Resolved<'f> {
     /// `glyphs` must be non-empty.
     fn ligature(&self, gsub: &GsubTable<'_>, glyphs: &[u16]) -> Option<(u16, usize)> {
         match self.accel {
-            Some(a) => Self::subtables_for(a, self.table, glyphs[0])
-                .find_map(|sub| gsub::ligature_subst_lookup(sub, glyphs)),
+            Some(a) => self.first_hit(a, glyphs[0], |sub, covered| match covered {
+                Some(index) => gsub::ligature_subst_covered(sub, index, glyphs),
+                None => gsub::ligature_subst_lookup(sub, glyphs),
+            }),
             None => gsub.apply_lookup_type_4(self.index, glyphs),
         }
     }
