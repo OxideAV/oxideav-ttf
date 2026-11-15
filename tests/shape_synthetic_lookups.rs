@@ -28,7 +28,7 @@ fn replace_table(font: &[u8], tag: [u8; 4], body: &[u8]) -> Vec<u8> {
         .find(|&rec| font[rec..rec + 4] == tag)
         .expect("table present");
     // Keep the appended body 4-byte aligned.
-    while out.len() % 4 != 0 {
+    while !out.len().is_multiple_of(4) {
         out.push(0);
     }
     let at = out.len() as u32;
