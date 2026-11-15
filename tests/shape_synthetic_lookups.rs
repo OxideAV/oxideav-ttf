@@ -7,8 +7,9 @@
 //!
 //! The DejaVu Sans fixture supplies the glyphs, `cmap`, `hmtx` and
 //! `GDEF`; its `GSUB` and `GPOS` are swapped for tables built here byte
-//! by byte from the GSUB / GPOS chapters of the staged OpenType
-//! specification. Each scenario checks (a) that the lookups fire with
+//! by byte, following the sub-table layouts documented alongside this
+//! crate's own GSUB / GPOS parsers (`src/tables/gsub.rs`,
+//! `src/tables/gpos.rs`). Each scenario checks (a) that the lookups fire with
 //! the expected effect and (b) that shaping with the lookup
 //! accelerators on gives exactly what the plain table walk gives, over
 //! a few thousand generated strings.
