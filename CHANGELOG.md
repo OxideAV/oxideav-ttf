@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/OxideAV/oxideav-ttf/compare/v0.1.8...v0.2.0) - 2026-11-15
+
+### Other
+
+- collections with CFF / CFF2 members; CFF fixture in the hostile harness
+- state where the synthetic lookup table layouts come from
+- bench + docs: per-glyph accessor timings, final before/after figures
+- cheaper accelerator construction
+- accelerated path vs table walk over corrupted layout tables; Coverage index overflow
+- README + CHANGELOG: shaping profile, before/after benches, memory trade-off, SharedFont
+- allocate the table only after a warm-up of 256 queries
+- use is_multiple_of in the synthetic-lookup table builder (clippy)
+- accelerator switch + table-walk differential tests
+- flattened Coverage index for single / alternate / ligature substitution
+- per-thread scratch, kerning pair memo, glyph advance memo
+- plans carry their lookups' accelerators; exact rule-out for short runs
+- rule lookups out against the run's distinct glyphs
+- memoised cmap lookups, flat Coverage for glyph-pair kerning
+- decode each name once per font instead of leaking a string per call
+- owned, Arc-backed, Send + Sync, 'static font handle
+- resolved sub-tables, flat pair classes, ligature second-glyph set, in-place contextual rewrites
+- cached shape plans, per-lookup first-glyph sets, flat GDEF classes
+- tests + bench: shaping corpus pin and shaping bench
+- bench + docs: font_construction bench, lazy-table tests, README/CHANGELOG
+- lazy optional-table parsing with OnceLock caching + Font::validate
+- API hygiene: non_exhaustive Error / Paint / StatAxisValue + derived records
+- edition 2024, MSRV 1.95
+- README examples use the current registry API
+
 ### Added
 
 - `SharedFont` — an owned, `Arc`-backed, `Clone + Send + Sync + 'static`
