@@ -329,7 +329,7 @@ pub(crate) struct LookupAccel {
 }
 
 /// log2 of the pair memo's slot count: 4096 slots, 32 KiB, allocated
-/// the first time the lookup positions a pair.
+/// once the lookup has positioned a few hundred pairs.
 const PAIR_MEMO_BITS: u32 = 12;
 
 /// How a table walker treats an Extension sub-table it cannot unwrap.

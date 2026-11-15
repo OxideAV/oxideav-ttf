@@ -749,7 +749,9 @@ impl<'a> Font<'a> {
     /// sets and flattened Coverage / ClassDef tables (a few bytes per
     /// glyph for each lookup a requested feature set actually runs —
     /// tens to a few hundred KiB for a text font with rich features), a
-    /// 32 KiB pair memo per kerning lookup, and two 8 KiB memo tables.
+    /// 32 KiB pair memo per kerning lookup, and two 8 KiB memo tables
+    /// (each memo is allocated only once it has seen a few hundred
+    /// queries).
     /// With them off, nothing is retained beyond the resolved lookup
     /// lists; every lookup walks the table bytes at every position,
     /// which is one to three orders of magnitude slower on long runs.
