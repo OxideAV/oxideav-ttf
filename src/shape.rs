@@ -417,8 +417,62 @@ impl<'f> Resolved<'f> {
     }
 }
 
-fn digest_of(gids: impl Iterator<Item = u16>) -> u64 {
-    gids.fold(0u64, |d, g| d | digest_bit(g))
+/// Runs at least this long also keep a list of their distinct glyphs.
+const DISTINCT_GLYPHS_MIN_RUN: usize = 32;
+
+/// Which glyph ids a run holds, for ruling whole lookups out. Always a
+/// superset: a glyph substituted away stays listed (that only costs a
+/// missed shortcut), a glyph written into the run is added.
+struct RunGlyphs {
+    /// OR of [`digest_bit`] over the run.
+    digest: u64,
+    /// For longer runs: each distinct glyph id once. Text repeats
+    /// glyphs heavily, so probing a lookup's first-glyph set with this
+    /// list is far cheaper than probing it at every position.
+    distinct: Option<DistinctGlyphs>,
+}
+
+struct DistinctGlyphs {
+    /// Membership bitmap over the whole glyph id space.
+    seen: Vec<u64>,
+    list: Vec<u16>,
+}
+
+impl RunGlyphs {
+    fn of(buf: &[WorkGlyph]) -> Self {
+        let mut run = RunGlyphs {
+            digest: 0,
+            distinct: (buf.len() >= DISTINCT_GLYPHS_MIN_RUN).then(|| DistinctGlyphs {
+                seen: vec![0u64; 1 << 10],
+                list: Vec::with_capacity(64),
+            }),
+        };
+        for w in buf {
+            run.add(w.gid);
+        }
+        run
+    }
+
+    #[inline]
+    fn add(&mut self, gid: u16) {
+        self.digest |= digest_bit(gid);
+        if let Some(distinct) = &mut self.distinct {
+            let (word, bit) = ((gid >> 6) as usize, 1u64 << (gid & 63));
+            if distinct.seen[word] & bit == 0 {
+                distinct.seen[word] |= bit;
+                distinct.list.push(gid);
+            }
+        }
+    }
+
+    /// `true` when `lookup` provably cannot act anywhere in the run.
+    fn rules_out(&self, lookup: &Resolved<'_>) -> bool {
+        lookup.rules_out(self.digest)
+            || self
+                .distinct
+                .as_ref()
+                .is_some_and(|d| !d.list.iter().any(|&g| lookup.may_start(g)))
+    }
 }
 
 impl<'a> Font<'a> {
@@ -463,14 +517,18 @@ impl<'a> Font<'a> {
         }
 
         let plan = self.shape_plan(script, lang, features);
+        if plan.gsub.is_empty() && plan.gpos.is_empty() {
+            return self.seed_advances(&buf);
+        }
+        let mut run = RunGlyphs::of(&buf);
 
         // --- 2. GSUB substitution stage -----------------------------------
         if !plan.gsub.is_empty() {
-            self.run_gsub(&mut buf, &plan.gsub);
+            self.run_gsub(&mut buf, &plan.gsub, &mut run);
         }
 
         // --- 3. GPOS positioning stage ------------------------------------
-        self.run_gpos(buf, &plan.gpos)
+        self.run_gpos(buf, &plan.gpos, &run)
     }
 
     /// The (cached) shape plan for a request: the GSUB and GPOS lookups
@@ -593,22 +651,34 @@ impl<'a> Font<'a> {
         }
     }
 
+    /// One output glyph per buffer glyph, each with its nominal
+    /// horizontal advance from `hmtx` and no placement offset.
+    fn seed_advances(&self, buf: &[WorkGlyph]) -> Vec<ShapedGlyph> {
+        buf.iter()
+            .map(|w| ShapedGlyph {
+                glyph_id: w.gid,
+                cluster: w.cluster,
+                x_offset: 0,
+                y_offset: 0,
+                x_advance: self.glyph_advance(w.gid) as i32,
+                y_advance: 0,
+            })
+            .collect()
+    }
+
     /// Apply the planned GSUB lookups, in LookupList order, across `buf`.
-    fn run_gsub(&self, buf: &mut Vec<WorkGlyph>, lookups: &[PlanLookup]) {
+    fn run_gsub(&self, buf: &mut Vec<WorkGlyph>, lookups: &[PlanLookup], run: &mut RunGlyphs) {
         let Some(gsub) = self.gsub() else {
             return;
         };
         let location = gsub.lookup_list_location();
-        // Digest of every glyph id the buffer holds (or has held — bits
-        // are only ever added, which keeps it a superset).
-        let mut run_digest = digest_of(buf.iter().map(|w| w.gid));
         let mut scratch = GsubScratch::default();
         for lookup in lookups {
             let resolved = self.resolve(LayoutTable::Gsub, location, lookup);
-            if resolved.rules_out(run_digest) {
+            if run.rules_out(&resolved) {
                 continue;
             }
-            self.apply_gsub_lookup(gsub, buf, lookup, resolved, &mut run_digest, &mut scratch);
+            self.apply_gsub_lookup(gsub, buf, lookup, resolved, run, &mut scratch);
         }
     }
 
@@ -620,14 +690,14 @@ impl<'a> Font<'a> {
     ///
     /// `resolved` prunes positions whose glyph the lookup's first-glyph
     /// Coverage tables do not list; the match code would reject those
-    /// anyway. `run_digest` gains the digest bit of every glyph written.
+    /// anyway. `run` learns every glyph written.
     fn apply_gsub_lookup(
         &self,
         gsub: &GsubTable<'_>,
         buf: &mut Vec<WorkGlyph>,
         lookup: &PlanLookup,
         resolved: Resolved<'_>,
-        run_digest: &mut u64,
+        run: &mut RunGlyphs,
         scratch: &mut GsubScratch,
     ) {
         match lookup.kind {
@@ -638,7 +708,7 @@ impl<'a> Font<'a> {
                         && let Some(g) = resolved.single(gsub, w.gid)
                     {
                         w.gid = g;
-                        *run_digest |= digest_bit(g);
+                        run.add(g);
                     }
                 }
             }
@@ -676,7 +746,9 @@ impl<'a> Font<'a> {
                 }
                 if growth <= buf.len() + MAX_GSUB_BUFFER_GROWTH {
                     *buf = out;
-                    *run_digest |= digest_of(buf.iter().map(|w| w.gid));
+                    for w in buf.iter() {
+                        run.add(w.gid);
+                    }
                 }
             }
             3 => {
@@ -686,7 +758,7 @@ impl<'a> Font<'a> {
                         && let Some(g) = resolved.alternate(gsub, w.gid)
                     {
                         w.gid = g;
-                        *run_digest |= digest_bit(g);
+                        run.add(g);
                     }
                 }
             }
@@ -750,7 +822,7 @@ impl<'a> Font<'a> {
                     {
                         let cluster = buf[i].cluster;
                         buf[i] = WorkGlyph { gid: lig, cluster };
-                        *run_digest |= digest_bit(lig);
+                        run.add(lig);
                         // Remove the consumed components 1..consumed
                         // (their absolute indices), highest first so
                         // earlier removals don't shift later indices.
@@ -777,7 +849,7 @@ impl<'a> Font<'a> {
                     if resolved.may_start(gids[pos]) {
                         let mut extent = EditExtent::starting_at(pos);
                         if resolved.substitute_in_context(gsub, chained, gids, pos, &mut extent) {
-                            *run_digest |= reconcile_context_rewrite(buf, gids, pos, extent);
+                            reconcile_context_rewrite(buf, gids, pos, extent, run);
                         }
                     }
                     pos += 1;
@@ -795,7 +867,7 @@ impl<'a> Font<'a> {
                         && let Some(g) = resolved.reverse_chain(gsub, gids, pos)
                     {
                         buf[pos].gid = g;
-                        *run_digest |= digest_bit(g);
+                        run.add(g);
                     }
                 }
             }
@@ -805,19 +877,13 @@ impl<'a> Font<'a> {
 
     /// GPOS positioning stage. Seeds advances from `hmtx`, then applies
     /// the planned GPOS lookups in LookupList order.
-    fn run_gpos(&self, buf: Vec<WorkGlyph>, lookups: &[PlanLookup]) -> Vec<ShapedGlyph> {
-        // Seed every glyph with its nominal horizontal advance.
-        let mut out: Vec<ShapedGlyph> = buf
-            .iter()
-            .map(|w| ShapedGlyph {
-                glyph_id: w.gid,
-                cluster: w.cluster,
-                x_offset: 0,
-                y_offset: 0,
-                x_advance: self.glyph_advance(w.gid) as i32,
-                y_advance: 0,
-            })
-            .collect();
+    fn run_gpos(
+        &self,
+        buf: Vec<WorkGlyph>,
+        lookups: &[PlanLookup],
+        run: &RunGlyphs,
+    ) -> Vec<ShapedGlyph> {
+        let mut out = self.seed_advances(&buf);
         let Some(gpos) = self.gpos() else {
             return out;
         };
@@ -825,13 +891,12 @@ impl<'a> Font<'a> {
             return out;
         }
         let location = gpos.lookup_list_location();
-        // Positioning never changes glyph ids: one digest and one glyph
-        // id array serve every lookup.
-        let run_digest = digest_of(out.iter().map(|g| g.glyph_id));
+        // Positioning never changes glyph ids: the run summary and one
+        // glyph id array serve every lookup.
         let mut gids: Vec<u16> = Vec::new();
         for lookup in lookups {
             let resolved = self.resolve(LayoutTable::Gpos, location, lookup);
-            if resolved.rules_out(run_digest) {
+            if run.rules_out(&resolved) {
                 continue;
             }
             self.apply_gpos_lookup(gpos, &mut out, lookup, resolved, &mut gids);
@@ -1016,13 +1081,14 @@ struct GsubScratch {
 ///
 /// `extent` bounds where `new` can differ from the old run, so the
 /// comparison touches the rewritten region rather than the whole run.
-/// Returns the digest of the glyph ids written into the buffer.
+/// `run` learns the glyph ids written into the buffer.
 fn reconcile_context_rewrite(
     buf: &mut Vec<WorkGlyph>,
     new: &[u16],
     pos: usize,
     extent: EditExtent,
-) -> u64 {
+    run: &mut RunGlyphs,
+) {
     let (old_len, new_len) = (buf.len(), new.len());
     // Per `EditExtent`: new[..pos] == old[..pos] and
     // new[extent.end..] == old[old_end..].
@@ -1030,7 +1096,7 @@ fn reconcile_context_rewrite(
     debug_assert!(extent.start == pos && old_end <= old_len && extent.end <= new_len);
     if extent.delta == 0 && (pos..extent.end).all(|k| buf[k].gid == new[k]) {
         // The rule matched but left every glyph as it was.
-        return 0;
+        return;
     }
     // Longest common prefix (everything before `pos` is known equal).
     let mut pre = pos;
@@ -1052,7 +1118,9 @@ fn reconcile_context_rewrite(
         pre..old_len - suf,
         middle.iter().map(|&gid| WorkGlyph { gid, cluster }),
     );
-    digest_of(middle.iter().copied())
+    for &gid in middle {
+        run.add(gid);
+    }
 }
 
 /// Effective type of lookup `index` in a `(index, type, subtable count)`
@@ -1146,7 +1214,8 @@ mod tests {
             }
             let expected = reconcile_whole_run(&buf, &new, pos);
             let mut actual = buf.clone();
-            reconcile_context_rewrite(&mut actual, &new, pos, extent);
+            let mut run = RunGlyphs::of(&actual);
+            reconcile_context_rewrite(&mut actual, &new, pos, extent, &mut run);
             let key = |b: &[WorkGlyph]| b.iter().map(|w| (w.gid, w.cluster)).collect::<Vec<_>>();
             assert_eq!(key(&actual), key(&expected), "pos {pos}, new {new:?}");
         }
