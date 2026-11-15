@@ -202,6 +202,16 @@ struct Resolved<'f> {
 }
 
 impl<'f> Resolved<'f> {
+    /// Bind a planned lookup to the bytes of its layout table.
+    #[inline]
+    fn new(lookup: &'f PlanLookup, table: &'f [u8]) -> Self {
+        Resolved {
+            accel: lookup.accel.as_deref(),
+            table,
+            index: lookup.index,
+        }
+    }
+
     /// `false` only when the lookup provably cannot act at `gid`.
     #[inline]
     fn may_start(&self, gid: u16) -> bool {
@@ -417,8 +427,9 @@ impl<'f> Resolved<'f> {
     }
 }
 
-/// Runs at least this long also keep a list of their distinct glyphs.
-const DISTINCT_GLYPHS_MIN_RUN: usize = 32;
+/// Runs at least this long track their distinct glyphs with a bitmap;
+/// shorter ones search the (short) list itself.
+const BITMAP_MIN_RUN: usize = 32;
 
 /// Which glyph ids a run holds, for ruling whole lookups out. Always a
 /// superset: a glyph substituted away stays listed (that only costs a
@@ -426,26 +437,21 @@ const DISTINCT_GLYPHS_MIN_RUN: usize = 32;
 struct RunGlyphs {
     /// OR of [`digest_bit`] over the run.
     digest: u64,
-    /// For longer runs: each distinct glyph id once. Text repeats
-    /// glyphs heavily, so probing a lookup's first-glyph set with this
-    /// list is far cheaper than probing it at every position.
-    distinct: Option<DistinctGlyphs>,
-}
-
-struct DistinctGlyphs {
-    /// Membership bitmap over the whole glyph id space.
-    seen: Vec<u64>,
-    list: Vec<u16>,
+    /// Each distinct glyph id once. Text repeats glyphs heavily, so
+    /// probing a lookup's first-glyph set with this list is far cheaper
+    /// than probing it at every position of a long run.
+    distinct: Vec<u16>,
+    /// Long runs only: membership bitmap of `distinct` over the whole
+    /// glyph id space.
+    seen: Option<Vec<u64>>,
 }
 
 impl RunGlyphs {
     fn of(buf: &[WorkGlyph]) -> Self {
         let mut run = RunGlyphs {
             digest: 0,
-            distinct: (buf.len() >= DISTINCT_GLYPHS_MIN_RUN).then(|| DistinctGlyphs {
-                seen: vec![0u64; 1 << 10],
-                list: Vec::with_capacity(64),
-            }),
+            distinct: Vec::with_capacity(buf.len().min(64)),
+            seen: (buf.len() >= BITMAP_MIN_RUN).then(|| vec![0u64; 1 << 10]),
         };
         for w in buf {
             run.add(w.gid);
@@ -455,23 +461,29 @@ impl RunGlyphs {
 
     #[inline]
     fn add(&mut self, gid: u16) {
-        self.digest |= digest_bit(gid);
-        if let Some(distinct) = &mut self.distinct {
-            let (word, bit) = ((gid >> 6) as usize, 1u64 << (gid & 63));
-            if distinct.seen[word] & bit == 0 {
-                distinct.seen[word] |= bit;
-                distinct.list.push(gid);
+        let bit = digest_bit(gid);
+        match &mut self.seen {
+            Some(seen) => {
+                let word = &mut seen[(gid >> 6) as usize];
+                if *word & bit == 0 {
+                    *word |= bit;
+                    self.distinct.push(gid);
+                }
+            }
+            // The digest rules most glyphs in without a search.
+            None => {
+                if self.digest & bit == 0 || !self.distinct.contains(&gid) {
+                    self.distinct.push(gid);
+                }
             }
         }
+        self.digest |= bit;
     }
 
     /// `true` when `lookup` provably cannot act anywhere in the run.
+    #[inline]
     fn rules_out(&self, lookup: &Resolved<'_>) -> bool {
-        lookup.rules_out(self.digest)
-            || self
-                .distinct
-                .as_ref()
-                .is_some_and(|d| !d.list.iter().any(|&g| lookup.may_start(g)))
+        lookup.rules_out(self.digest) || !self.distinct.iter().any(|&g| lookup.may_start(g))
     }
 }
 
@@ -572,14 +584,16 @@ impl<'a> Font<'a> {
         let types: Vec<(u16, u16, u16)> = gsub.lookup_list().collect();
         active
             .into_iter()
-            .map(|li| PlanLookup {
+            .map(|li| (li, lookup_kind(&types, li)))
+            // Drop types the substitution stage has no apply path for.
+            .filter(|&(_, kind)| matches!(kind, 1..=6 | 8))
+            .map(|(li, kind)| PlanLookup {
                 index: li,
-                kind: lookup_kind(&types, li),
+                kind,
                 flags: gsub.lookup_flags(li),
                 mark_filtering_set: gsub.mark_filtering_set(li),
+                accel: self.lookup_accel(LayoutTable::Gsub, gsub.lookup_list_location(), li, kind),
             })
-            // Types the substitution stage has no apply path for.
-            .filter(|l| matches!(l.kind, 1..=6 | 8))
             .collect()
     }
 
@@ -605,13 +619,15 @@ impl<'a> Font<'a> {
         let types: Vec<(u16, u16, u16)> = gpos.lookup_list().collect();
         active
             .into_iter()
-            .map(|li| PlanLookup {
+            .map(|li| (li, lookup_kind(&types, li)))
+            .filter(|&(_, kind)| matches!(kind, 1..=8))
+            .map(|(li, kind)| PlanLookup {
                 index: li,
-                kind: lookup_kind(&types, li),
+                kind,
                 flags: gpos.lookup_flags(li),
                 mark_filtering_set: gpos.mark_filtering_set(li),
+                accel: self.lookup_accel(LayoutTable::Gpos, gpos.lookup_list_location(), li, kind),
             })
-            .filter(|l| matches!(l.kind, 1..=8))
             .collect()
     }
 
@@ -630,25 +646,23 @@ impl<'a> Font<'a> {
         })
     }
 
-    fn resolve<'f>(
-        &'f self,
+    /// The (shared, built-once) accelerator of one lookup.
+    fn lookup_accel(
+        &self,
         table: LayoutTable,
-        location: (&'f [u8], u32),
-        lookup: &PlanLookup,
-    ) -> Resolved<'f> {
+        location: (&[u8], u32),
+        index: u16,
+        kind: u16,
+    ) -> Option<Arc<LookupAccel>> {
         let (bytes, lookup_list_off) = location;
-        Resolved {
-            accel: self.layout.lookup_accel(
-                table,
-                bytes,
-                lookup_list_off,
-                lookup.index,
-                lookup.kind,
-                self.maxp.num_glyphs as usize,
-            ),
-            table: bytes,
-            index: lookup.index,
-        }
+        self.layout.lookup_accel(
+            table,
+            bytes,
+            lookup_list_off,
+            index,
+            kind,
+            self.maxp.num_glyphs as usize,
+        )
     }
 
     /// One output glyph per buffer glyph, each with its nominal
@@ -671,10 +685,10 @@ impl<'a> Font<'a> {
         let Some(gsub) = self.gsub() else {
             return;
         };
-        let location = gsub.lookup_list_location();
+        let (table, _) = gsub.lookup_list_location();
         let mut scratch = GsubScratch::default();
         for lookup in lookups {
-            let resolved = self.resolve(LayoutTable::Gsub, location, lookup);
+            let resolved = Resolved::new(lookup, table);
             if run.rules_out(&resolved) {
                 continue;
             }
@@ -890,12 +904,12 @@ impl<'a> Font<'a> {
         if lookups.is_empty() {
             return out;
         }
-        let location = gpos.lookup_list_location();
+        let (table, _) = gpos.lookup_list_location();
         // Positioning never changes glyph ids: the run summary and one
         // glyph id array serve every lookup.
         let mut gids: Vec<u16> = Vec::new();
         for lookup in lookups {
-            let resolved = self.resolve(LayoutTable::Gpos, location, lookup);
+            let resolved = Resolved::new(lookup, table);
             if run.rules_out(&resolved) {
                 continue;
             }

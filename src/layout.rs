@@ -599,10 +599,14 @@ fn coverage_is_well_formed(cov: &[u8]) -> bool {
     }
 }
 
+/// One lookup's accelerator, built on first request (`None` inside:
+/// the lookup's type has no accelerated path).
+type AccelSlot = OnceLock<Option<Arc<LookupAccel>>>;
+
 /// Lazily built accelerators for every lookup of one layout table.
 #[derive(Debug, Default)]
 struct TableAccels {
-    slots: OnceLock<Box<[OnceLock<Option<LookupAccel>>]>>,
+    slots: OnceLock<Box<[AccelSlot]>>,
 }
 
 impl TableAccels {
@@ -614,7 +618,7 @@ impl TableAccels {
         lookup_index: u16,
         kind: u16,
         num_glyphs: usize,
-    ) -> Option<&LookupAccel> {
+    ) -> Option<Arc<LookupAccel>> {
         let slots = self.slots.get_or_init(|| {
             let count = bytes
                 .get(lookup_list_off as usize..)
@@ -632,19 +636,23 @@ impl TableAccels {
                 kind,
                 num_glyphs,
             )
+            .map(Arc::new)
         })
-        .as_ref()
+        .clone()
     }
 }
 
 /// One lookup of a shape plan.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) struct PlanLookup {
     pub(crate) index: u16,
     /// Effective lookup type (Extension wrappers unwrapped).
     pub(crate) kind: u16,
     pub(crate) flags: u16,
     pub(crate) mark_filtering_set: Option<u16>,
+    /// The lookup's accelerator (shared with every other plan that runs
+    /// the lookup). `None`: go through the table walker.
+    pub(crate) accel: Option<Arc<LookupAccel>>,
 }
 
 /// The lookups one shaping request runs, in application order.
@@ -686,7 +694,7 @@ impl LayoutCache {
         lookup_index: u16,
         kind: u16,
         num_glyphs: usize,
-    ) -> Option<&LookupAccel> {
+    ) -> Option<Arc<LookupAccel>> {
         let accels = match table {
             LayoutTable::Gsub => &self.gsub,
             LayoutTable::Gpos => &self.gpos,
