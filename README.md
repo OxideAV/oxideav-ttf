@@ -1326,23 +1326,33 @@ that is parsed once and reused, so caches are warm:
 
 | Scenario | Run, before | Run, after | | Words, before | Words, after | |
 |---|---|---|---|---|---|---|
-| `latin_paragraph/inter` (669 chars) | 16289 | 13.2 | 1231× | 1078 | 16.9 | 64× |
-| `latin_paragraph/dejavu` (669 chars) | 2476 | 8.0 | 311× | 291 | 12.7 | 23× |
-| `latin_rich/inter` (669 chars, 22 features) | 23710 | 21.8 | 1089× | 1471 | 33.2 | 44× |
-| `liga_kern_heavy/inter` (361 chars) | 5749 | 17.2 | 334× | 583 | 15.1 | 39× |
-| `liga_kern_heavy/dejavu` (361 chars) | 885 | 5.3 | 166× | 173 | 7.7 | 23× |
-| `latin_combining/dejavu` (47 chars) | 44 | 2.5 | 17× | 25 | 2.9 | 8× |
-| `arabic_paragraph/noto` (198 chars) | 542 | 4.7 | 116× | 117 | 5.9 | 20× |
-| `arabic_paragraph/dejavu` (198 chars) | 1250 | 6.7 | 187× | 184 | 8.2 | 22× |
+| `latin_paragraph/inter` (669 chars) | 17244 | 14.7 | 1174× | 1187 | 18.6 | 64× |
+| `latin_paragraph/dejavu` (669 chars) | 2821 | 9.0 | 314× | 319 | 14.0 | 23× |
+| `latin_rich/inter` (669 chars, 22 features) | 26509 | 23.9 | 1107× | 1561 | 36.2 | 43× |
+| `liga_kern_heavy/inter` (361 chars) | 6071 | 17.5 | 348× | 611 | 15.1 | 40× |
+| `liga_kern_heavy/dejavu` (361 chars) | 890 | 5.8 | 155× | 168 | 8.5 | 20× |
+| `latin_combining/dejavu` (47 chars) | 42 | 3.0 | 14× | 25 | 3.3 | 7× |
+| `arabic_paragraph/noto` (198 chars) | 571 | 5.2 | 110× | 125 | 6.4 | 19× |
+| `arabic_paragraph/dejavu` (198 chars) | 1441 | 7.3 | 196× | 210 | 8.8 | 24× |
 
 A font's *first* shaping call builds what it needs (parse + shape on a fresh
 `Font` per iteration):
 
 | Scenario | Before | After | |
 |---|---|---|---|
-| `cold_words/inter` (13 chars) | 28.0 | 28.0 | 1.0× |
-| `cold_paragraph/inter` (669 chars) | 17317 | 49.6 | 349× |
-| `cold_paragraph/noto` (198 chars) | 540 | 16.7 | 32× |
+| `cold_words/inter` (13 chars) | 31.6 | 24.2 | 1.3× |
+| `cold_paragraph/inter` (669 chars) | 19272 | 47.7 | 404× |
+| `cold_paragraph/noto` (198 chars) | 605 | 15.5 | 39× |
+
+Per-glyph accessors on a reused font (669 calls each, the characters / glyphs
+of the Latin paragraph): `Font::glyph_index` goes through the character memo,
+`Font::glyph_advance` through the advance memo instead of re-reading `loca`
+and the `glyf` header (the `USE_MY_METRICS` chase) per call:
+
+| Scenario | 669 × `glyph_index`, before | after | | 669 × `glyph_advance`, before | after | |
+|---|---|---|---|---|---|---|
+| `glyph_access/inter` | 8.71 | 0.80 | 10.9× | 3.63 | 1.17 | 3.1× |
+| `glyph_access/dejavu` | 6.08 | 0.78 | 7.8× | 3.63 | 1.17 | 3.1× |
 
 **Memory.** The derived data is built only for lookups a requested feature
 set actually runs: a glyph-set bitmap per sub-table (one bit per glyph), a

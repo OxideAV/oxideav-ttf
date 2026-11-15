@@ -54,13 +54,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the run in place; lock-free memo tables for `cmap` lookups, glyph advances
   and kerning pairs; per-thread scratch instead of per-call allocation.
   Median `cargo bench --bench shaping` figures, before → after: Latin
-  paragraph on InterVariable 16289 → 13.2 µs as one run (1231×) and
-  1078 → 16.9 µs word by word (64×); vocalised Arabic on NotoSansArabic
-  542 → 4.7 µs (116×) and 117 → 5.9 µs (20×); slowest case (47-char
-  combining-mark run on DejaVu, word by word) 25 → 2.9 µs (8×). The first
-  shaping call on a fresh font: 13 chars 28.0 → 28.0 µs, a 669-char
-  paragraph 17317 → 49.6 µs.
-- `Font::glyph_index` and `Font::glyph_advance` are memoised per font.
+  paragraph on InterVariable 17244 → 14.7 µs as one run (1174×) and
+  1187 → 18.6 µs word by word (64×); vocalised Arabic on NotoSansArabic
+  571 → 5.2 µs (110×) and 125 → 6.4 µs (19×); slowest case (47-char
+  combining-mark run on DejaVu, word by word) 25 → 3.3 µs (7×). The first
+  shaping call on a fresh font: 13 chars 31.6 → 24.2 µs, a 669-char
+  paragraph 19272 → 47.7 µs.
+- `Font::glyph_index` and `Font::glyph_advance` are memoised per font
+  (669 calls on a reused InterVariable: 8.71 → 0.80 µs and 3.63 → 1.17 µs).
 - The crate is `#![deny(unsafe_code)]`, with one audited exception
   (`SharedFont`'s two lifetime re-bindings in `src/shared.rs`).
 

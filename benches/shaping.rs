@@ -143,6 +143,31 @@ fn main() {
         ARAB_DEFAULT,
     );
 
+    // Per-glyph accessors on a reused font: map every character of the
+    // Latin paragraph, then fetch every glyph's advance.
+    for (label, font) in [("inter", &inter), ("dejavu", &dejavu)] {
+        let gids: Vec<u16> = LATIN_PARAGRAPH
+            .chars()
+            .map(|c| font.glyph_index(c).unwrap_or(0))
+            .collect();
+        let (map_median, map_fastest) = measure(|| {
+            for c in LATIN_PARAGRAPH.chars() {
+                black_box(font.glyph_index(black_box(c)));
+            }
+        });
+        let (adv_median, adv_fastest) = measure(|| {
+            for &g in &gids {
+                black_box(font.glyph_advance(black_box(g)));
+            }
+        });
+        println!(
+            "{:<24} {} x glyph_index {map_median:>7.2} us ({map_fastest:>7.2})   {} x glyph_advance {adv_median:>7.2} us ({adv_fastest:>7.2})",
+            format!("glyph_access/{label}"),
+            gids.len(),
+            gids.len()
+        );
+    }
+
     // One-shot use: parse a fresh `Font` and shape once, so everything
     // the font builds lazily is built inside the measurement.
     let one_shot =
