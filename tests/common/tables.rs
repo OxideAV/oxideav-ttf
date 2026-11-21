@@ -30,6 +30,54 @@ pub fn replace_table(font: &[u8], tag: [u8; 4], body: &[u8]) -> Vec<u8> {
     out
 }
 
+/// Rebuild an sfnt with one more table, `tag` (not already present).
+/// The table directory is rewritten in tag order and every table body
+/// re-laid out, 4-byte aligned; checksums are left as they were.
+pub fn add_table(font: &[u8], tag: [u8; 4], body: &[u8]) -> Vec<u8> {
+    let num_tables = u16::from_be_bytes([font[4], font[5]]) as usize;
+    let mut tables: Vec<([u8; 4], Vec<u8>)> = (0..num_tables)
+        .map(|i| {
+            let rec = 12 + i * 16;
+            let word =
+                |at: usize| u32::from_be_bytes(font[at..at + 4].try_into().unwrap()) as usize;
+            let (offset, length) = (word(rec + 8), word(rec + 12));
+            (
+                font[rec..rec + 4].try_into().unwrap(),
+                font[offset..offset + length].to_vec(),
+            )
+        })
+        .collect();
+    assert!(tables.iter().all(|t| t.0 != tag), "table already present");
+    tables.push((tag, body.to_vec()));
+    tables.sort_by_key(|t| t.0);
+
+    let mut out = font[..4].to_vec();
+    out.extend((tables.len() as u16).to_be_bytes());
+    // searchRange, entrySelector, rangeShift.
+    let entry_selector = (tables.len() as u16).ilog2() as u16;
+    let search_range = (1u16 << entry_selector) * 16;
+    out.extend(words(&[
+        search_range,
+        entry_selector,
+        tables.len() as u16 * 16 - search_range,
+    ]));
+    let mut offset = 12 + tables.len() * 16;
+    let mut bodies: Vec<u8> = Vec::new();
+    for (table_tag, table) in &tables {
+        out.extend(table_tag);
+        out.extend([0u8; 4]);
+        out.extend((offset as u32).to_be_bytes());
+        out.extend((table.len() as u32).to_be_bytes());
+        bodies.extend_from_slice(table);
+        while !bodies.len().is_multiple_of(4) {
+            bodies.push(0);
+        }
+        offset = 12 + tables.len() * 16 + bodies.len();
+    }
+    out.extend(bodies);
+    out
+}
+
 pub fn words(values: &[u16]) -> Vec<u8> {
     values.iter().flat_map(|v| v.to_be_bytes()).collect()
 }

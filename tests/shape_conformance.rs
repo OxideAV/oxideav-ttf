@@ -540,18 +540,30 @@ fn class_pair_adjustment_with_both_records_and_ignored_marks() {
 
 // ---- variations ---------------------------------------------------------
 
+/// One variation region over the axes of `font`: the `wght` axis from
+/// its default to its maximum; no other axis takes part.
+fn weight_region(font: &Font<'_>) -> Vec<(f32, f32, f32)> {
+    let mut region = vec![(0.0, 0.0, 0.0); font.variation_axes().len()];
+    region[font.axis_index(b"wght").unwrap()] = (0.0, 1.0, 1.0);
+    region
+}
+
+/// The scalar of [`weight_region`] at the font's current instance: the
+/// normalised `wght` coordinate, or nothing below the default.
+fn weight_scalar(font: &Font<'_>) -> f32 {
+    font.normalised_coords()[font.axis_index(b"wght").unwrap()].max(0.0)
+}
+
 /// The Inter variable fixture with synthetic GPOS + GDEF: every value
 /// below has a VariationIndex table into the GDEF ItemVariationStore.
 fn varied_font() -> (Vec<u8>, [u16; 4]) {
     let host = Font::from_bytes(INTER).unwrap();
     let gi = |c: char| host.glyph_index(c).unwrap();
     let (a, v, o, x) = (gi('A'), gi('V'), gi('o'), gi('x'));
-    // One region: the first axis (wght) from its default to its
-    // maximum; the second axis does not take part.
-    let axis_count = host.variation_axes().len();
-    let mut region = vec![(0.0, 1.0, 1.0)];
-    region.resize(axis_count, (0.0, 0.0, 0.0));
-    let store = item_variation_store(&[region], &[vec![40], vec![-30], vec![100], vec![-80]]);
+    let store = item_variation_store(
+        &[weight_region(&host)],
+        &[vec![40], vec![-30], vec![100], vec![-80]],
+    );
     let mark_base = mark_base_pos(
         &[(x, 0, at(0, 0))],
         &[(
@@ -595,9 +607,8 @@ fn positioning_values_and_advances_follow_the_variation_instance() {
 
         for weight in [900.0, 650.0, 100.0] {
             assert!(font.set_axis_value(b"wght", weight));
-            // The region's scalar: the normalised wght coordinate, or
-            // nothing below the default.
-            let scalar = font.normalised_coords()[0].max(0.0);
+            let scalar = weight_scalar(&font);
+            assert_eq!(scalar > 0.0, weight > 400.0, "wght {weight}");
             let delta = |d: f32| (d * scalar).round() as i32;
             let shaped = shape(&font, "AVox");
             // hmtx + HVAR, then SinglePos (10 + 40·s), then the pair
@@ -626,6 +637,81 @@ fn positioning_values_and_advances_follow_the_variation_instance() {
         // The heavy instance really is wider than the default.
         assert!(font.set_axis_value(b"wght", 900.0));
         assert!(font.glyph_advance_varied(a) as i32 > default_advance);
+    }
+}
+
+/// A top-to-bottom run: advance heights from `vmtx`, varied by `VVAR`,
+/// pointing down; a ValueRecord `yAdvance` lengthens them and
+/// `xAdvance` does nothing.
+#[test]
+fn vertical_runs_take_vmtx_and_vvar_advances() {
+    let host = Font::from_bytes(INTER).unwrap();
+    let (a, v) = (
+        host.glyph_index('A').unwrap(),
+        host.glyph_index('V').unwrap(),
+    );
+    let num_glyphs = host.glyph_count();
+    // vhea 1.0 with one long metric; vmtx: every glyph 1800 high.
+    let mut vhea = vec![0, 1, 0, 0];
+    vhea.extend(words(&[
+        900,
+        (-900i16) as u16,
+        0,
+        1800,
+        0,
+        0,
+        1800,
+        0,
+        1,
+        0,
+    ]));
+    vhea.extend(words(&[0, 0, 0, 0, 0, 1]));
+    let mut vmtx = words(&[1800, 0]);
+    vmtx.extend(std::iter::repeat_n(0u8, (num_glyphs as usize - 1) * 2));
+    // VVAR, implicit glyph → delta-set mapping: +60 at full weight for
+    // every glyph up to V.
+    let items = a.max(v) as usize + 1;
+    let store = item_variation_store(&[weight_region(&host)], &vec![vec![60]; items]);
+    let mut vvar = words(&[1, 0, 0, 24, 0, 0, 0, 0, 0, 0, 0, 0]);
+    vvar.extend(store);
+    let gpos = all_lookups(&[Lookup::new(
+        1,
+        vec![single_pos(&[v], X_ADVANCE | Y_ADVANCE, &[500, 70])],
+    )]);
+    let font = replace_table(INTER, *b"GPOS", &gpos);
+    let font = replace_table(&font, *b"GSUB", &no_lookups());
+    let font = add_table(&font, *b"vhea", &vhea);
+    let font = add_table(&font, *b"vmtx", &vmtx);
+    let bytes = add_table(&font, *b"VVAR", &vvar);
+
+    let options = ShapeOptions::new(*b"DFLT")
+        .with_direction(Direction::TopToBottom)
+        .with_feature(TEST);
+    for accelerated in [true, false] {
+        let mut font = Font::from_bytes(&bytes).unwrap();
+        font.set_shaping_accelerators(accelerated);
+        assert_eq!(font.glyph_advance_height(a), Some(1800));
+        let shaped = font.shape_text("AV", &options);
+        assert_eq!((shaped[0].x_advance, shaped[0].y_advance), (0, -1800));
+        // yAdvance 70 lengthens the downward advance; xAdvance is "only
+        // used for horizontal layout".
+        assert_eq!((shaped[1].x_advance, shaped[1].y_advance), (0, -1870));
+        assert_eq!(origins(&shaped)[1], (0, -1800));
+
+        assert!(font.set_axis_value(b"wght", 900.0));
+        let height = font.glyph_advance_height_varied(a).unwrap() as i32;
+        assert_eq!(height, 1800 + 60);
+        let shaped = font.shape_text("AV", &options);
+        assert_eq!(shaped[0].y_advance, -height);
+        assert_eq!(shaped[1].y_advance, -height - 70);
+        // The same glyphs laid out horizontally are untouched by VVAR.
+        let horizontal = font.shape("AV", *b"DFLT", None, &[TEST]);
+        assert_eq!(horizontal[0].x_advance, font.glyph_advance_varied(a) as i32);
+        assert_eq!(
+            horizontal[1].x_advance,
+            font.glyph_advance_varied(v) as i32 + 500
+        );
+        assert_eq!(horizontal[1].y_advance, 0);
     }
 }
 
