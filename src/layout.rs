@@ -15,8 +15,8 @@
 //! * **Lookup accelerators** — per lookup, its sub-tables resolved once
 //!   (Extension wrappers unwrapped, in the order the table walkers visit
 //!   them), each with the set of glyphs in its *first-glyph* Coverage
-//!   table ([`GlyphSet`]), plus the union of those sets and a 64-bit
-//!   digest of it. A lookup can only act at a position whose glyph is in
+//!   table ([`GlyphSet`]), plus the union of those sets and a
+//!   [`Digest`] of it. A lookup can only act at a position whose glyph is in
 //!   that set (every sub-table format of every lookup type starts its
 //!   match with a Coverage test on the current glyph — ISO/IEC 14496-22
 //!   §6.2 / GSUB / GPOS chapters), so a miss in the union skips the
@@ -296,9 +296,9 @@ pub(crate) struct SubAccel {
     /// not covered) — the index of the glyph's substitute, AlternateSet
     /// or LigatureSet.
     pub(crate) coverage_index: Option<CoverageIndex>,
-    /// GPOS mark attachment (LookupTypes 4 – 6) with a well-formed
-    /// second Coverage table (base, ligature or mark2 Coverage): its
-    /// flattened index.
+    /// GPOS mark attachment (LookupTypes 4 – 6) with a well-formed,
+    /// dense second Coverage table (base, ligature or mark2 Coverage):
+    /// its flattened index.
     pub(crate) second_index: Option<CoverageIndex>,
     /// PairPos only: the flattened glyph → value-record addressing.
     pub(crate) pair: PairAccel,
@@ -505,7 +505,10 @@ impl LookupAccel {
                         first.union_with(&sub_first);
                         // The matchers want a 6-byte sub-table header.
                         if wants_coverage_index && sub.len() >= 6 {
-                            coverage_index = flatten_coverage(cov, num_glyphs);
+                            coverage_index = match is_mark_attach {
+                                true => flatten_dense_coverage(cov, num_glyphs),
+                                false => flatten_coverage(cov, num_glyphs),
+                            };
                         }
                     }
                     FirstCoverage::None => {}
@@ -549,7 +552,7 @@ impl LookupAccel {
                     true => read_u16(sub, 4)
                         .ok()
                         .and_then(|off| sub.get(off as usize..))
-                        .and_then(|cov| flatten_coverage(cov, num_glyphs)),
+                        .and_then(|cov| flatten_dense_coverage(cov, num_glyphs)),
                     false => None,
                 },
                 pair: match is_pair && filters {
@@ -1220,6 +1223,44 @@ impl CoverageIndex {
 /// [well-formed](coverage_is_well_formed) (a binary search over it would
 /// not be a plain membership test) or an index does not fit.
 fn flatten_coverage(cov: &[u8], num_glyphs: usize) -> Option<CoverageIndex> {
+    flatten_coverage_within(cov, num_glyphs, usize::MAX)
+}
+
+/// [`flatten_coverage`] for a Coverage table whose covered glyphs sit
+/// close together: `None` when the span of glyph ids from its first to
+/// its last glyph is more than four times the number of glyphs it
+/// covers (plus a small allowance), so the flattened form never costs
+/// more than a few bytes per covered glyph.
+fn flatten_dense_coverage(cov: &[u8], num_glyphs: usize) -> Option<CoverageIndex> {
+    let format = read_u16(cov, 0).ok()?;
+    let count = read_u16(cov, 2).ok()? as usize;
+    let covered = match format {
+        1 => count,
+        2 => (0..count)
+            .map(|i| {
+                let at = 4 + i * 6;
+                match (read_u16(cov, at), read_u16(cov, at + 2)) {
+                    (Ok(start), Ok(end)) => (end as usize + 1).saturating_sub(start as usize),
+                    _ => 0,
+                }
+            })
+            .sum(),
+        _ => return None,
+    };
+    flatten_coverage_within(
+        cov,
+        num_glyphs,
+        covered.saturating_mul(4).saturating_add(64),
+    )
+}
+
+/// [`flatten_coverage`], giving up (`None`) when the covered span of
+/// glyph ids is longer than `max_span`.
+fn flatten_coverage_within(
+    cov: &[u8],
+    num_glyphs: usize,
+    max_span: usize,
+) -> Option<CoverageIndex> {
     if !coverage_is_well_formed(cov) {
         return None;
     }
@@ -1241,6 +1282,9 @@ fn flatten_coverage(cov: &[u8], num_glyphs: usize) -> Option<CoverageIndex> {
         });
     };
     let last = (last as usize).min(num_glyphs - 1);
+    if last - first as usize >= max_span {
+        return None;
+    }
     let mut slots = vec![0u16; last - first as usize + 1];
     for i in 0..count {
         let (start, end, start_index) = match format {

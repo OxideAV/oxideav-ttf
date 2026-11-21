@@ -759,9 +759,10 @@ impl<'a> Font<'a> {
     /// 32 KiB pair memo per kerning lookup, and two 8 KiB memo tables
     /// (each memo is allocated only once it has seen a few hundred
     /// queries).
-    /// With them off, nothing is retained beyond the resolved lookup
-    /// lists; every lookup walks the table bytes at every position,
-    /// which is one to two orders of magnitude slower.
+    /// With them off, nothing is retained beyond the shape plans and the
+    /// resolved sub-table list of each lookup (a few dozen KiB); every
+    /// lookup walks the table bytes at every position, which is one to
+    /// two orders of magnitude slower.
     ///
     /// Results are identical either way. Switching drops whatever was
     /// built so far.

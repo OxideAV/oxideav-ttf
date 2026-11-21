@@ -1449,13 +1449,17 @@ two-byte-per-glyph array per flattened Coverage / ClassDef table, a 32 KiB
 pair memo per kerning lookup and two 8 KiB memo tables. Heap retained by a
 `Font` after shaping the bench texts (counting allocator, release):
 
-| Font, feature set | Accelerators on (default) | Accelerators off |
-|---|---|---|
-| InterVariable, default Latin (6 features) | 178 KiB | < 2 KiB |
-| InterVariable, rich Latin (22 features) | 275 KiB | < 2 KiB |
-| DejaVuSans, default Latin | 151 KiB | < 1 KiB |
-| DejaVuSans, Arabic | 196 KiB | < 1 KiB |
-| NotoSansArabic, Arabic | 46 KiB | < 1 KiB |
+| Font, feature set | On, before | On, now | Off, before | Off, now |
+|---|---|---|---|---|
+| InterVariable, default Latin (6 features) | 161 KiB | 151 KiB | 11 KiB | 28 KiB |
+| InterVariable, rich Latin (22 features) | 275 KiB | 201 KiB | 2 KiB | 25 KiB |
+| DejaVuSans, default Latin | 151 KiB | 182 KiB | 1 KiB | 39 KiB |
+| DejaVuSans, Arabic | 183 KiB | 137 KiB | 1 KiB | 41 KiB |
+| NotoSansArabic, Arabic | 46 KiB | 50 KiB | 1 KiB | 6 KiB |
+
+("Before" / "now": the engine before and after the conformance rewrite, same
+counting-allocator harness. With accelerators off the font now keeps the
+resolved sub-table list of each lookup it has run.)
 
 A caller that would rather spend time than memory turns all of it off with
 `Font::set_shaping_accelerators(false)` (or
@@ -1463,7 +1467,7 @@ A caller that would rather spend time than memory turns all of it off with
 bytes for every lookup at every position, with identical results (the corpus
 is checked on both paths) — `latin_paragraph/inter` takes 2095 µs as one run
 and 397 µs word by word that way, `arabic_paragraph/noto` 203 µs and 42 µs
-(only the shape-plan cache remains).
+(only the shape-plan cache and the resolved sub-table lists remain).
 
 ### The conformant engine
 
@@ -1477,25 +1481,31 @@ whole-run case:
 
 | Scenario | Run, before | Run, after | ns / glyph, before → after | Words, before | Words, after |
 |---|---|---|---|---|---|
-| `latin_paragraph/inter` (669 glyphs) | 7.39 | 5.70 | 11.0 → 8.5 | 12.03 | 11.58 |
-| `latin_paragraph/dejavu` (663 glyphs) | 5.00 | 5.08 | 7.5 → 7.7 | 9.79 | 10.81 |
-| `latin_rich/inter` (669 glyphs, 22 features) | 11.83 | 12.29 | 17.7 → 18.4 | 22.37 | 26.10 |
-| `liga_kern_heavy/inter` (354 glyphs) | 10.00 | 8.79 | 28.2 → 24.8 | 10.90 | 10.71 |
-| `liga_kern_heavy/dejavu` (330 glyphs) | 3.36 | 3.99 | 10.2 → 12.1 | 6.10 | 6.76 |
-| `latin_combining/dejavu` (47 glyphs) | 1.84 | 1.68 | 39.1 → 35.7 | 2.27 | 2.29 |
-| `arabic_paragraph/noto` (189 glyphs) | 3.39 | 4.17 | 17.9 → 22.1 | 4.57 | 6.15 |
-| `arabic_paragraph/dejavu` (191 glyphs) | 4.41 | 4.19 | 23.1 → 21.9 | 5.43 | 6.27 |
-| `cold_words/inter` (parse + first shape) | 14.68 | 16.19 | | | |
-| `cold_paragraph/inter` | 28.74 | 28.83 | | | |
-| `cold_paragraph/noto` | 10.27 | 12.23 | | | |
+| `latin_paragraph/inter` (669 glyphs) | 7.50 | 5.60 | 11.2 → 8.4 | 12.16 | 11.73 |
+| `latin_paragraph/dejavu` (663 glyphs) | 5.00 | 5.45 | 7.5 → 8.2 | 9.98 | 11.31 |
+| `latin_rich/inter` (669 glyphs, 22 features) | 11.87 | 12.69 | 17.7 → 19.0 | 22.69 | 26.60 |
+| `liga_kern_heavy/inter` (354 glyphs) | 10.05 | 9.19 | 28.4 → 26.0 | 11.12 | 11.13 |
+| `liga_kern_heavy/dejavu` (330 glyphs) | 3.36 | 3.33 | 10.2 → 10.1 | 6.21 | 7.20 |
+| `latin_combining/dejavu` (47 glyphs) | 1.87 | 2.02 | 39.8 → 43.0 | 2.31 | 2.66 |
+| `arabic_paragraph/noto` (189 glyphs) | 3.42 | 4.33 | 18.1 → 22.9 | 4.67 | 6.40 |
+| `arabic_paragraph/dejavu` (191 glyphs) | 4.47 | 4.93 | 23.4 → 25.8 | 5.54 | 7.09 |
+| `cold_words/inter` (parse + first shape) | 14.78 | 16.20 | | | |
+| `cold_paragraph/inter` | 28.95 | 28.98 | | | |
+| `cold_paragraph/noto` | 10.30 | 12.14 | | | |
 
 "Before" is the engine that produced wrong positions for the cases listed in
 the changelog. The first correct version of the new engine took 1.9× its time
 on `latin_paragraph/inter` and 1.25× on `arabic_paragraph/noto`; the run-level
 rule-outs, the per-instance kerning memo and the mark-filter sets brought it
-back. Kerning-only Latin runs are now faster than before; Arabic pays about
-4 ns per glyph for attachments that are resolved against final positions, and
-short runs pay for the per-call bookkeeping of a longer lookup record. A
+back. Kerning-dominated Latin runs on Inter are now faster than before; the
+other whole-run cases are within about 10 %, except Arabic, which pays 2 to
+5 ns per glyph for attachments that are resolved against final positions;
+short runs pay 10 to 35 % for the per-call bookkeeping of a longer lookup
+record. Merged ligature components leave the buffer in one sweep per lookup
+pass instead of one shift per ligature. Flattening the base Coverage of every
+mark-attachment sub-table would make mark-heavy runs another 9 to 12 % faster
+for 36 to 126 KiB more per font; only Coverage tables whose glyphs sit close
+together are flattened, which keeps the memory where it was. A
 variable font away from its default instance — which the earlier engine shaped
 with default-instance advances and values — takes 6.4 µs for
 `latin_paragraph/inter` at `wght` 700 against 5.9 µs at the default instance

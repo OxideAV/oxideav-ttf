@@ -56,6 +56,8 @@ pub(super) struct Subst<'s, 'r, 'f, 'a> {
     /// (see `RunGlyphs::candidates`), widened by every glyph written
     /// during the pass.
     pub(super) candidates: u64,
+    /// Glyphs marked `dead` and not yet dropped from the buffer.
+    pub(super) dead: usize,
 }
 
 /// Where a sub-table's flattened Coverage puts a glyph
@@ -124,6 +126,7 @@ impl<'f, 'a> Subst<'_, '_, 'f, 'a> {
             while i < self.buf.len() {
                 let glyph = self.buf[i];
                 if self.is_candidate(lookup, glyph.gid)
+                    && !glyph.dead
                     && mask_allows(planned.mask, glyph.mask)
                     && !skip.skips(glyph.gid)
                 {
@@ -136,6 +139,11 @@ impl<'f, 'a> Subst<'_, '_, 'f, 'a> {
                     }
                 }
                 i += 1;
+            }
+            // Components merged by this pass leave the buffer together.
+            if self.dead != 0 {
+                self.buf.retain(|glyph| !glyph.dead);
+                self.dead = 0;
             }
         }
     }
@@ -401,13 +409,22 @@ impl<'f, 'a> Subst<'_, '_, 'f, 'a> {
             head.lig_comps = total.min(255) as u8;
         }
         self.set_gid(i, ligature);
-        // Remove the other components, last first so the indices of the
-        // ones still to go stay valid.
-        for &c in components[1..].iter().rev() {
-            self.buf.remove(c);
-            if self.logging {
+        if self.logging {
+            // Inside a contextual lookup the positions of its input
+            // sequence follow each removal: remove the other components
+            // now, last first so the indices still to go stay valid.
+            for &c in components[1..].iter().rev() {
+                self.buf.remove(c);
                 self.sc.edits.push(Edit::Removed(c));
             }
+        } else {
+            // A lookup pass over the whole run: the components are only
+            // marked, and dropped in one sweep when the pass ends, so a
+            // ligature-dense run is not shifted once per ligature.
+            for &c in &components[1..] {
+                self.buf[c].dead = true;
+            }
+            self.dead += components.len() - 1;
         }
         Some(i + 1)
     }

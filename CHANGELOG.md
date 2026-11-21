@@ -32,16 +32,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Performance
 
 - Shaping (whole-run, µs per call, before → after the rewrite):
-  `latin_paragraph/inter` 7.39 → 5.70, `liga_kern_heavy/inter` 10.00 →
-  8.79, `arabic_paragraph/dejavu` 4.41 → 4.19, `arabic_paragraph/noto`
-  3.39 → 4.17 (attachments are now resolved against final positions);
-  a variable font away from its default instance is shaped with `HVAR`
-  advances and varied kerning in 6.4 µs for the same Latin paragraph
-  (5.9 µs at the default instance).
+  `latin_paragraph/inter` 7.50 → 5.60, `liga_kern_heavy/inter` 10.05 →
+  9.19, `liga_kern_heavy/dejavu` 3.36 → 3.33, `arabic_paragraph/noto`
+  3.42 → 4.33 and `arabic_paragraph/dejavu` 4.47 → 4.93 (attachments
+  are now resolved against final positions); short runs are 0 to 35 %
+  slower per call. A variable font away from its default instance is
+  shaped with `HVAR` advances and varied kerning in 6.4 µs for the same
+  Latin paragraph (5.9 µs at the default instance).
   Run-level rule-outs (a lookup whose rules all look at a second glyph
   the run does not contain), two-part plan digests, per-instance kerning
-  and advance memos, per-lookup kept-mark sets, flattened mark
-  coverages. Details and the full table in the README.
+  and advance memos, per-lookup kept-mark sets, flattened dense mark
+  coverages, merged ligature components dropped in one sweep per pass.
+  Details, the full table and the memory figures in the README.
 
 ### Changed
 

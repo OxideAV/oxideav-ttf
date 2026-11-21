@@ -1,67 +1,65 @@
-//! OpenType GSUB/GPOS shaping pipeline.
+//! OpenType GSUB / GPOS shaping.
 //!
-//! This module wires the per-lookup-type GSUB substitution and GPOS
-//! positioning primitives implemented in [`crate::tables::gsub`] and
-//! [`crate::tables::gpos`] into a single coherent
-//! [`Font::shape`](crate::Font::shape) entry point that turns a run of
-//! Unicode text into a sequence of positioned glyphs.
+//! [`Font::shape`](crate::Font::shape),
+//! [`Font::shape_text`](crate::Font::shape_text) and
+//! [`Font::shape_glyphs`](crate::Font::shape_glyphs) turn a run of text
+//! or glyphs into positioned glyphs by applying the lookups behind the
+//! requested features, as the OpenType Layout chapters ("OpenType Layout
+//! Common Table Formats", "GSUB", "GPOS", "GDEF") describe.
 //!
-//! ## Pipeline (ISO/IEC 14496-22:2019 §6 "OFF Layout Common Table
-//! Formats" + the GSUB/GPOS chapters)
+//! ## Pipeline
 //!
-//! 1. **Character-to-glyph mapping.** Each input `char` is mapped to a
-//!    nominal glyph id through the `cmap` table
-//!    ([`Font::glyph_index`](crate::Font::glyph_index)). Characters with
-//!    no mapping resolve to glyph 0 (`.notdef`).
+//! 1. **Glyphs.** Text is mapped to nominal glyphs through `cmap` (glyph
+//!    0 for an unmapped character); a glyph run comes with its glyphs,
+//!    clusters and feature masks.
 //!
-//! 2. **GSUB substitution stage.** The features the caller requested are
-//!    resolved against the active script/language through the GSUB
-//!    ScriptList → FeatureList → LangSys walk. Per the common-table-format
-//!    rules, the *union* of the lookup indices referenced by the active
-//!    features is gathered and processed **in LookupList order** (not
-//!    feature order): "the client … processes the lookups referenced by
-//!    these features in the order the lookup definitions occur in the
-//!    LookupList … lookups from several different features may be
-//!    interleaved during text processing." Each lookup is applied across
-//!    the whole glyph buffer left-to-right (reverse-chaining LookupType 8
-//!    is walked right-to-left).
+//! 2. **Plan.** The features of the active script / language system are
+//!    resolved (FeatureVariations included). "The client … processes the
+//!    lookups referenced by these features in the order the lookup
+//!    definitions occur in the LookupList … lookups from several
+//!    different features may be interleaved": the plan is the union of
+//!    those lookups in LookupList order, each with the glyph mask of the
+//!    features that reach it. The language system's required feature is
+//!    always part of it.
 //!
-//! 3. **GPOS positioning stage.** Advances are seeded from `hmtx`. The
-//!    active GPOS features' lookups are likewise gathered and applied in
-//!    LookupList order, accumulating x/y placement and advance
-//!    adjustments plus mark-attachment, cursive-attachment, and
-//!    pair-kerning offsets onto each glyph.
+//! 3. **GSUB** (`subst`). Each lookup is applied across the buffer —
+//!    reverse chaining substitution from the end. A lookup acts where
+//!    the current glyph is not ignored by its `lookupFlag`, carries its
+//!    mask, and starts a match of one of its sub-tables; matching sees
+//!    only the glyphs the flag does not ignore (`seq` for the contextual
+//!    formats). Ligature substitution records component counts and which
+//!    component each stepped-over mark follows.
 //!
-//! The result is a `Vec<`[`ShapedGlyph`]`>`: one entry per output glyph,
-//! carrying the glyph id, the originating cluster (byte index into the
-//! input text), and the placement/advance in font units (TT Y-up
-//! convention, scale by `units_per_em` for a target ppem).
+//! 4. **GPOS** (`place`). Advances are seeded from `hmtx` (+ `HVAR`), or
+//!    `vmtx` (+ `VVAR`) for a top-to-bottom run; with `kern` requested
+//!    and no GPOS `kern` feature, the `kern` table is applied. Then each
+//!    lookup runs: values and anchors are read at the current variation
+//!    instance (`wire`); adjustments accumulate; mark and cursive
+//!    attachments are recorded and resolved after the last lookup, so
+//!    they hold against final positions.
+//!
+//! The result is a `Vec<`[`ShapedGlyph`]`>` in drawing order.
 //!
 //! ## Scope
 //!
-//! This is a *general* OpenType shaper: it applies whatever lookups the
-//! requested features reference, for any script, without script-specific
-//! reordering logic (the spec explicitly places complex-script glyph
-//! reordering — e.g. Indic syllable reordering — outside its scope, in
-//! the text-processing client). For scripts whose joining/positional
-//! behaviour is fully expressed through GSUB/GPOS lookups keyed off
-//! contextual rules (Latin ligatures and kerning, Arabic joining forms
-//! driven by `init`/`medi`/`fina` + `mark`/`mkmk`/`curs`), the requested
-//! feature set drives correct output directly.
+//! This is the lookup engine, not a script engine: joining-form
+//! selection, syllable reordering, normalisation and bidi are "dependent
+//! on the original character string" and belong to the text-processing
+//! client, which states its decisions through glyph order and feature
+//! masks ([`RunGlyph::mask`], [`ShapeFeature::mask`]).
 //!
 //! ## Cost model
 //!
-//! Lookup application is filtered, not brute-forced. The lookups behind
-//! one `(script, language, features)` request are resolved once and
-//! cached on the [`Font`] as a shape plan. Each lookup carries a
-//! first-glyph set (the union of the Coverage tables its sub-tables test
-//! against the current glyph) and a 64-bit digest of it: a run whose
-//! glyph digest misses the lookup's digest skips the lookup outright,
-//! and within a run only positions whose glyph is in the set reach the
-//! table-walking match code. The `lookupFlag` skip predicate reads a
-//! flat per-glyph GDEF class array. The filters only ever discard
-//! positions the table-walking match code would reject, so the output
-//! is identical to walking every lookup at every position —
+//! The lookups behind one `(script, language, features)` request are
+//! resolved once and cached on the [`Font`] as a shape plan. Each lookup
+//! is resolved once into its sub-tables with a first-glyph set (the
+//! union of the Coverage tables tested against the current glyph); a
+//! lookup whose every rule looks at a second glyph also keeps the set of
+//! glyphs acceptable there. A run that holds no glyph of either set
+//! skips the lookup — usually decided from a digest stored in the plan —
+//! and within a run only positions whose glyph is in the first-glyph set
+//! reach the matching code. The filters only ever discard positions the
+//! matching code would reject, so the output is identical with them off:
 //! [`Font::set_shaping_accelerators`](crate::Font::set_shaping_accelerators)
 //! switches them off, and the test suite compares the two.
 
@@ -310,6 +308,9 @@ struct WorkGlyph {
     lig_comp: u8,
     /// On a ligature glyph: how many components it stands for.
     lig_comps: u8,
+    /// A ligature component already merged into its ligature, waiting
+    /// to be dropped at the end of the lookup pass: no lookup sees it.
+    dead: bool,
 }
 
 /// The `lookupFlag` skip predicate (§6.2 LookupFlag bit enumeration) of
@@ -380,19 +381,15 @@ impl<'f, 'a> SkipFilter<'f, 'a> {
     /// Index of the first glyph after `from` the lookup does not ignore.
     #[inline]
     fn next(&self, buf: &[WorkGlyph], from: usize) -> Option<usize> {
-        if !self.active {
-            return (from + 1 < buf.len()).then_some(from + 1);
-        }
-        (from + 1..buf.len()).find(|&at| !self.skips(buf[at].gid))
+        (from + 1..buf.len()).find(|&at| !buf[at].dead && !self.skips(buf[at].gid))
     }
 
     /// Index of the last glyph before `from` the lookup does not ignore.
     #[inline]
     fn prev(&self, buf: &[WorkGlyph], from: usize) -> Option<usize> {
-        if !self.active {
-            return from.checked_sub(1);
-        }
-        (0..from).rev().find(|&at| !self.skips(buf[at].gid))
+        (0..from)
+            .rev()
+            .find(|&at| !buf[at].dead && !self.skips(buf[at].gid))
     }
 }
 
@@ -725,6 +722,7 @@ impl<'a> Font<'a> {
             mask: g.mask,
             lig_comp: 0,
             lig_comps: 0,
+            dead: false,
         }));
         let shaped = self.shape_with(&mut scratch, options);
         scratch.recycle();
@@ -741,6 +739,7 @@ impl<'a> Font<'a> {
             mask: 0,
             lig_comp: 0,
             lig_comps: 0,
+            dead: false,
         }));
     }
 
@@ -814,6 +813,7 @@ impl<'a> Font<'a> {
                 budget: 0,
                 last_lig_id: 0,
                 candidates: 0,
+                dead: 0,
             }
             .run_all(&plan.gsub);
         }
