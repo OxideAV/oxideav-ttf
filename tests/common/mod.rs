@@ -3,6 +3,8 @@
 
 #![allow(dead_code)]
 
+pub mod tables;
+
 pub const DEJAVU: &[u8] = include_bytes!("../fixtures/DejaVuSans.ttf");
 pub const DEJAVU_MONO: &[u8] = include_bytes!("../fixtures/DejaVuSansMono.ttf");
 pub const INTER: &[u8] = include_bytes!("../fixtures/InterVariable.ttf");
