@@ -2085,8 +2085,9 @@ fn chain_context_format3_match(sub: &[u8], gids: &[u16], pos: usize) -> Option<C
 ///   Offset16 subRuleSetOffsets[subRuleSetCount]
 ///
 ///   SubRuleSet { u16 subRuleCount; Offset16 subRuleOffsets[]; }
-///   SubRule    { u16 inputGlyphCount; u16 inputSequence[inputGlyphCount-1];
-///                u16 substCount;       SubstLookupRecord substRecords[]; }
+///   SubRule    { u16 glyphCount; u16 substCount;
+///                u16 inputSequence[glyphCount-1];
+///                SubstLookupRecord substRecords[substCount]; }
 ///
 /// All offsets are relative to the start of the sub-table, then to
 /// each SubRuleSet, in turn.
@@ -2129,7 +2130,11 @@ fn context_format1_rule_match(rule: &[u8], gids: &[u16], pos: usize) -> Option<C
     if in_count == 0 {
         return None;
     }
-    cur += 2;
+    // SequenceRule: glyphCount, seqLookupCount, inputSequence[glyphCount
+    // - 1], seqLookupRecords[seqLookupCount] — the record count sits
+    // *before* the input sequence (unlike ChainedSequenceRule).
+    let subst_count = read_u16(rule, cur + 2).ok()? as usize;
+    cur += 4;
     let in_extra = in_count - 1;
     if rule.len() < cur + in_extra * 2 {
         return None;
@@ -2144,11 +2149,6 @@ fn context_format1_rule_match(rule: &[u8], gids: &[u16], pos: usize) -> Option<C
         }
     }
     cur += in_extra * 2;
-    if rule.len() < cur + 2 {
-        return None;
-    }
-    let subst_count = read_u16(rule, cur).ok()? as usize;
-    cur += 2;
     let records = read_subst_lookup_records(rule, cur, subst_count)?;
     Some(ChainMatch {
         input_len: in_count,
@@ -2167,8 +2167,9 @@ fn context_format1_rule_match(rule: &[u8], gids: &[u16], pos: usize) -> Option<C
 ///   Offset16 subClassSetOffsets[subClassSetCount]
 ///
 ///   SubClassSet  { u16 subClassRuleCount; Offset16 subClassRuleOffsets[]; }
-///   SubClassRule { u16 glyphCount; u16 inputSequence[glyphCount-1]; (class IDs)
-///                  u16 substCount; SubstLookupRecord substRecords[]; }
+///   SubClassRule { u16 glyphCount; u16 substCount;
+///                  u16 inputSequence[glyphCount-1]; (class IDs)
+///                  SubstLookupRecord substRecords[substCount]; }
 fn context_format2_match(sub: &[u8], gids: &[u16], pos: usize) -> Option<ChainMatch> {
     if sub.len() < 8 {
         return None;
@@ -2219,7 +2220,10 @@ fn context_format2_rule_match(
     if in_count == 0 {
         return None;
     }
-    cur += 2;
+    // ClassSequenceRule: glyphCount, seqLookupCount, inputSequence
+    // (class values), seqLookupRecords.
+    let subst_count = read_u16(rule, cur + 2).ok()? as usize;
+    cur += 4;
     let in_extra = in_count - 1;
     if rule.len() < cur + in_extra * 2 {
         return None;
@@ -2236,11 +2240,6 @@ fn context_format2_rule_match(
         }
     }
     cur += in_extra * 2;
-    if rule.len() < cur + 2 {
-        return None;
-    }
-    let subst_count = read_u16(rule, cur).ok()? as usize;
-    cur += 2;
     let records = read_subst_lookup_records(rule, cur, subst_count)?;
     Some(ChainMatch {
         input_len: in_count,
@@ -3337,6 +3336,72 @@ mod tests {
         gsub.extend_from_slice(&10u16.to_be_bytes());
         gsub.extend_from_slice(&lookup_list);
         gsub
+    }
+
+    /// SequenceContextFormat1 whose one rule has a two-glyph input
+    /// sequence `[10, 20]` and one record `(sequenceIndex 0, lookup 0)`.
+    /// The SequenceRule layout is `glyphCount, seqLookupCount,
+    /// inputSequence[glyphCount - 1], seqLookupRecords[]` — the record
+    /// count precedes the input sequence.
+    fn build_context_format1_two_glyph_sub() -> Vec<u8> {
+        let cov = [0u8, 1, 0, 1, 0, 10];
+        let mut rule = Vec::new();
+        for v in [2u16, 1, 20, 0, 0] {
+            rule.extend_from_slice(&v.to_be_bytes());
+        }
+        let mut sub = Vec::new();
+        // format, coverageOffset, setCount, setOffset.
+        for v in [1u16, 8, 1, 8 + cov.len() as u16] {
+            sub.extend_from_slice(&v.to_be_bytes());
+        }
+        sub.extend_from_slice(&cov);
+        // SequenceRuleSet: one rule at offset 4.
+        sub.extend_from_slice(&[0, 1, 0, 4]);
+        sub.extend_from_slice(&rule);
+        sub
+    }
+
+    /// SequenceContextFormat2 over a ClassDef putting glyph 10 in class
+    /// 1 and glyph 20 in class 2, with one class-1 rule: input classes
+    /// `[1, 2]`, record `(0, lookup 0)`.
+    fn build_context_format2_two_glyph_sub() -> Vec<u8> {
+        let cov = [0u8, 1, 0, 1, 0, 10];
+        // ClassDef format 2, two ranges.
+        let mut class_def = Vec::new();
+        for v in [2u16, 2, 10, 10, 1, 20, 20, 2] {
+            class_def.extend_from_slice(&v.to_be_bytes());
+        }
+        let mut rule = Vec::new();
+        for v in [2u16, 1, 2, 0, 0] {
+            rule.extend_from_slice(&v.to_be_bytes());
+        }
+        let header = 12u16; // format, cov, classDef, setCount, 2 offsets
+        let class_def_off = header + cov.len() as u16;
+        let set_off = class_def_off + class_def.len() as u16;
+        let mut sub = Vec::new();
+        for v in [2u16, header, class_def_off, 2, 0, set_off] {
+            sub.extend_from_slice(&v.to_be_bytes());
+        }
+        sub.extend_from_slice(&cov);
+        sub.extend_from_slice(&class_def);
+        sub.extend_from_slice(&[0, 1, 0, 4]);
+        sub.extend_from_slice(&rule);
+        sub
+    }
+
+    #[test]
+    fn lookup_type_5_rules_read_the_record_count_before_the_input_sequence() {
+        for sub in [
+            build_context_format1_two_glyph_sub(),
+            build_context_format2_two_glyph_sub(),
+        ] {
+            let bytes = build_context_lookup_gsub(sub);
+            let g = GsubTable::parse(&bytes).unwrap();
+            assert_eq!(g.apply_lookup_type_5(1, &[10, 20], 0), Some(vec![110, 20]));
+            // The second input glyph must match.
+            assert_eq!(g.apply_lookup_type_5(1, &[10, 21], 0), None);
+            assert_eq!(g.apply_lookup_type_5(1, &[10], 0), None);
+        }
     }
 
     #[test]

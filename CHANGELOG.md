@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- GSUB contextual substitution (LookupType 5) formats 1 and 2 read the
+  SequenceRule / ClassSequenceRule record count from the wrong place
+  (after the input sequence instead of before it), so every rule with
+  more than one input glyph either failed to match or ran the wrong
+  nested lookups. Seen as an `abvs` lookup of a Kannada font (consonant
+  + vowel sign → conjoined form) never applying.
+
 ## [0.1.9](https://github.com/OxideAV/oxideav-ttf/compare/v0.1.8...v0.1.9) - 2026-11-15
 
 ### Other
