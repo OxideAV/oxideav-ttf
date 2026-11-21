@@ -12,7 +12,7 @@
 //! strings on both paths. Any difference, or a panic on either path, is
 //! a failure.
 
-use oxideav_ttf::{Font, ShapedGlyph};
+use oxideav_ttf::{Direction, Font, ShapeOptions, ShapedGlyph};
 
 mod common;
 use common::*;
@@ -73,7 +73,13 @@ fn corrupt(table: &mut [u8], rng: &mut Rng, count: usize, num_glyphs: u16) {
     }
 }
 
-fn shape_both(bytes: &[u8], text: &str, script: Tag, features: &[Tag]) -> Option<Vec<ShapedGlyph>> {
+fn shape_both(
+    bytes: &[u8],
+    text: &str,
+    script: Tag,
+    features: &[Tag],
+    with_queries: bool,
+) -> Option<Vec<ShapedGlyph>> {
     // A corrupted layout table never fails construction (optional
     // tables are parsed lazily), but stay robust if it ever does.
     let fast = Font::from_bytes(bytes).ok()?;
@@ -85,6 +91,64 @@ fn shape_both(bytes: &[u8], text: &str, script: Tag, features: &[Tag]) -> Option
     // A second call is served from the plan cache, the memo tables and
     // the already-built accelerators.
     assert_eq!(fast.shape(text, script, None, features), expected);
+    // The other directions go through the same lookups with different
+    // attachment arithmetic.
+    for direction in [Direction::RightToLeft, Direction::TopToBottom] {
+        let mut options = ShapeOptions::new(script)
+            .with_direction(direction)
+            .with_zero_mark_advances(true);
+        for &tag in features {
+            options = options.with_feature(tag);
+        }
+        assert_eq!(
+            fast.shape_text(text, &options),
+            walk.shape_text(text, &options),
+            "accelerated path diverged on {text:?} ({direction:?})"
+        );
+    }
+    if !with_queries {
+        return Some(expected);
+    }
+    // The per-lookup queries read the same corrupted tables.
+    let glyphs: Vec<u16> = expected.iter().map(|g| g.glyph_id).take(3).collect();
+    for lookup in 0..4u16 {
+        assert_eq!(
+            fast.gsub_lookup_coverage(lookup),
+            walk.gsub_lookup_coverage(lookup)
+        );
+        assert_eq!(
+            fast.gpos_lookup_coverage(lookup),
+            walk.gpos_lookup_coverage(lookup)
+        );
+        for &a in &glyphs {
+            assert_eq!(
+                fast.gpos_cursive_anchors(lookup, a),
+                walk.gpos_cursive_anchors(lookup, a)
+            );
+            assert_eq!(
+                fast.gpos_ligature_component_count(lookup, a),
+                walk.gpos_ligature_component_count(lookup, a)
+            );
+            for &b in &glyphs {
+                assert_eq!(
+                    fast.gpos_pair_adjustment(lookup, a, b),
+                    walk.gpos_pair_adjustment(lookup, a, b)
+                );
+                assert_eq!(
+                    fast.gpos_mark_base_anchors(lookup, a, b),
+                    walk.gpos_mark_base_anchors(lookup, a, b)
+                );
+                assert_eq!(
+                    fast.gpos_mark_mark_anchors(lookup, a, b),
+                    walk.gpos_mark_mark_anchors(lookup, a, b)
+                );
+                assert_eq!(
+                    fast.gpos_mark_ligature_anchors(lookup, a, 1, b),
+                    walk.gpos_mark_ligature_anchors(lookup, a, 1, b)
+                );
+            }
+        }
+    }
     Some(expected)
 }
 
@@ -167,7 +231,8 @@ fn accelerated_shaping_matches_table_walk_on_corrupted_layout_tables() {
                 corrupt(&mut mutated[range], &mut rng, count, num_glyphs);
             }
             for ((text, script, features), base) in runs.iter().zip(&baseline) {
-                if let Some(shaped) = shape_both(&mutated, text, *script, features) {
+                if let Some(shaped) = shape_both(&mutated, text, *script, features, round % 8 == 0)
+                {
                     total += 1;
                     changed += (shaped != *base) as usize;
                 }

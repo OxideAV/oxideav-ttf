@@ -77,6 +77,9 @@ impl<'f, 'a> Subst<'_, '_, 'f, 'a> {
     /// Run the planned lookups.
     pub(super) fn run_all(&mut self, lookups: &[PlanLookup]) {
         for planned in lookups {
+            if self.run.misses(planned) {
+                continue;
+            }
             let Some(lookup) = self.eng.lookup(planned.index) else {
                 continue;
             };
@@ -387,6 +390,15 @@ impl<'f, 'a> Subst<'_, '_, 'f, 'a> {
         depth: u8,
     ) -> Option<usize> {
         if depth >= super::MAX_NESTING {
+            return None;
+        }
+        // Every rule of this lookup looks at the glyph after its first:
+        // nothing can match unless that glyph is one a rule accepts.
+        if let Some(second) = lookup.second_components.as_ref()
+            && !skip
+                .next(self.buf, i)
+                .is_some_and(|at| second.contains(self.buf[at].gid))
+        {
             return None;
         }
         let eng = self.eng;

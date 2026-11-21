@@ -64,10 +64,25 @@ pub(super) struct Place<'s, 'f, 'a> {
 
 const NESTED_BUDGET: u32 = 2048;
 
+/// Position arithmetic saturates: a hostile font can pile adjustments
+/// up past 32 bits, and that must not abort the run.
+#[inline]
+fn plus(a: i32, b: i32) -> i32 {
+    a.saturating_add(b)
+}
+
+#[inline]
+fn minus(a: i32, b: i32) -> i32 {
+    a.saturating_sub(b)
+}
+
 impl<'f, 'a> Place<'_, 'f, 'a> {
     /// Run the planned lookups.
     pub(super) fn run_all(&mut self, lookups: &[PlanLookup], run: &RunGlyphs<'_>) {
         for planned in lookups {
+            if run.misses(planned) {
+                continue;
+            }
             let Some(lookup) = self.eng.lookup(planned.index) else {
                 continue;
             };
@@ -78,7 +93,6 @@ impl<'f, 'a> Place<'_, 'f, 'a> {
             if lookup.kind == 2
                 && lookup.plain_kerning
                 && planned.mask == 0
-                && self.var.ivs.is_none()
                 && self.direction != Direction::TopToBottom
             {
                 self.plain_kerning_pass(lookup, &skip);
@@ -106,9 +120,11 @@ impl<'f, 'a> Place<'_, 'f, 'a> {
     }
 
     /// A pair-adjustment lookup that only ever changes the first glyph's
-    /// x-advance by a plain value: one memoised number per glyph pair.
+    /// x-advance: one memoised number per glyph pair (at the current
+    /// variation instance).
     fn plain_kerning_pass(&mut self, lookup: &'f LookupAccel, skip: &SkipFilter<'f, 'a>) {
         let eng = self.eng;
+        let var = self.var;
         for i in 0..self.buf.len() {
             let left = self.buf[i].gid;
             if !lookup.first.contains(left) || skip.skips(left) {
@@ -118,27 +134,24 @@ impl<'f, 'a> Place<'_, 'f, 'a> {
                 break;
             };
             let right = self.buf[j].gid;
+            let adjust = || {
+                lookup
+                    .subs
+                    .iter()
+                    .filter(|s| s.first.contains(left))
+                    .find_map(|s| wire::pair_adjust(eng.sub_bytes(s), Some(s), left, right, &var))
+                    .map_or(0, |hit| hit.first.x_advance)
+            };
             let key = (left as u32) << 16 | right as u32;
-            let adjust = lookup
+            // An adjustment outside 16 bits is not memoised.
+            let memoised = lookup
                 .pair_memo
-                .get_or_compute(key, || {
-                    let hit = lookup
-                        .subs
-                        .iter()
-                        .filter(|s| s.first.contains(left))
-                        .find_map(|s| {
-                            wire::pair_adjust(
-                                eng.sub_bytes(s),
-                                Some(s),
-                                left,
-                                right,
-                                &VarCtx::DEFAULT,
-                            )
-                        });
-                    Some(hit.map_or(0, |h| h.first.x_advance) as i16 as u16)
-                })
-                .unwrap_or(0) as i16;
-            self.out[i].x_advance += adjust as i32;
+                .get_or_compute(key, || i16::try_from(adjust()).ok().map(|v| v as u16));
+            let kerning = match memoised {
+                Some(value) => value as i16 as i32,
+                None => adjust(),
+            };
+            self.out[i].x_advance = plus(self.out[i].x_advance, kerning);
         }
     }
 
@@ -148,12 +161,12 @@ impl<'f, 'a> Place<'_, 'f, 'a> {
     #[inline]
     fn add(&mut self, i: usize, adjust: &Adjust) {
         let glyph = &mut self.out[i];
-        glyph.x_offset += adjust.x_placement;
-        glyph.y_offset += adjust.y_placement;
+        glyph.x_offset = plus(glyph.x_offset, adjust.x_placement);
+        glyph.y_offset = plus(glyph.y_offset, adjust.y_placement);
         if self.direction == Direction::TopToBottom {
-            glyph.y_advance -= adjust.y_advance;
+            glyph.y_advance = minus(glyph.y_advance, adjust.y_advance);
         } else {
-            glyph.x_advance += adjust.x_advance;
+            glyph.x_advance = plus(glyph.x_advance, adjust.x_advance);
         }
     }
 
@@ -328,37 +341,37 @@ impl<'f, 'a> Place<'_, 'f, 'a> {
         // pen: their advances come off the connecting advance.
         let (mut between_x, mut between_y) = (0i32, 0i32);
         for glyph in &self.out[i + 1..j] {
-            between_x += glyph.x_advance;
-            between_y += glyph.y_advance;
+            between_x = plus(between_x, glyph.x_advance);
+            between_y = plus(between_y, glyph.y_advance);
         }
         // (cross-stream coordinate of exit, of entry)
         let cross = match self.direction {
             Direction::LeftToRight => {
                 let first = &mut self.out[i];
-                first.x_advance = first.x_offset + exit.0 - between_x;
+                first.x_advance = minus(plus(first.x_offset, exit.0), between_x);
                 let second = &mut self.out[j];
-                let shift = second.x_offset + entry.0;
-                second.x_advance -= shift;
-                second.x_offset -= shift;
+                let shift = plus(second.x_offset, entry.0);
+                second.x_advance = minus(second.x_advance, shift);
+                second.x_offset = minus(second.x_offset, shift);
                 (exit.1, entry.1)
             }
             Direction::RightToLeft => {
                 // Drawn in reverse: `j` is to the left of `i`.
                 let second = &mut self.out[j];
-                second.x_advance = second.x_offset + entry.0 - between_x;
+                second.x_advance = minus(plus(second.x_offset, entry.0), between_x);
                 let first = &mut self.out[i];
-                let shift = first.x_offset + exit.0;
-                first.x_advance -= shift;
-                first.x_offset -= shift;
+                let shift = plus(first.x_offset, exit.0);
+                first.x_advance = minus(first.x_advance, shift);
+                first.x_offset = minus(first.x_offset, shift);
                 (exit.1, entry.1)
             }
             Direction::TopToBottom => {
                 let first = &mut self.out[i];
-                first.y_advance = first.y_offset + exit.1 - between_y;
+                first.y_advance = minus(plus(first.y_offset, exit.1), between_y);
                 let second = &mut self.out[j];
-                let shift = second.y_offset + entry.1;
-                second.y_advance -= shift;
-                second.y_offset -= shift;
+                let shift = plus(second.y_offset, entry.1);
+                second.y_advance = minus(second.y_advance, shift);
+                second.y_offset = minus(second.y_offset, shift);
                 (exit.0, entry.0)
             }
         };
@@ -387,6 +400,15 @@ impl<'f, 'a> Place<'_, 'f, 'a> {
         depth: u8,
     ) -> Option<usize> {
         if depth >= super::MAX_NESTING {
+            return None;
+        }
+        // Every rule of this lookup looks at the glyph after its first:
+        // nothing can match unless that glyph is one a rule accepts.
+        if let Some(second) = lookup.second_components.as_ref()
+            && !skip
+                .next(self.buf, i)
+                .is_some_and(|at| second.contains(self.buf[at].gid))
+        {
             return None;
         }
         let eng = self.eng;
@@ -459,9 +481,11 @@ impl<'f, 'a> Place<'_, 'f, 'a> {
                 if let Some(&root) = self.out.get(parent) {
                     let glyph = &mut self.out[node];
                     if vertical {
-                        glyph.x_offset += root.x_offset + link.cursive_shift;
+                        glyph.x_offset =
+                            plus(glyph.x_offset, plus(root.x_offset, link.cursive_shift));
                     } else {
-                        glyph.y_offset += root.y_offset + link.cursive_shift;
+                        glyph.y_offset =
+                            plus(glyph.y_offset, plus(root.y_offset, link.cursive_shift));
                     }
                 }
                 self.attach[node].cursive_to = UNLINKED;
@@ -481,17 +505,23 @@ impl<'f, 'a> Place<'_, 'f, 'a> {
             let (mut pen_x, mut pen_y) = (0i32, 0i32);
             let between = if reversed { j + 1..i + 1 } else { j..i };
             for glyph in &self.out[between] {
-                pen_x += glyph.x_advance;
-                pen_y += glyph.y_advance;
+                pen_x = plus(pen_x, glyph.x_advance);
+                pen_y = plus(pen_y, glyph.y_advance);
             }
             if !reversed {
-                pen_x = -pen_x;
-                pen_y = -pen_y;
+                pen_x = minus(0, pen_x);
+                pen_y = minus(0, pen_y);
             }
             let target = self.out[j];
             let mark = &mut self.out[i];
-            mark.x_offset += target.x_offset + link.mark_dx + pen_x;
-            mark.y_offset += target.y_offset + link.mark_dy + pen_y;
+            mark.x_offset = plus(
+                mark.x_offset,
+                plus(plus(target.x_offset, link.mark_dx), pen_x),
+            );
+            mark.y_offset = plus(
+                mark.y_offset,
+                plus(plus(target.y_offset, link.mark_dy), pen_y),
+            );
         }
     }
 }

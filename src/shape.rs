@@ -67,10 +67,9 @@
 
 use crate::Font;
 use crate::layout::{
-    GlyphSet, LayoutTable, LookupAccel, PlanFeature, PlanLookup, ShapePlan, SubAccel, digest_bit,
-    flatten_class_def,
+    Digest, GlyphSet, LayoutTable, LookupAccel, PlanFeature, PlanLookup, ShapePlan, SubAccel,
+    block_shift, digest_bit, flatten_class_def,
 };
-use crate::tables::gdef::GdefTable;
 
 mod place;
 mod query;
@@ -396,9 +395,6 @@ struct Engine<'f, 'a> {
     /// The whole GSUB / GPOS table; sub-table offsets index into it.
     table: &'f [u8],
     lookup_list_off: u32,
-    gdef: Option<&'f GdefTable<'a>>,
-    /// Flat GDEF glyph classes, when available.
-    classes: Option<&'f [u16]>,
 }
 
 impl<'f, 'a> Engine<'f, 'a> {
@@ -408,8 +404,6 @@ impl<'f, 'a> Engine<'f, 'a> {
             which,
             table: location.0,
             lookup_list_off: location.1,
-            gdef: font.gdef(),
-            classes: font.glyph_classes(),
         }
     }
 
@@ -440,9 +434,11 @@ impl<'f, 'a> Engine<'f, 'a> {
     /// `true` when GDEF classes `gid` as a mark.
     #[inline]
     fn is_mark(&self, gid: u16) -> bool {
-        match self.classes.and_then(|c| c.get(gid as usize)) {
+        // The flat class array is built the first time a mark test is
+        // needed, not for every font that is shaped.
+        match self.font.glyph_classes().and_then(|c| c.get(gid as usize)) {
             Some(&class) => class == crate::tables::gdef::CLASS_MARK,
-            None => self.gdef.is_some_and(|g| g.is_mark(gid)),
+            None => self.font.gdef().is_some_and(|g| g.is_mark(gid)),
         }
     }
 }
@@ -451,8 +447,10 @@ impl<'f, 'a> Engine<'f, 'a> {
 /// superset: a glyph substituted away stays listed (that only costs a
 /// missed shortcut), a glyph written into the run is added.
 struct RunGlyphs<'s> {
-    /// OR of [`digest_bit`] over the run.
-    digest: u64,
+    /// Summary of the run's glyphs.
+    digest: Digest,
+    /// Block shift of the font ([`block_shift`] of its glyph count).
+    shift: u8,
     /// Each distinct glyph id once. Text repeats glyphs heavily, so
     /// probing a lookup's first-glyph set with this list is far cheaper
     /// than probing it at every position of a long run.
@@ -548,9 +546,15 @@ impl ShapeScratch {
 
 impl<'s> RunGlyphs<'s> {
     /// Summarise `buf`. `distinct` must be empty and `seen` all zero.
-    fn of(buf: &[WorkGlyph], distinct: &'s mut Vec<u16>, seen: &'s mut [u64]) -> Self {
+    fn of(
+        buf: &[WorkGlyph],
+        num_glyphs: usize,
+        distinct: &'s mut Vec<u16>,
+        seen: &'s mut [u64],
+    ) -> Self {
         let mut run = RunGlyphs {
-            digest: 0,
+            digest: Digest::EMPTY,
+            shift: block_shift(num_glyphs),
             distinct,
             seen,
         };
@@ -567,15 +571,25 @@ impl<'s> RunGlyphs<'s> {
         if *word & bit == 0 {
             *word |= bit;
             self.distinct.push(gid);
-            self.digest |= bit;
+            self.digest.add(Digest::of(gid, self.shift));
         }
     }
 
-    /// `true` when `lookup` provably cannot act anywhere in the run.
+    /// `true` when the digests of a planned lookup already show it
+    /// cannot act anywhere in the run.
+    #[inline]
+    fn misses(&self, planned: &PlanLookup) -> bool {
+        !planned.first_digest.intersects(&self.digest)
+            || !planned.second_digest.intersects(&self.digest)
+    }
+
+    /// `true` when `lookup` provably cannot act anywhere in the run: no
+    /// glyph of the run can start it, or — for a lookup whose every rule
+    /// looks at a second glyph — no glyph of the run can be that glyph.
     #[inline]
     fn rules_out(&self, lookup: &LookupAccel) -> bool {
-        let first: &GlyphSet = &lookup.first;
-        first.disjoint_from(self.digest) || !self.distinct.iter().any(|&g| first.contains(g))
+        let absent = |set: &GlyphSet| !self.distinct.iter().any(|&g| set.contains(g));
+        absent(&lookup.first) || lookup.second_components.as_ref().is_some_and(absent)
     }
 }
 
@@ -741,7 +755,7 @@ impl<'a> Font<'a> {
             }
             return out;
         }
-        let mut run = RunGlyphs::of(buf, distinct, seen);
+        let mut run = RunGlyphs::of(buf, self.maxp.num_glyphs as usize, distinct, seen);
 
         // --- GSUB substitution stage --------------------------------------
         if let Some(gsub) = self.gsub()
@@ -786,11 +800,21 @@ impl<'a> Font<'a> {
         out
     }
 
+    /// Data of the current variation instance. A font whose coordinates
+    /// were never set sits at its default instance, which is known
+    /// without reading `fvar` / `avar`.
+    fn instance(&self) -> &crate::layout::InstanceData {
+        self.layout.instance(|| match self.var_coords {
+            Some(_) => self.normalised_coords(),
+            None => Vec::new(),
+        })
+    }
+
     /// The variation instance GPOS values are read at: the GDEF
     /// ItemVariationStore and the normalised coordinates, or "no deltas"
     /// at the default instance.
     fn gpos_variation(&self) -> wire::VarCtx<'_> {
-        let instance = self.layout.instance(|| self.normalised_coords());
+        let instance = self.instance();
         if instance.is_default {
             return wire::VarCtx::DEFAULT;
         }
@@ -873,36 +897,45 @@ impl<'a> Font<'a> {
         out: &mut Vec<ShapedGlyph>,
     ) {
         let zero_marks = zero_marks && self.gdef().is_some();
-        let instance = self.layout.instance(|| self.normalised_coords());
-        let varied = !instance.is_default;
+        let instance = self.instance();
+        // The variation tables are only touched away from the default
+        // instance.
+        let coords: Option<&[f32]> = (!instance.is_default).then_some(&*instance.coords);
+        let hvar = coords.and_then(|c| Some((self.hvar()?, c)));
+        let vvar = coords.and_then(|c| Some((self.vvar()?, c)));
         let vertical = direction == Direction::TopToBottom;
-        out.reserve_exact(buf.len());
-        out.extend(buf.iter().map(|w| {
-            let (x_advance, y_advance) = if zero_marks && self.is_mark_glyph(w.gid) {
-                (0, 0)
-            } else if vertical {
+        let advance = |gid: u16| -> (i32, i32) {
+            if zero_marks && self.is_mark_glyph(gid) {
+                return (0, 0);
+            }
+            if vertical {
                 // Without vertical metrics the em height stands in.
                 let mut height = self
-                    .glyph_advance_height(w.gid)
+                    .glyph_advance_height(gid)
                     .map_or(self.units_per_em() as i32, i32::from);
-                if varied
-                    && let Some(vvar) = self.vvar()
-                    && let Some(delta) = vvar.advance_height_delta(w.gid, &instance.coords)
+                if let Some((vvar, coords)) = vvar
+                    && let Some(delta) = vvar.advance_height_delta(gid, coords)
                 {
                     height = (height as f32 + delta).round() as i32;
                 }
-                (0, -height)
-            } else {
-                let mut width = self.glyph_advance(w.gid) as u16 as i32;
-                if varied
-                    && let Some(hvar) = self.hvar()
-                    && let Some(delta) = hvar.advance_width_delta(w.gid, &instance.coords)
-                {
-                    // Rounded as a whole, like `glyph_advance_varied`.
-                    width = (width as f32 + delta).round() as i32;
-                }
-                (width, 0)
+                return (0, -height);
+            }
+            let width = || self.glyph_advance(gid) as u16 as i32;
+            let width = match hvar {
+                Some((hvar, coords)) => self.layout.varied_advance(gid, || {
+                    match hvar.advance_width_delta(gid, coords) {
+                        // Rounded as a whole, like `glyph_advance_varied`.
+                        Some(delta) => (width() as f32 + delta).round() as i32,
+                        None => width(),
+                    }
+                }),
+                None => width(),
             };
+            (width, 0)
+        };
+        out.reserve_exact(buf.len());
+        out.extend(buf.iter().map(|w| {
+            let (x_advance, y_advance) = advance(w.gid);
             ShapedGlyph {
                 glyph_id: w.gid,
                 cluster: w.cluster,
@@ -943,6 +976,8 @@ fn plan_lookups<'r>(
                 index,
                 mask: setting.mask,
                 alternate: setting.alternate,
+                first_digest: Digest::FULL,
+                second_digest: Digest::FULL,
             }));
         }
     }
@@ -962,7 +997,17 @@ fn plan_lookups<'r>(
             _ => merged.push(lookup),
         }
     }
-    // Drop lookups that do not exist or have a type nothing applies.
-    merged.retain(|l| eng.lookup(l.index).is_some());
+    // Drop lookups that do not exist or have a type nothing applies;
+    // note the digests of the others.
+    merged.retain_mut(|planned| match eng.lookup(planned.index) {
+        Some(lookup) => {
+            planned.first_digest = lookup.first.digest();
+            if let Some(second) = lookup.second_components.as_ref() {
+                planned.second_digest = second.digest();
+            }
+            true
+        }
+        None => false,
+    });
     merged
 }

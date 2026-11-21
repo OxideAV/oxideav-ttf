@@ -140,7 +140,10 @@ impl<'a> Font<'a> {
     /// glyph — the union of the Coverage tables its sub-tables test the
     /// current glyph against (for a contextual lookup: the first glyph
     /// of the input sequence) — in ascending glyph-id order. Empty for a
-    /// lookup that does not exist.
+    /// lookup that does not exist. (For a Coverage table whose records
+    /// are out of order this lists every glyph the table names;
+    /// [`Font::gsub_lookup_covers`] says which of them the Coverage
+    /// search actually finds.)
     pub fn gsub_lookup_coverage(&self, lookup_index: u16) -> Vec<u16> {
         self.gsub_engine()
             .map(|eng| lookup_coverage(eng, lookup_index))
@@ -310,12 +313,15 @@ fn lookup_coverage(eng: Engine<'_, '_>, lookup_index: u16) -> Vec<u16> {
             mark_coverage_glyphs(coverage, &mut listed);
         }
     }
-    (0..=u16::MAX)
-        .filter(|&g| listed[(g >> 6) as usize] >> (g & 63) & 1 != 0)
-        // Keep what the lookup can really reach: a listed glyph must be
-        // one the Coverage search finds.
-        .filter(|&g| lookup_covers(eng, lookup_index, g))
-        .collect()
+    let mut glyphs = Vec::new();
+    for (word_index, &word) in listed.iter().enumerate() {
+        let mut bits = word;
+        while bits != 0 {
+            glyphs.push((word_index * 64) as u16 + bits.trailing_zeros() as u16);
+            bits &= bits - 1;
+        }
+    }
+    glyphs
 }
 
 fn lookup_covers(eng: Engine<'_, '_>, lookup_index: u16, glyph_id: u16) -> bool {
@@ -333,21 +339,41 @@ fn mark_coverage_glyphs(coverage: &[u8], listed: &mut [u64]) {
     let (Some(format), Some(count)) = (wire::rd16(coverage, 0), wire::rd16(coverage, 2)) else {
         return;
     };
-    let mut mark = |glyph: u16| listed[(glyph >> 6) as usize] |= 1u64 << (glyph & 63);
     for i in 0..count as usize {
-        match format {
+        let (start, end) = match format {
             1 => match wire::rd16(coverage, 4 + i * 2) {
-                Some(glyph) => mark(glyph),
+                Some(glyph) => (glyph, glyph),
                 None => return,
             },
             2 => {
                 let at = 4 + i * 6;
                 match (wire::rd16(coverage, at), wire::rd16(coverage, at + 2)) {
-                    (Some(start), Some(end)) => (start..=end).for_each(&mut mark),
+                    (Some(start), Some(end)) if start <= end => (start, end),
+                    (Some(_), Some(_)) => continue,
                     _ => return,
                 }
             }
             _ => return,
+        };
+        // Whole words of the range at once.
+        let (first_word, last_word) = ((start >> 6) as usize, (end >> 6) as usize);
+        for (word_index, word) in listed
+            .iter_mut()
+            .enumerate()
+            .take(last_word + 1)
+            .skip(first_word)
+        {
+            let from = if word_index == first_word {
+                start & 63
+            } else {
+                0
+            };
+            let to = if word_index == last_word {
+                end & 63
+            } else {
+                63
+            };
+            *word |= (u64::MAX >> (63 - to)) & (u64::MAX << from);
         }
     }
 }

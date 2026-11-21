@@ -90,8 +90,62 @@ enum CoverageLayout {
     ChainContext,
 }
 
-/// A set of glyph ids as a bitmap over `0..capacity`, with a 64-bit
-/// digest (bit `gid % 64` set for every member).
+/// A two-part summary of a set of glyph ids: which residues modulo 64
+/// its members have, and which of 64 equal blocks of the font's glyph id
+/// range they fall in. Two sets whose summaries do not
+/// [intersect](Digest::intersects) share no glyph; letters and marks of
+/// a text font usually sit in different blocks, so the block half
+/// separates what the residue half (saturated by any large set) cannot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Digest {
+    residues: u64,
+    blocks: u64,
+}
+
+/// `log2` of the block size that splits the glyph ids `0..num_glyphs`
+/// into at most 64 blocks.
+pub(crate) fn block_shift(num_glyphs: usize) -> u8 {
+    let bits = usize::BITS - num_glyphs.saturating_sub(1).leading_zeros();
+    bits.saturating_sub(6) as u8
+}
+
+impl Digest {
+    /// Summary of the empty set.
+    pub(crate) const EMPTY: Digest = Digest {
+        residues: 0,
+        blocks: 0,
+    };
+    /// Summary that intersects every non-empty summary.
+    pub(crate) const FULL: Digest = Digest {
+        residues: u64::MAX,
+        blocks: u64::MAX,
+    };
+
+    /// Summary of one glyph id. Ids past the last block (not glyphs of
+    /// the font) all count for the last block.
+    #[inline]
+    pub(crate) fn of(gid: u16, shift: u8) -> Digest {
+        Digest {
+            residues: digest_bit(gid),
+            blocks: 1u64 << ((gid >> shift).min(63)),
+        }
+    }
+
+    #[inline]
+    pub(crate) fn add(&mut self, other: Digest) {
+        self.residues |= other.residues;
+        self.blocks |= other.blocks;
+    }
+
+    /// `false` only when the two summarised sets share no glyph.
+    #[inline]
+    pub(crate) fn intersects(&self, other: &Digest) -> bool {
+        self.residues & other.residues != 0 && self.blocks & other.blocks != 0
+    }
+}
+
+/// A set of glyph ids as a bitmap over `0..capacity`, with a
+/// [`Digest`] of its members.
 ///
 /// Membership is *conservative*: [`GlyphSet::contains`] answers `true`
 /// for every member and for every glyph id beyond the bitmap's
@@ -100,10 +154,12 @@ enum CoverageLayout {
 #[derive(Debug)]
 pub(crate) struct GlyphSet {
     words: Box<[u64]>,
-    digest: u64,
+    digest: Digest,
+    /// Block shift of the digest ([`block_shift`] of the capacity).
+    shift: u8,
 }
 
-/// The digest bit of one glyph id.
+/// Bit `gid % 64`: the position of a glyph id inside its bitmap word.
 #[inline]
 pub(crate) fn digest_bit(gid: u16) -> u64 {
     1u64 << (gid & 63)
@@ -113,14 +169,16 @@ impl GlyphSet {
     fn with_capacity(glyphs: usize) -> Self {
         Self {
             words: vec![0u64; glyphs.div_ceil(64)].into_boxed_slice(),
-            digest: 0,
+            digest: Digest::EMPTY,
+            shift: block_shift(glyphs),
         }
     }
 
     fn universal() -> Self {
         Self {
             words: Box::new([]),
-            digest: u64::MAX,
+            digest: Digest::FULL,
+            shift: 0,
         }
     }
 
@@ -133,14 +191,14 @@ impl GlyphSet {
         }
     }
 
-    /// `true` when no glyph summarised by `run_digest` can be a member.
+    /// The summary of the set's members.
     #[inline]
-    pub(crate) fn disjoint_from(&self, run_digest: u64) -> bool {
-        self.digest & run_digest == 0
+    pub(crate) fn digest(&self) -> Digest {
+        self.digest
     }
 
     fn insert(&mut self, gid: u16) {
-        self.digest |= digest_bit(gid);
+        self.digest.add(Digest::of(gid, self.shift));
         if let Some(w) = self.words.get_mut((gid >> 6) as usize) {
             *w |= 1u64 << (gid & 63);
         }
@@ -151,11 +209,14 @@ impl GlyphSet {
             return;
         }
         if end - start >= 63 {
-            self.digest = u64::MAX;
+            self.digest.residues = u64::MAX;
         } else {
             for g in start..=end {
-                self.digest |= digest_bit(g);
+                self.digest.residues |= digest_bit(g);
             }
+        }
+        for block in (start >> self.shift).min(63)..=(end >> self.shift).min(63) {
+            self.digest.blocks |= 1u64 << block;
         }
         let cap = self.words.len() * 64;
         let lo = start as usize;
@@ -175,7 +236,7 @@ impl GlyphSet {
     /// Add every member of `other` (a set of the same capacity; a
     /// universal `other` makes `self` universal).
     fn union_with(&mut self, other: &GlyphSet) {
-        self.digest |= other.digest;
+        self.digest.add(other.digest);
         if other.words.len() != self.words.len() {
             *self = GlyphSet::universal();
             return;
@@ -316,20 +377,24 @@ pub(crate) struct LookupAccel {
     /// Ligature record in the lookup — the longest glyph sequence one
     /// match can inspect. `usize::MAX` when it could not be determined.
     pub(crate) max_components: usize,
-    /// GSUB LigatureSubst only: every glyph that is the second component
-    /// of some Ligature record, when every record of the lookup has at
-    /// least two components and could be read. A ligature can then only
-    /// form where the next visible glyph is in this set.
+    /// Ligature and (chained) contextual lookups: every glyph that some
+    /// rule of the lookup accepts directly after its first glyph — the
+    /// second component of a Ligature record, the second input glyph of
+    /// a sequence rule, or the first lookahead glyph of a rule with a
+    /// one-glyph input sequence. Present only when *every* rule of the
+    /// lookup looks at such a glyph and could be read; the lookup can
+    /// then only act where the next visible glyph is in this set.
     pub(crate) second_components: Option<GlyphSet>,
     /// GPOS PairPos only: every sub-table adjusts nothing but the first
-    /// glyph's x-advance, by a plain value (ValueFormat1 is exactly
-    /// `X_ADVANCE`, ValueFormat2 is empty). The lookup's whole effect on
-    /// a glyph pair is then one 16-bit number, which `pair_memo` caches.
+    /// glyph's x-advance (ValueFormat1 is `X_ADVANCE`, optionally with
+    /// its device / variation offset; ValueFormat2 is empty). The
+    /// lookup's whole effect on a glyph pair is then one number, which
+    /// `pair_memo` caches.
     pub(crate) plain_kerning: bool,
     /// GPOS PairPos with `plain_kerning`: memo of the lookup's
-    /// adjustment per `(left, right)` glyph pair. Text repeats letter
-    /// pairs heavily, so most pairs are answered here without visiting a
-    /// sub-table.
+    /// adjustment per `(left, right)` glyph pair at the current
+    /// variation instance. Text repeats letter pairs heavily, so most
+    /// pairs are answered here without visiting a sub-table.
     pub(crate) pair_memo: Memo,
 }
 
@@ -397,15 +462,26 @@ impl LookupAccel {
         let mut first = glyph_set();
         let mut subs = Vec::new();
         let mut max_components = 0usize;
-        let mut second = (is_ligature && filters).then(|| GlyphSet::with_capacity(num_glyphs));
+        // Sequence context (`Some(false)`) or chained (`Some(true)`).
+        let context = match (table, kind) {
+            (LayoutTable::Gsub, 5) | (LayoutTable::Gpos, 7) => Some(false),
+            (LayoutTable::Gsub, 6) | (LayoutTable::Gpos, 8) => Some(true),
+            _ => None,
+        };
+        let mut second = ((is_ligature || context.is_some()) && filters)
+            .then(|| GlyphSet::with_capacity(num_glyphs));
         let mut plain_kerning = is_pair && filters;
         for (sub_kind, sub) in resolved {
             if sub_kind != kind {
                 continue;
             }
             if is_pair {
-                plain_kerning &=
-                    matches!((read_u16(sub, 4), read_u16(sub, 6)), (Ok(0x0004), Ok(0)));
+                // X_ADVANCE, with or without its device / variation
+                // offset, and nothing for the second glyph.
+                plain_kerning &= matches!(
+                    (read_u16(sub, 4), read_u16(sub, 6)),
+                    (Ok(0x0004 | 0x0044), Ok(0))
+                );
             }
             let mut sub_first = glyph_set();
             let mut first_is_exact = false;
@@ -426,6 +502,12 @@ impl LookupAccel {
                         sub_first = GlyphSet::universal();
                         first = GlyphSet::universal();
                     }
+                }
+                if let Some(chained) = context
+                    && let Some(followers) = second.as_mut()
+                    && context_followers(sub, chained, followers).is_none()
+                {
+                    second = None;
                 }
                 if is_ligature {
                     match ligature_components(sub, second.as_mut()) {
@@ -581,6 +663,178 @@ fn ligature_components(sub: &[u8], mut second: Option<&mut GlyphSet>) -> Option<
     Some(shape)
 }
 
+/// Add every glyph a ClassDef table (§6.2.6) puts in `class` (not 0).
+/// `None` when the table cannot be read.
+fn insert_class(set: &mut GlyphSet, class_def: &[u8], class: u16) -> Option<()> {
+    match read_u16(class_def, 0).ok()? {
+        1 => {
+            let start = read_u16(class_def, 2).ok()?;
+            let count = read_u16(class_def, 4).ok()?;
+            for i in 0..count {
+                if read_u16(class_def, 6 + i as usize * 2).ok()? == class {
+                    match start.checked_add(i) {
+                        Some(glyph) => set.insert(glyph),
+                        None => break,
+                    }
+                }
+            }
+        }
+        2 => {
+            let count = read_u16(class_def, 2).ok()? as usize;
+            for i in 0..count {
+                let at = 4 + i * 6;
+                if read_u16(class_def, at + 4).ok()? == class {
+                    set.insert_range(
+                        read_u16(class_def, at).ok()?,
+                        read_u16(class_def, at + 2).ok()?,
+                    );
+                }
+            }
+        }
+        // An unknown format assigns no class.
+        _ => {}
+    }
+    Some(())
+}
+
+/// The table an `Offset16` at `at` points to; `Ok(None)` for NULL.
+fn optional_table(bytes: &[u8], at: usize) -> Option<Option<&[u8]>> {
+    match read_u16(bytes, at).ok()? {
+        0 => Some(None),
+        offset => Some(Some(bytes.get(offset as usize..)?)),
+    }
+}
+
+/// Add to `followers` every glyph some rule of a sequence-context
+/// (`chained == false`) or chained-sequence-context sub-table accepts
+/// directly after its first input glyph: the second input glyph, or —
+/// for a one-glyph input sequence — the first lookahead glyph.
+///
+/// `None` when a rule looks at no glyph after its first (so the
+/// sub-table can match whatever follows), when a rule asks for class 0
+/// there (any glyph outside the ClassDef), or when the sub-table cannot
+/// be read with confidence; the caller then does not filter.
+fn context_followers(sub: &[u8], chained: bool, followers: &mut GlyphSet) -> Option<()> {
+    /// What a rule asks of the glyph after its first input glyph:
+    /// `(from the lookahead sequence, value)`. `Ok(None)`: the rule can
+    /// never match. `Err`: no such glyph, or unreadable.
+    fn follower(rule: &[u8], chained: bool) -> Result<Option<(bool, u16)>, ()> {
+        let word = |at: usize| read_u16(rule, at).map_err(|_| ());
+        if !chained {
+            return match word(0)? {
+                0 => Ok(None),
+                1 => Err(()),
+                _ => Ok(Some((false, word(4)?))),
+            };
+        }
+        let input_at = 2 + word(0)? as usize * 2;
+        match word(input_at)? {
+            0 => Ok(None),
+            1 => {
+                let lookahead_at = input_at + 2;
+                match word(lookahead_at)? {
+                    0 => Err(()),
+                    _ => Ok(Some((true, word(lookahead_at + 2)?))),
+                }
+            }
+            _ => Ok(Some((false, word(input_at + 2)?))),
+        }
+    }
+    /// Every rule of the rule set whose offset is stored at `at`.
+    fn each_rule(
+        sub: &[u8],
+        at: usize,
+        chained: bool,
+        mut visit: impl FnMut(bool, u16) -> Option<()>,
+    ) -> Option<()> {
+        let Some(set) = optional_table(sub, at)? else {
+            return Some(());
+        };
+        for r in 0..read_u16(set, 0).ok()? as usize {
+            let Some(rule) = optional_table(set, 2 + r * 2)? else {
+                continue;
+            };
+            if let Some((from_lookahead, value)) = follower(rule, chained).ok()? {
+                visit(from_lookahead, value)?;
+            }
+        }
+        Some(())
+    }
+
+    match read_u16(sub, 0).ok()? {
+        1 => {
+            for s in 0..read_u16(sub, 4).ok()? as usize {
+                each_rule(sub, 6 + s * 2, chained, |_, glyph| {
+                    followers.insert(glyph);
+                    Some(())
+                })?;
+            }
+        }
+        2 => {
+            let (input_def_at, lookahead_def_at, sets_at) =
+                if chained { (6, 8, 10) } else { (4, 4, 6) };
+            let input_def = optional_table(sub, input_def_at)?.unwrap_or(&[]);
+            let lookahead_def = optional_table(sub, lookahead_def_at)?.unwrap_or(&[]);
+            // Each (sequence, class) once.
+            let mut seen: Vec<(bool, u16)> = Vec::new();
+            for s in 0..read_u16(sub, sets_at).ok()? as usize {
+                each_rule(
+                    sub,
+                    sets_at + 2 + s * 2,
+                    chained,
+                    |from_lookahead, class| {
+                        if class == 0 {
+                            return None;
+                        }
+                        if seen.contains(&(from_lookahead, class)) {
+                            return Some(());
+                        }
+                        seen.push((from_lookahead, class));
+                        let def = if from_lookahead {
+                            lookahead_def
+                        } else {
+                            input_def
+                        };
+                        // An empty (NULL) ClassDef assigns no class.
+                        if def.is_empty() {
+                            return Some(());
+                        }
+                        insert_class(followers, def, class)
+                    },
+                )?;
+            }
+        }
+        3 => {
+            let coverage_at = if chained {
+                let input_at = 4 + read_u16(sub, 2).ok()? as usize * 2;
+                match read_u16(sub, input_at).ok()? {
+                    0 => return Some(()),
+                    1 => {
+                        let lookahead_at = input_at + 4;
+                        match read_u16(sub, lookahead_at).ok()? {
+                            0 => return None,
+                            _ => lookahead_at + 2,
+                        }
+                    }
+                    _ => input_at + 4,
+                }
+            } else {
+                match read_u16(sub, 2).ok()? {
+                    0 => return Some(()),
+                    1 => return None,
+                    _ => 8,
+                }
+            };
+            if let Some(coverage) = optional_table(sub, coverage_at)? {
+                followers.insert_coverage(coverage);
+            }
+        }
+        // An unknown format never matches.
+        _ => {}
+    }
+    Some(())
+}
+
 /// `true` when a Coverage table is one a binary search reads
 /// unambiguously: every record readable and in strictly increasing
 /// order (format 2: non-overlapping ranges with `start <= end`).
@@ -664,6 +918,12 @@ pub(crate) struct PlanLookup {
     pub(crate) mask: u32,
     /// Alternate picked by an AlternateSubst lookup (zero-based).
     pub(crate) alternate: u16,
+    /// Digest of the lookup's first-glyph set, and of its second-glyph
+    /// set (full when it has none): a run whose glyph digest misses
+    /// either cannot be touched by the lookup, which is decided here
+    /// without visiting the lookup.
+    pub(crate) first_digest: Digest,
+    pub(crate) second_digest: Digest,
 }
 
 /// One requested feature of a shape plan key.
@@ -701,6 +961,22 @@ pub(crate) struct InstanceData {
     pub(crate) is_default: bool,
 }
 
+/// Memo of varied nominal advances: 1024 slots, 8 KiB, allocated once
+/// a few hundred glyphs have been asked for.
+struct VariedAdvances(Memo);
+
+impl Default for VariedAdvances {
+    fn default() -> Self {
+        VariedAdvances(Memo::with_bits(10))
+    }
+}
+
+impl std::fmt::Debug for VariedAdvances {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("VariedAdvances")
+    }
+}
+
 /// All shaping accelerators of one font.
 #[derive(Debug, Default)]
 pub(crate) struct LayoutCache {
@@ -719,6 +995,9 @@ pub(crate) struct LayoutCache {
     gdef_store: OnceLock<Option<ItemVariationStore>>,
     /// Derived data of the current variation instance.
     instance: OnceLock<InstanceData>,
+    /// Nominal advance per glyph at the current variation instance
+    /// (`hmtx` + `HVAR`), for a font away from its default instance.
+    varied_advances: VariedAdvances,
     /// Most-recently-used first.
     plans: Mutex<Vec<PlanEntry>>,
 }
@@ -776,6 +1055,19 @@ impl LayoutCache {
                 coords,
             }
         })
+    }
+
+    /// The nominal advance of `glyph_id` at the current variation
+    /// instance: memoised `compute()` (accelerators on, and a value
+    /// that fits 16 bits), else `compute()` itself.
+    pub(crate) fn varied_advance(&self, glyph_id: u16, compute: impl Fn() -> i32) -> i32 {
+        if self.lean {
+            return compute();
+        }
+        self.varied_advances
+            .0
+            .get_or_compute(glyph_id as u32, || u16::try_from(compute()).ok())
+            .map_or_else(&compute, i32::from)
     }
 
     /// `true` when accelerators are switched off.
@@ -846,6 +1138,15 @@ impl LayoutCache {
             .unwrap_or_else(|e| e.into_inner())
             .clear();
         self.instance = OnceLock::new();
+        // Memoised values of the old instance.
+        self.varied_advances = VariedAdvances::default();
+        if let Some(slots) = self.gpos.slots.get_mut() {
+            for slot in slots.iter_mut() {
+                if let Some(Some(lookup)) = slot.get_mut() {
+                    lookup.pair_memo = Memo::with_bits(PAIR_MEMO_BITS);
+                }
+            }
+        }
     }
 }
 
@@ -949,26 +1250,39 @@ mod tests {
         // Beyond the bitmap capacity (rounded up to a word): conservative.
         assert!(s.contains(300));
         assert!(s.contains(u16::MAX));
-        assert!(!s.disjoint_from(digest_bit(3)));
+        let one = |g: u16, set: &GlyphSet| Digest::of(g, set.shift);
+        assert!(s.digest().intersects(&one(3, &s)));
         let mut union = GlyphSet::with_capacity(200);
         union.insert(5);
         union.union_with(&s);
         for g in 0..200u16 {
             assert_eq!(union.contains(g), s.contains(g) || g == 5, "gid {g}");
         }
-        assert!(!union.disjoint_from(digest_bit(5)));
+        assert!(union.digest().intersects(&one(5, &union)));
         union.union_with(&GlyphSet::universal());
-        assert!(union.contains(1) && !union.disjoint_from(1));
+        assert!(union.contains(1) && union.digest().intersects(&Digest::of(1, 0)));
         assert!(GlyphSet::universal().contains(7));
-        assert!(!GlyphSet::universal().disjoint_from(1));
-        let mut small = GlyphSet::with_capacity(4096);
-        small.insert(100);
-        small.insert_range(110, 112);
-        assert!(small.disjoint_from(digest_bit(5) | digest_bit(99)));
-        assert!(!small.disjoint_from(digest_bit(111)));
-        // Same digest bit as 100, not a member: the bitmap decides.
-        assert!(!small.disjoint_from(digest_bit(164)));
-        assert!(!small.contains(164));
+        assert!(GlyphSet::universal().digest().intersects(&Digest::of(1, 9)));
+        let mut small = GlyphSet::with_capacity(8192);
+        assert_eq!(small.shift, 7);
+        small.insert(130);
+        small.insert_range(140, 142);
+        let mut others = one(5, &small);
+        others.add(one(99, &small));
+        assert!(!small.digest().intersects(&others));
+        assert!(small.digest().intersects(&one(141, &small)));
+        // Same residue as 130 and the same block of 128, not a member:
+        // the bitmap decides.
+        assert!(small.digest().intersects(&one(194, &small)));
+        assert!(!small.contains(194));
+        // Same residue, a different block: the digest already says no.
+        assert!(!small.digest().intersects(&one(130 + 1024, &small)));
+        // Glyph ids past the last block share it.
+        assert_eq!(Digest::of(u16::MAX, 2).blocks, 1u64 << 63);
+        assert_eq!(block_shift(0), 0);
+        assert_eq!(block_shift(64), 0);
+        assert_eq!(block_shift(65), 1);
+        assert_eq!(block_shift(65536), 10);
     }
 
     #[test]
