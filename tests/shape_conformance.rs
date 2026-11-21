@@ -614,6 +614,11 @@ fn positioning_values_and_advances_follow_the_variation_instance() {
                 add(at[2], (300 + delta(100.0), 900 + delta(-80.0))),
                 "wght {weight}"
             );
+            // Shaped often enough for the per-instance memo tables to be
+            // in use: still the values of this instance.
+            for _ in 0..600 {
+                assert_eq!(shape(&font, "AVox"), shaped);
+            }
             // The per-lookup queries read the same instance.
             let pair = font.gpos_pair_adjustment(1, a, v).unwrap();
             assert_eq!(pair.first.x_advance as i32, -100 + delta(-30.0));
@@ -1101,6 +1106,94 @@ fn right_to_left_runs_and_zeroed_mark_advances() {
     assert_eq!(origins(&shaped)[1], (0, -height));
 }
 
+/// A font whose GPOS has no `kern` feature still kerns through its
+/// legacy `kern` table when `kern` is requested; marks between the two
+/// glyphs do not break the pair.
+#[test]
+fn kern_table_supplies_kerning_when_gpos_has_none() {
+    let host = Font::from_bytes(DEJAVU).unwrap();
+    if host.kern_header_variant().is_none() {
+        eprintln!("skipped: fixture has no kern table");
+        return;
+    }
+    // The first capital pair the table kerns.
+    let letters: Vec<char> = ('A'..='Z').collect();
+    let pair = letters
+        .iter()
+        .flat_map(|&a| letters.iter().map(move |&b| (a, b)))
+        .find(|&(a, b)| {
+            // GPOS is consulted first by `lookup_kerning`; drop it below.
+            let bytes = font_with(&no_lookups(), &no_lookups(), &gdef_for("", "", "x"));
+            Font::from_bytes(&bytes).unwrap().lookup_kerning(g(a), g(b)) != 0
+        });
+    let Some((a, b)) = pair else {
+        eprintln!("skipped: no capital pair in the kern table");
+        return;
+    };
+    let bytes = font_with(&no_lookups(), &no_lookups(), &gdef_for("", "", "x"));
+    let font = Font::from_bytes(&bytes).unwrap();
+    let value = font.lookup_kerning(g(a), g(b)) as i32;
+    let nominal = font.glyph_advance(g(a)) as i32;
+    let text: String = [a, b].iter().collect();
+    let kern = [*b"kern"];
+    let shaped = shape_both(&bytes, |font| font.shape(&text, *b"DFLT", None, &kern));
+    assert_eq!(shaped[0].x_advance, nominal + value);
+    // Not requested: no kerning.
+    let shaped = shape_both(&bytes, |font| font.shape(&text, *b"DFLT", None, &[]));
+    assert_eq!(shaped[0].x_advance, nominal);
+    // Across a mark.
+    let text: String = [a, 'x', b].iter().collect();
+    let shaped = shape_both(&bytes, |font| font.shape(&text, *b"DFLT", None, &kern));
+    assert_eq!(shaped[0].x_advance, nominal + value);
+    // Right to left the pair is (b, a) as drawn, on b's advance.
+    let options = ShapeOptions::new(*b"DFLT")
+        .with_direction(Direction::RightToLeft)
+        .with_feature(*b"kern");
+    let reversed: String = [b, a].iter().collect();
+    let shaped = shape_both(&bytes, |font| font.shape_text(&reversed, &options));
+    assert_eq!(gids(&shaped), vec![g(a), g(b)]);
+    assert_eq!(shaped[0].x_advance, nominal + value);
+    // A GPOS `kern` feature takes over, even one that does nothing here.
+    let gpos = layout_table(
+        &[(*b"kern", &[0])],
+        &[Lookup::new(1, vec![single_pos(&[g('q')], X_ADVANCE, &[1])])],
+    );
+    let bytes = font_with(&no_lookups(), &gpos, &gdef_for("", "", "x"));
+    let text: String = [a, b].iter().collect();
+    let shaped = shape_both(&bytes, |font| font.shape(&text, *b"DFLT", None, &kern));
+    assert_eq!(shaped[0].x_advance, nominal);
+}
+
+/// With `zero_mark_advances`, a font that removes a mark's advance
+/// itself (a negative xAdvance in GPOS) does not push it below zero.
+#[test]
+fn zeroed_mark_advances_ignore_advance_adjustments() {
+    let host = Font::from_bytes(DEJAVU).unwrap();
+    let width = host.glyph_advance(g('x')) as i32;
+    let gpos = all_lookups(&[Lookup::new(
+        1,
+        vec![single_pos(
+            &[g('x'), g('o')],
+            X_PLACEMENT | X_ADVANCE,
+            &[-9, -(width as i16)],
+        )],
+    )]);
+    let bytes = font_with(&no_lookups(), &gpos, &gdef_for("o", "", "x"));
+    let plain = shape(&bytes, "ox");
+    assert_eq!((plain[1].x_offset, plain[1].x_advance), (-9, 0));
+    let options = ShapeOptions::new(*b"DFLT")
+        .with_feature(TEST)
+        .with_zero_mark_advances(true);
+    let shaped = shape_both(&bytes, |font| font.shape_text("ox", &options));
+    // The mark keeps its placement and a zero advance; the base is
+    // adjusted as usual.
+    assert_eq!((shaped[1].x_offset, shaped[1].x_advance), (-9, 0));
+    assert_eq!(
+        shaped[0].x_advance,
+        host.glyph_advance(g('o')) as i32 - width
+    );
+}
+
 /// The per-lookup queries a layout engine drives lookups with.
 #[test]
 fn lookup_queries() {
@@ -1121,7 +1214,7 @@ fn lookup_queries() {
         .unwrap();
     assert_eq!(anchors.mark_class, 1);
     assert_eq!(anchors.attach_anchor, (410, -60));
-    assert_eq!(anchors.offset(), (410, -60));
+    assert_eq!(anchors.offset, (410, -60));
     // No class-1 anchor on the third component; no fourth component.
     assert_eq!(font.gpos_mark_ligature_anchors(0, g('M'), 2, g('y')), None);
     assert_eq!(font.gpos_mark_ligature_anchors(0, g('M'), 3, g('x')), None);
@@ -1139,9 +1232,9 @@ fn lookup_queries() {
         (anchors.mark_anchor, anchors.attach_anchor),
         ((30, 40), (300, 900))
     );
-    assert_eq!(anchors.offset(), (270, 860));
+    assert_eq!(anchors.offset, (270, 860));
     let anchors = font.gpos_mark_mark_anchors(1, g('x'), g('z')).unwrap();
-    assert_eq!(anchors.offset(), (50 - 3, 400 - 2));
+    assert_eq!(anchors.offset, (50 - 3, 400 - 2));
     assert_eq!(font.gpos_mark_mark_anchors(1, g('z'), g('y')), None);
     let cursive = font.gpos_cursive_anchors(2, g('b')).unwrap();
     assert_eq!(

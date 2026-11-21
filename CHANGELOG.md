@@ -26,6 +26,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `gpos_ligature_component_count`, `gpos_cursive_anchors`.
 - `GsubFeature::required` / `GposFeature::required` mark the language
   system's required feature.
+- Shaping with `kern` requested falls back to the legacy `kern` table
+  when the font's GPOS has no `kern` feature for the language system.
 
 ### Changed
 
@@ -69,6 +71,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   contextual *positioning* rule may be of any positioning type.
 - The language system's required feature is applied without being
   requested.
+- A mark attachment at a variation instance rounds the difference of
+  the two (fractional) anchors once instead of rounding each anchor.
 
 - GSUB contextual substitution (LookupType 5) formats 1 and 2 read the
   SequenceRule / ClassSequenceRule record count from the wrong place

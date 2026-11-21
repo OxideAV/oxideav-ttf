@@ -939,6 +939,10 @@ pub(crate) struct PlanFeature {
 pub(crate) struct ShapePlan {
     pub(crate) gsub: Vec<PlanLookup>,
     pub(crate) gpos: Vec<PlanLookup>,
+    /// `Some(mask)`: the request asks for `kern` (under glyph mask
+    /// `mask`), GPOS has no `kern` feature for the language system, and
+    /// the font has a `kern` table — kerning comes from that table.
+    pub(crate) legacy_kern: Option<u32>,
 }
 
 #[derive(Debug)]

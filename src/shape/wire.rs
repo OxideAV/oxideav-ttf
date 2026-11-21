@@ -72,6 +72,15 @@ impl VarCtx<'_> {
         }
         resolve_device_delta(base, offset, self.ivs, self.coords).round() as i32
     }
+
+    /// The same delta, not rounded.
+    #[inline]
+    pub(crate) fn exact_delta(&self, base: &[u8], offset: u16) -> f32 {
+        if offset == 0 || self.ivs.is_none() {
+            return 0.0;
+        }
+        resolve_device_delta(base, offset, self.ivs, self.coords)
+    }
 }
 
 /// A decoded ValueRecord: placement and advance adjustments.
@@ -142,22 +151,34 @@ pub(crate) fn read_value(
     out
 }
 
-/// Decode an Anchor table (formats 1 – 3). Format 2 names a contour
-/// point for hinted rendering; its design-unit coordinates are what an
-/// unhinted layout uses. Format 3 adds the device / variation deltas.
-pub(crate) fn read_anchor(anchor: &[u8], var: &VarCtx<'_>) -> Option<(i32, i32)> {
+/// Decode an Anchor table (formats 1 – 3) without rounding its
+/// variation deltas. Format 2 names a contour point for hinted
+/// rendering; its design-unit coordinates are what an unhinted layout
+/// uses. Format 3 adds the device / variation deltas.
+pub(crate) fn read_anchor_exact(anchor: &[u8], var: &VarCtx<'_>) -> Option<(f32, f32)> {
     let format = rd16(anchor, 0)?;
-    let x = rd16s(anchor, 2)? as i32;
-    let y = rd16s(anchor, 4)? as i32;
+    let x = rd16s(anchor, 2)? as f32;
+    let y = rd16s(anchor, 4)? as f32;
     match format {
         1 | 2 => Some((x, y)),
         3 => {
-            let dx = rd16(anchor, 6).map_or(0, |off| var.delta(anchor, off));
-            let dy = rd16(anchor, 8).map_or(0, |off| var.delta(anchor, off));
+            let dx = rd16(anchor, 6).map_or(0.0, |off| var.exact_delta(anchor, off));
+            let dy = rd16(anchor, 8).map_or(0.0, |off| var.exact_delta(anchor, off));
             Some((x + dx, y + dy))
         }
         _ => None,
     }
+}
+
+/// Decode an Anchor table to whole design units.
+pub(crate) fn read_anchor(anchor: &[u8], var: &VarCtx<'_>) -> Option<(i32, i32)> {
+    read_anchor_exact(anchor, var).map(whole)
+}
+
+/// A point rounded to whole design units.
+#[inline]
+fn whole(point: (f32, f32)) -> (i32, i32) {
+    (point.0.round() as i32, point.1.round() as i32)
 }
 
 /// SinglePos (GPOS LookupType 1): the adjustment of `gid`.
@@ -310,11 +331,27 @@ pub(crate) struct MarkHit {
     /// Anchor on the glyph attached to (base, ligature component, or
     /// preceding mark).
     pub(crate) target: (i32, i32),
+    /// Attached-to anchor minus mark anchor, rounded once: where the
+    /// mark's origin goes relative to the origin of the glyph attached
+    /// to. At a variation instance both anchors carry fractional
+    /// deltas; rounding their difference loses less than rounding each.
+    pub(crate) offset: (i32, i32),
+}
+
+impl MarkHit {
+    fn new(class: u16, mark: (f32, f32), target: (f32, f32)) -> Self {
+        MarkHit {
+            class,
+            mark: whole(mark),
+            target: whole(target),
+            offset: whole((target.0 - mark.0, target.1 - mark.1)),
+        }
+    }
 }
 
 /// `(class, anchor)` of `mark` from the MarkArray of a mark-attachment
 /// sub-table (mark Coverage offset at byte 2, MarkArray offset at 8).
-fn mark_record(sub: &[u8], mark: u16, var: &VarCtx<'_>) -> Option<(u16, (i32, i32))> {
+fn mark_record(sub: &[u8], mark: u16, var: &VarCtx<'_>) -> Option<(u16, (f32, f32))> {
     let index = coverage_lookup(follow16(sub, 2)?, mark)? as usize;
     let array = follow16(sub, 8)?;
     if index >= rd16(array, 0)? as usize {
@@ -322,7 +359,7 @@ fn mark_record(sub: &[u8], mark: u16, var: &VarCtx<'_>) -> Option<(u16, (i32, i3
     }
     let record = 2 + index * 4;
     let class = rd16(array, record)?;
-    let anchor = read_anchor(follow16(array, record + 2)?, var)?;
+    let anchor = read_anchor_exact(follow16(array, record + 2)?, var)?;
     Some((class, anchor))
 }
 
@@ -350,12 +387,8 @@ pub(crate) fn mark_to_single(
         return None;
     }
     let at = 2 + (target_index * class_count + class as usize) * 2;
-    let target_anchor = read_anchor(follow16(array, at)?, var)?;
-    Some(MarkHit {
-        class,
-        mark: mark_anchor,
-        target: target_anchor,
-    })
+    let target_anchor = read_anchor_exact(follow16(array, at)?, var)?;
+    Some(MarkHit::new(class, mark_anchor, target_anchor))
 }
 
 /// Number of components the LigatureAttach table of `ligature` defines
@@ -403,10 +436,6 @@ pub(crate) fn mark_to_ligature(
     }
     let picked = component(count).min(count - 1) as usize;
     let at = 2 + (picked * class_count + class as usize) * 2;
-    let target_anchor = read_anchor(follow16(attach, at)?, var)?;
-    Some(MarkHit {
-        class,
-        mark: mark_anchor,
-        target: target_anchor,
-    })
+    let target_anchor = read_anchor_exact(follow16(attach, at)?, var)?;
+    Some(MarkHit::new(class, mark_anchor, target_anchor))
 }

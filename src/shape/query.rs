@@ -67,25 +67,35 @@ pub struct MarkAnchors {
     /// `(x, y)` of the anchor on the glyph attached to: the base glyph,
     /// the ligature component, or the preceding mark.
     pub attach_anchor: (i32, i32),
+    /// Where the mark's origin goes relative to the origin of the glyph
+    /// it attaches to, so that the two anchors coincide: the attach
+    /// anchor minus the mark anchor. At a variation instance the two
+    /// anchors carry fractional deltas and this is their difference
+    /// rounded once, which can differ by a unit from the difference of
+    /// the rounded anchors; it is the value shaping uses.
+    pub offset: (i32, i32),
 }
 
 impl MarkAnchors {
-    /// Anchors of a mark of class `mark_class`.
+    /// Anchors of a mark of class `mark_class`; `offset` is their
+    /// difference.
     pub fn new(mark_class: u16, mark_anchor: (i32, i32), attach_anchor: (i32, i32)) -> Self {
         MarkAnchors {
             mark_class,
             mark_anchor,
             attach_anchor,
+            offset: (
+                attach_anchor.0 - mark_anchor.0,
+                attach_anchor.1 - mark_anchor.1,
+            ),
         }
     }
 
-    /// Where the mark's origin goes relative to the origin of the glyph
-    /// it attaches to, so that the two anchors coincide.
-    pub fn offset(&self) -> (i32, i32) {
-        (
-            self.attach_anchor.0 - self.mark_anchor.0,
-            self.attach_anchor.1 - self.mark_anchor.1,
-        )
+    /// Builder: set [`offset`](Self::offset).
+    #[must_use]
+    pub fn with_offset(mut self, offset: (i32, i32)) -> Self {
+        self.offset = offset;
+        self
     }
 }
 
@@ -103,7 +113,7 @@ fn pos_value(adjust: &Adjust) -> PosValue {
 }
 
 fn anchors(hit: wire::MarkHit) -> MarkAnchors {
-    MarkAnchors::new(hit.class, hit.mark, hit.target)
+    MarkAnchors::new(hit.class, hit.mark, hit.target).with_offset(hit.offset)
 }
 
 impl<'a> Font<'a> {

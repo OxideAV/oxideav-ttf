@@ -59,6 +59,8 @@ pub(super) struct Place<'s, 'f, 'a> {
     pub(super) positions: &'s mut Vec<usize>,
     pub(super) var: VarCtx<'f>,
     pub(super) direction: Direction,
+    /// Marks keep a zero advance: advance adjustments skip them.
+    pub(super) zero_marks: bool,
     pub(super) budget: u32,
 }
 
@@ -151,7 +153,9 @@ impl<'f, 'a> Place<'_, 'f, 'a> {
                 Some(value) => value as i16 as i32,
                 None => adjust(),
             };
-            self.out[i].x_advance = plus(self.out[i].x_advance, kerning);
+            if !(self.zero_marks && eng.is_mark(left)) {
+                self.out[i].x_advance = plus(self.out[i].x_advance, kerning);
+            }
         }
     }
 
@@ -160,10 +164,15 @@ impl<'f, 'a> Place<'_, 'f, 'a> {
     /// where it lengthens the (downward) advance.
     #[inline]
     fn add(&mut self, i: usize, adjust: &Adjust) {
+        let keep_advance = self.zero_marks
+            && (adjust.x_advance != 0 || adjust.y_advance != 0)
+            && self.eng.is_mark(self.buf[i].gid);
         let glyph = &mut self.out[i];
         glyph.x_offset = plus(glyph.x_offset, adjust.x_placement);
         glyph.y_offset = plus(glyph.y_offset, adjust.y_placement);
-        if self.direction == Direction::TopToBottom {
+        if keep_advance {
+            // A zeroed mark advance stays zero.
+        } else if self.direction == Direction::TopToBottom {
             glyph.y_advance = minus(glyph.y_advance, adjust.y_advance);
         } else {
             glyph.x_advance = plus(glyph.x_advance, adjust.x_advance);
@@ -311,8 +320,8 @@ impl<'f, 'a> Place<'_, 'f, 'a> {
     fn attach_mark(&mut self, i: usize, j: usize, hit: wire::MarkHit) {
         let link = self.attach_mut(i);
         link.mark_to = j as u32;
-        link.mark_dx = hit.target.0 - hit.mark.0;
-        link.mark_dy = hit.target.1 - hit.mark.1;
+        link.mark_dx = hit.offset.0;
+        link.mark_dy = hit.offset.1;
         self.out[i].x_offset = 0;
         self.out[i].y_offset = 0;
     }

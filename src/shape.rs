@@ -611,7 +611,9 @@ impl<'a> Font<'a> {
     /// Returns one [`ShapedGlyph`] per output glyph, in the order of the
     /// text, positioned for a pen that moves left to right. For a font
     /// with no GSUB/GPOS, this degenerates to nominal cmap mapping with
-    /// `hmtx` advances. Use [`Font::shape_text`] for a right-to-left or
+    /// `hmtx` advances. When `kern` is requested and the font's GPOS has
+    /// no `kern` feature for the language system, pair kerning comes
+    /// from the legacy `kern` table if there is one. Use [`Font::shape_text`] for a right-to-left or
     /// vertical run, and [`Font::shape_glyphs`] to shape glyphs with
     /// per-glyph feature masks.
     ///
@@ -738,6 +740,7 @@ impl<'a> Font<'a> {
             ShapePlan {
                 gsub: self.plan_gsub(script, lang, &requested),
                 gpos: self.plan_gpos(script, lang, &requested),
+                legacy_kern: self.plan_legacy_kern(script, lang, &requested),
             }
         });
         let ShapeScratch {
@@ -750,6 +753,7 @@ impl<'a> Font<'a> {
         let mut out = Vec::new();
         if plan.gsub.is_empty() && plan.gpos.is_empty() {
             self.seed_advances(buf, direction, zero_marks, &mut out);
+            self.apply_legacy_kern(&plan, buf, direction, &mut out);
             if direction == Direction::RightToLeft {
                 out.reverse();
             }
@@ -777,6 +781,7 @@ impl<'a> Font<'a> {
 
         // --- GPOS positioning stage ---------------------------------------
         self.seed_advances(buf, direction, zero_marks, &mut out);
+        self.apply_legacy_kern(&plan, buf, direction, &mut out);
         if let Some(gpos) = self.gpos()
             && !plan.gpos.is_empty()
         {
@@ -789,6 +794,7 @@ impl<'a> Font<'a> {
                 positions: &mut lookups.positions,
                 var: self.gpos_variation(),
                 direction,
+                zero_marks: zero_marks && self.gdef().is_some(),
                 budget: 0,
             };
             stage.run_all(&plan.gpos, &run);
@@ -868,6 +874,66 @@ impl<'a> Font<'a> {
                 .iter()
                 .map(|f| (f.tag, f.required, f.lookup_indices.as_slice())),
         )
+    }
+
+    /// The glyph mask of the requested `kern` feature when kerning has to
+    /// come from the `kern` table: the font has one, and its GPOS lists
+    /// no `kern` feature for this language system.
+    fn plan_legacy_kern(
+        &self,
+        script: [u8; 4],
+        lang: Option<[u8; 4]>,
+        requested: &[PlanFeature],
+    ) -> Option<u32> {
+        const KERN: [u8; 4] = *b"kern";
+        let asked = requested.iter().find(|f| f.tag == KERN)?;
+        self.kern()?;
+        let in_gpos = self
+            .gpos_features_for_script_at_instance(script, lang)
+            .iter()
+            .any(|f| f.tag == KERN);
+        (!in_gpos).then_some(asked.mask)
+    }
+
+    /// Kerning from the `kern` table, for a plan that asks for it: each
+    /// pair of neighbouring non-mark glyphs is looked up as (left,
+    /// right) in the order the glyphs are drawn, and the pair's value
+    /// goes to the advance of the glyph drawn first.
+    fn apply_legacy_kern(
+        &self,
+        plan: &ShapePlan,
+        buf: &[WorkGlyph],
+        direction: Direction,
+        out: &mut [ShapedGlyph],
+    ) {
+        let (Some(mask), Some(kern)) = (plan.legacy_kern, self.kern()) else {
+            return;
+        };
+        if direction == Direction::TopToBottom {
+            return;
+        }
+        let has_gdef = self.gdef().is_some();
+        let is_mark = |gid: u16| has_gdef && self.is_mark_glyph(gid);
+        let mut previous: Option<usize> = None;
+        for (i, glyph) in buf.iter().enumerate() {
+            if is_mark(glyph.gid) {
+                continue;
+            }
+            if let Some(p) = previous
+                && mask_allows(mask, buf[p].mask)
+                && mask_allows(mask, glyph.mask)
+            {
+                // `p` precedes `i` in the text; drawn right to left, `i`
+                // is the left glyph of the pair.
+                let (left, right) = match direction {
+                    Direction::RightToLeft => (i, p),
+                    _ => (p, i),
+                };
+                let value = kern.lookup(buf[left].gid, buf[right].gid) as i32;
+                out[left].x_advance = out[left].x_advance.saturating_add(value);
+            }
+            previous = Some(i);
+        }
     }
 
     /// Flat GDEF GlyphClassDef classes (one entry per glyph), or `None`
