@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.10](https://github.com/OxideAV/oxideav-ttf/compare/v0.1.9...v0.1.10) - 2026-11-21
+
+### Other
+
+- ligature components dropped in one sweep per pass; dense-only mark coverage flattening; docs
+- README + CHANGELOG: the conformant shaping engine — coverage, black-box cross-check, before / after timings
+- residue-mask scans, flattened mark coverages, per-lookup kept-mark sets; mark filter precedence
+- vertical run on synthetic vhea / vmtx / VVAR; variation regions on the wght axis
+- kern-table fallback, mark anchors rounded once, zeroed mark advances stay zero
+- run-level rule-outs, kerning and advance memos per instance, saturating positions
+- shaping conformance over synthetic GSUB / GPOS / GDEF tables
+- one skip-aware lookup engine for GSUB and GPOS
+- SequenceRule / ClassSequenceRule carry the record count before the input sequence
+
 ### Added
 
 - `Font::shape_glyphs` — shape a run of glyphs with a per-glyph feature
