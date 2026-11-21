@@ -41,6 +41,7 @@ use crate::memo::Memo;
 use crate::parser::read_u16;
 use crate::parser::read_u32;
 use crate::tables::gdef::lookup_table_slice;
+use crate::tables::mvar::ItemVariationStore;
 
 /// Which layout table a lookup belongs to. The two tables share every
 /// structure this module reads; they differ in the lookup-type numbering.
@@ -257,8 +258,6 @@ pub(crate) enum PairAccel {
 #[derive(Debug)]
 pub(crate) struct PairSets {
     pub(crate) coverage_index: Box<[u16]>,
-    pub(crate) value_format1: u16,
-    pub(crate) value_format2: u16,
 }
 
 impl PairSets {
@@ -269,8 +268,6 @@ impl PairSets {
         let coverage = sub.get(read_u16(sub, 2).ok()? as usize..)?;
         Some(Self {
             coverage_index: flatten_coverage(coverage, num_glyphs)?,
-            value_format1: read_u16(sub, 4).ok()?,
-            value_format2: read_u16(sub, 6).ok()?,
         })
     }
 }
@@ -282,49 +279,38 @@ impl PairSets {
 pub(crate) struct PairClasses {
     pub(crate) class1: Box<[u16]>,
     pub(crate) class2: Box<[u16]>,
-    pub(crate) value_format1: u16,
-    /// Bytes of one `Class2Record` (both value records).
-    pub(crate) class2_record_size: usize,
-    /// Bytes of one `Class1Record` (`class2Count` Class2Records).
-    pub(crate) class1_record_size: usize,
 }
 
 impl PairClasses {
-    /// Offset, from the sub-table start, of the value record for a
-    /// `(class1, class2)` pair. Header is 16 bytes.
-    #[inline]
-    pub(crate) fn record_offset(&self, class1: u16, class2: u16) -> usize {
-        16 + class1 as usize * self.class1_record_size + class2 as usize * self.class2_record_size
-    }
-
     fn build(sub: &[u8], num_glyphs: usize) -> Option<Self> {
         if sub.len() < 16 || read_u16(sub, 0).ok()? != 2 {
             return None;
         }
-        let value_format1 = read_u16(sub, 4).ok()?;
-        let value_format2 = read_u16(sub, 6).ok()?;
         let class_def1 = sub.get(read_u16(sub, 8).ok()? as usize..)?;
         let class_def2 = sub.get(read_u16(sub, 10).ok()? as usize..)?;
-        let class2_count = read_u16(sub, 14).ok()? as usize;
-        let class2_record_size =
-            (value_format1.count_ones() + value_format2.count_ones()) as usize * 2;
         Some(Self {
             class1: flatten_class_def(class_def1, num_glyphs)?,
             class2: flatten_class_def(class_def2, num_glyphs)?,
-            value_format1,
-            class2_record_size,
-            class1_record_size: class2_count * class2_record_size,
         })
     }
 }
 
-/// Per-lookup accelerator. See the module docs.
+/// One resolved lookup: its effective type, `lookupFlag`, and
+/// sub-tables, with the accelerators described in the module docs
+/// (absent when they are switched off — the glyph sets are then
+/// universal and nothing is flattened).
 #[derive(Debug)]
 pub(crate) struct LookupAccel {
+    /// Effective lookup type (Extension wrappers unwrapped).
+    pub(crate) kind: u16,
+    /// `lookupFlag`.
+    pub(crate) flags: u16,
+    /// `markFilteringSet`, when the flag word announces one.
+    pub(crate) mark_filtering_set: Option<u16>,
     /// Glyphs at which the lookup can act (first-glyph coverage union).
     pub(crate) first: GlyphSet,
-    /// The lookup's sub-tables of its effective type, in the order — and
-    /// up to the point — the table walker visits them.
+    /// The lookup's sub-tables of its effective type, in the order the
+    /// Lookup table lists them.
     pub(crate) subs: Box<[SubAccel]>,
     /// GSUB LigatureSubst only: the largest `componentCount` of any
     /// Ligature record in the lookup — the longest glyph sequence one
@@ -335,9 +321,15 @@ pub(crate) struct LookupAccel {
     /// least two components and could be read. A ligature can then only
     /// form where the next visible glyph is in this set.
     pub(crate) second_components: Option<GlyphSet>,
-    /// GPOS PairPos only: memo of the lookup's adjustment per
-    /// `(left, right)` glyph pair. Text repeats letter pairs heavily, so
-    /// most pairs are answered here without visiting a sub-table.
+    /// GPOS PairPos only: every sub-table adjusts nothing but the first
+    /// glyph's x-advance, by a plain value (ValueFormat1 is exactly
+    /// `X_ADVANCE`, ValueFormat2 is empty). The lookup's whole effect on
+    /// a glyph pair is then one 16-bit number, which `pair_memo` caches.
+    pub(crate) plain_kerning: bool,
+    /// GPOS PairPos with `plain_kerning`: memo of the lookup's
+    /// adjustment per `(left, right)` glyph pair. Text repeats letter
+    /// pairs heavily, so most pairs are answered here without visiting a
+    /// sub-table.
     pub(crate) pair_memo: Memo,
 }
 
@@ -345,142 +337,111 @@ pub(crate) struct LookupAccel {
 /// once the lookup has positioned a few hundred pairs.
 const PAIR_MEMO_BITS: u32 = 12;
 
-/// How a table walker treats an Extension sub-table it cannot unwrap.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum BadExtension {
-    /// Skip the sub-table and go on to the next one.
-    Skip,
-    /// Give up on the lookup: later sub-tables are never visited.
-    Stop,
-}
-
 impl LookupAccel {
-    fn empty(num_glyphs: usize) -> Self {
-        LookupAccel {
-            first: GlyphSet::with_capacity(num_glyphs),
-            subs: Box::new([]),
-            max_components: 0,
-            second_components: None,
-            pair_memo: Memo::with_bits(PAIR_MEMO_BITS),
-        }
-    }
-
-    /// Resolve lookup `lookup_index` of effective type `kind` exactly
-    /// the way the per-type table walkers in `tables::gsub` /
-    /// `tables::gpos` iterate it.
+    /// Resolve lookup `lookup_index` of a layout table. `filters ==
+    /// false` skips every glyph set and flattened table: the result then
+    /// only lists the sub-tables. `None` when the lookup does not exist
+    /// or its type is not one the shaping engine applies.
     fn build(
         table: LayoutTable,
         bytes: &[u8],
         lookup_list_off: u32,
         lookup_index: u16,
-        kind: u16,
         num_glyphs: usize,
+        filters: bool,
     ) -> Option<Self> {
-        let layout = table.coverage_layout(kind)?;
-        // Walker preconditions: every walker but the GPOS pair /
-        // mark-to-base / mark-to-mark ones treats a zero LookupList
-        // offset as "no lookups"; all of them need a 6-byte Lookup
-        // header.
-        let zero_offset_is_empty = !(table == LayoutTable::Gpos && matches!(kind, 2 | 4 | 6));
-        if zero_offset_is_empty && lookup_list_off == 0 {
-            return Some(Self::empty(num_glyphs));
+        if lookup_list_off == 0 {
+            return None;
         }
-        let Some(lookup) = lookup_table_slice(bytes, lookup_list_off, lookup_index) else {
-            return Some(Self::empty(num_glyphs));
-        };
-        if lookup.len() < 6 {
-            return Some(Self::empty(num_glyphs));
-        }
+        let lookup = lookup_table_slice(bytes, lookup_list_off, lookup_index)?;
         // `lookup` is a tail of `bytes`.
         let lookup_start = bytes.len() - lookup.len();
         let outer_kind = read_u16(lookup, 0).ok()?;
+        let flags = read_u16(lookup, 2).ok()?;
         let sub_count = read_u16(lookup, 4).ok()? as usize;
-        // GPOS single / cursive / mark-to-ligature walkers abandon the
-        // lookup at an Extension record they cannot unwrap; every other
-        // walker moves on to the next sub-table.
-        let bad_extension = if table == LayoutTable::Gpos && matches!(kind, 1 | 3 | 5) {
-            BadExtension::Stop
+        let mark_filtering_set = if flags & 0x0010 != 0 {
+            read_u16(lookup, 6 + sub_count * 2).ok()
         } else {
-            BadExtension::Skip
+            None
         };
+        let is_extension = outer_kind == table.extension_kind();
+
+        // Sub-tables, Extension wrappers removed: (type, bytes).
+        let resolved = (0..sub_count).filter_map(|s| {
+            let sub_off = read_u16(lookup, 6 + s * 2).ok()?;
+            let sub = lookup.get(sub_off as usize..)?;
+            if !is_extension {
+                return Some((outer_kind, sub));
+            }
+            // Extension format 1: u16 format, u16 extensionLookupType,
+            // Offset32 extensionOffset (from the Extension sub-table).
+            let ext_kind = read_u16(sub, 2).ok()?;
+            let ext_off = read_u32(sub, 4).ok()?;
+            Some((ext_kind, sub.get(ext_off as usize..)?))
+        });
+        // "All subtables within a Lookup table must be of the same
+        // lookup type": the first readable one names it.
+        let kind = resolved.clone().next().map_or(outer_kind, |(k, _)| k);
+        let layout = table.coverage_layout(kind)?;
+
         let is_ligature = table == LayoutTable::Gsub && kind == 4;
         // Sub-table formats whose matcher is "Coverage index of the
         // current glyph, then index an array with it".
         let wants_coverage_index = table == LayoutTable::Gsub && matches!(kind, 1 | 3 | 4);
         let is_pair = table == LayoutTable::Gpos && kind == 2;
 
-        let mut first = GlyphSet::with_capacity(num_glyphs);
+        let glyph_set = || match filters {
+            true => GlyphSet::with_capacity(num_glyphs),
+            false => GlyphSet::universal(),
+        };
+        let mut first = glyph_set();
         let mut subs = Vec::new();
         let mut max_components = 0usize;
-        let mut second = is_ligature.then(|| GlyphSet::with_capacity(num_glyphs));
-        for s in 0..sub_count {
-            // An unreadable or out-of-range sub-table offset ends every
-            // walker's iteration.
-            let Ok(sub_off) = read_u16(lookup, 6 + s * 2) else {
-                break;
-            };
-            let Some(mut sub) = lookup.get(sub_off as usize..) else {
-                break;
-            };
-            let mut sub_kind = outer_kind;
-            if outer_kind == table.extension_kind() {
-                // Extension format 1: u16 format, u16 extensionLookupType,
-                // Offset32 extensionOffset.
-                let target = if sub.len() < 8 {
-                    None
-                } else {
-                    match (read_u16(sub, 2), read_u32(sub, 4)) {
-                        (Ok(ext_kind), Ok(ext_off)) => {
-                            sub.get(ext_off as usize..).map(|ext| (ext_kind, ext))
-                        }
-                        _ => None,
-                    }
-                };
-                match (target, bad_extension) {
-                    (Some((ext_kind, ext)), _) => {
-                        sub_kind = ext_kind;
-                        sub = ext;
-                    }
-                    (None, BadExtension::Skip) => continue,
-                    (None, BadExtension::Stop) => break,
-                }
-            }
+        let mut second = (is_ligature && filters).then(|| GlyphSet::with_capacity(num_glyphs));
+        let mut plain_kerning = is_pair && filters;
+        for (sub_kind, sub) in resolved {
             if sub_kind != kind {
                 continue;
             }
-            let mut sub_first = GlyphSet::with_capacity(num_glyphs);
+            if is_pair {
+                plain_kerning &=
+                    matches!((read_u16(sub, 4), read_u16(sub, 6)), (Ok(0x0004), Ok(0)));
+            }
+            let mut sub_first = glyph_set();
             let mut first_is_exact = false;
             let mut coverage_index = None;
-            match first_coverage(layout, sub) {
-                FirstCoverage::At(cov) => {
-                    sub_first.insert_coverage(cov);
-                    first_is_exact = coverage_is_well_formed(cov);
-                    first.union_with(&sub_first);
-                    // The matchers want a 6-byte sub-table header.
-                    if wants_coverage_index && sub.len() >= 6 {
-                        coverage_index = flatten_coverage(cov, num_glyphs);
-                    }
-                }
-                FirstCoverage::None => {}
-                FirstCoverage::Unknown => {
-                    sub_first = GlyphSet::universal();
-                    first = GlyphSet::universal();
-                }
-            }
-            if is_ligature {
-                match ligature_components(sub, second.as_mut()) {
-                    Some(LigatureShape {
-                        max_components: n,
-                        all_multi_component,
-                    }) => {
-                        max_components = max_components.max(n);
-                        if !all_multi_component {
-                            second = None;
+            if filters {
+                match first_coverage(layout, sub) {
+                    FirstCoverage::At(cov) => {
+                        sub_first.insert_coverage(cov);
+                        first_is_exact = coverage_is_well_formed(cov);
+                        first.union_with(&sub_first);
+                        // The matchers want a 6-byte sub-table header.
+                        if wants_coverage_index && sub.len() >= 6 {
+                            coverage_index = flatten_coverage(cov, num_glyphs);
                         }
                     }
-                    None => {
-                        max_components = usize::MAX;
-                        second = None;
+                    FirstCoverage::None => {}
+                    FirstCoverage::Unknown => {
+                        sub_first = GlyphSet::universal();
+                        first = GlyphSet::universal();
+                    }
+                }
+                if is_ligature {
+                    match ligature_components(sub, second.as_mut()) {
+                        Some(LigatureShape {
+                            max_components: n,
+                            all_multi_component,
+                        }) => {
+                            max_components = max_components.max(n);
+                            if !all_multi_component {
+                                second = None;
+                            }
+                        }
+                        None => {
+                            max_components = usize::MAX;
+                            second = None;
+                        }
                     }
                 }
             }
@@ -490,7 +451,7 @@ impl LookupAccel {
                 first: sub_first,
                 first_is_exact,
                 coverage_index,
-                pair: match is_pair {
+                pair: match is_pair && filters {
                     true => PairClasses::build(sub, num_glyphs)
                         .map(PairAccel::Classes)
                         .or_else(|| PairSets::build(sub, num_glyphs).map(PairAccel::Sets))
@@ -500,16 +461,29 @@ impl LookupAccel {
             });
         }
         Some(LookupAccel {
+            kind,
+            flags,
+            mark_filtering_set,
             first,
             subs: subs.into_boxed_slice(),
-            max_components: if is_ligature {
+            max_components: if is_ligature && filters {
                 max_components
             } else {
                 usize::MAX
             },
             second_components: second,
+            plain_kerning,
             pair_memo: Memo::with_bits(PAIR_MEMO_BITS),
         })
+    }
+}
+
+/// The Coverage table a sub-table of effective type `kind` tests the
+/// current glyph against, when it has one that can be located.
+pub(crate) fn first_glyph_coverage(table: LayoutTable, kind: u16, sub: &[u8]) -> Option<&[u8]> {
+    match first_coverage(table.coverage_layout(kind)?, sub) {
+        FirstCoverage::At(coverage) => Some(coverage),
+        FirstCoverage::None | FirstCoverage::Unknown => None,
     }
 }
 
@@ -637,11 +611,11 @@ fn coverage_is_well_formed(cov: &[u8]) -> bool {
     }
 }
 
-/// One lookup's accelerator, built on first request (`None` inside:
-/// the lookup's type has no accelerated path).
-type AccelSlot = OnceLock<Option<Arc<LookupAccel>>>;
+/// One resolved lookup, built on first request (`None` inside: no such
+/// lookup, or a type the engine does not apply).
+type AccelSlot = OnceLock<Option<Box<LookupAccel>>>;
 
-/// Lazily built accelerators for every lookup of one layout table.
+/// Lazily resolved lookups of one layout table.
 #[derive(Debug, Default)]
 struct TableAccels {
     slots: OnceLock<Box<[AccelSlot]>>,
@@ -654,9 +628,9 @@ impl TableAccels {
         bytes: &[u8],
         lookup_list_off: u32,
         lookup_index: u16,
-        kind: u16,
         num_glyphs: usize,
-    ) -> Option<Arc<LookupAccel>> {
+        filters: bool,
+    ) -> Option<&LookupAccel> {
         let slots = self.slots.get_or_init(|| {
             let count = bytes
                 .get(lookup_list_off as usize..)
@@ -671,26 +645,33 @@ impl TableAccels {
                 bytes,
                 lookup_list_off,
                 lookup_index,
-                kind,
                 num_glyphs,
+                filters,
             )
-            .map(Arc::new)
+            .map(Box::new)
         })
-        .clone()
+        .as_deref()
     }
 }
 
 /// One lookup of a shape plan.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct PlanLookup {
     pub(crate) index: u16,
-    /// Effective lookup type (Extension wrappers unwrapped).
-    pub(crate) kind: u16,
-    pub(crate) flags: u16,
-    pub(crate) mark_filtering_set: Option<u16>,
-    /// The lookup's accelerator (shared with every other plan that runs
-    /// the lookup). `None`: go through the table walker.
-    pub(crate) accel: Option<Arc<LookupAccel>>,
+    /// Glyph mask the lookup is conditional on: it applies where the
+    /// glyphs of its input sequence all share a bit with this mask. `0`:
+    /// applies everywhere.
+    pub(crate) mask: u32,
+    /// Alternate picked by an AlternateSubst lookup (zero-based).
+    pub(crate) alternate: u16,
+}
+
+/// One requested feature of a shape plan key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PlanFeature {
+    pub(crate) tag: [u8; 4],
+    pub(crate) mask: u32,
+    pub(crate) alternate: u16,
 }
 
 /// The lookups one shaping request runs, in application order.
@@ -704,42 +685,54 @@ pub(crate) struct ShapePlan {
 struct PlanEntry {
     script: [u8; 4],
     lang: Option<[u8; 4]>,
-    features: Box<[[u8; 4]]>,
+    features: Box<[PlanFeature]>,
     plan: Arc<ShapePlan>,
 }
 
 /// Most distinct `(script, language, features)` requests kept per font.
 const MAX_CACHED_PLANS: usize = 32;
 
+/// Variation data of the current instance that positioning reads.
+#[derive(Debug)]
+pub(crate) struct InstanceData {
+    /// Normalised axis coordinates.
+    pub(crate) coords: Box<[f32]>,
+    /// `true` when every coordinate is zero: no delta applies.
+    pub(crate) is_default: bool,
+}
+
 /// All shaping accelerators of one font.
 #[derive(Debug, Default)]
 pub(crate) struct LayoutCache {
-    /// When set, no accelerator is built or handed out: shaping walks
-    /// the table bytes for every lookup at every position. Shape plans
-    /// are still cached (they are a few dozen bytes).
+    /// When set, no glyph set or flattened table is built: shaping
+    /// walks the table bytes for every lookup at every position. The
+    /// resolved sub-table lists and shape plans are still kept (they
+    /// are a few dozen bytes each).
     lean: bool,
     gsub: TableAccels,
     gpos: TableAccels,
     /// GDEF GlyphClassDef class per glyph (`None` inside: no usable
     /// flat table could be built; callers fall back to the GDEF walker).
     glyph_classes: OnceLock<Option<Box<[u16]>>>,
+    /// The GDEF ItemVariationStore, parsed once (`None` inside: absent
+    /// or unreadable).
+    gdef_store: OnceLock<Option<ItemVariationStore>>,
+    /// Derived data of the current variation instance.
+    instance: OnceLock<InstanceData>,
     /// Most-recently-used first.
     plans: Mutex<Vec<PlanEntry>>,
 }
 
 impl LayoutCache {
-    pub(crate) fn lookup_accel(
+    /// Lookup `lookup_index` of a layout table, resolved on first use.
+    pub(crate) fn lookup(
         &self,
         table: LayoutTable,
         bytes: &[u8],
         lookup_list_off: u32,
         lookup_index: u16,
-        kind: u16,
         num_glyphs: usize,
-    ) -> Option<Arc<LookupAccel>> {
-        if self.lean {
-            return None;
-        }
+    ) -> Option<&LookupAccel> {
         let accels = match table {
             LayoutTable::Gsub => &self.gsub,
             LayoutTable::Gpos => &self.gpos,
@@ -749,8 +742,8 @@ impl LayoutCache {
             bytes,
             lookup_list_off,
             lookup_index,
-            kind,
             num_glyphs,
+            !self.lean,
         )
     }
 
@@ -763,6 +756,26 @@ impl LayoutCache {
             return None;
         }
         self.glyph_classes.get_or_init(build).as_deref()
+    }
+
+    /// The GDEF ItemVariationStore, parsed on first use with `parse`.
+    pub(crate) fn gdef_store(
+        &self,
+        parse: impl FnOnce() -> Option<ItemVariationStore>,
+    ) -> Option<&ItemVariationStore> {
+        self.gdef_store.get_or_init(parse).as_ref()
+    }
+
+    /// Data of the current variation instance, derived on first use
+    /// from the normalised coordinates `coords` produces.
+    pub(crate) fn instance(&self, coords: impl FnOnce() -> Vec<f32>) -> &InstanceData {
+        self.instance.get_or_init(|| {
+            let coords = coords().into_boxed_slice();
+            InstanceData {
+                is_default: coords.iter().all(|&c| c == 0.0),
+                coords,
+            }
+        })
     }
 
     /// `true` when accelerators are switched off.
@@ -780,19 +793,25 @@ impl LayoutCache {
     }
 
     /// The cached plan for a request, or the one `build` produces.
-    pub(crate) fn plan(
+    /// `features` yields the request's features; two requests are the
+    /// same when they list equal features in the same order.
+    pub(crate) fn plan<I>(
         &self,
         script: [u8; 4],
         lang: Option<[u8; 4]>,
-        features: &[[u8; 4]],
+        features: I,
         build: impl FnOnce() -> ShapePlan,
-    ) -> Arc<ShapePlan> {
+    ) -> Arc<ShapePlan>
+    where
+        I: Iterator<Item = PlanFeature> + Clone,
+    {
         {
             let mut plans = self.plans.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(i) = plans
-                .iter()
-                .position(|e| e.script == script && e.lang == lang && *e.features == *features)
-            {
+            if let Some(i) = plans.iter().position(|e| {
+                e.script == script
+                    && e.lang == lang
+                    && e.features.iter().copied().eq(features.clone())
+            }) {
                 if i != 0 {
                     plans[..=i].rotate_right(1);
                 }
@@ -811,20 +830,22 @@ impl LayoutCache {
             PlanEntry {
                 script,
                 lang,
-                features: features.into(),
+                features: features.collect(),
                 plan: Arc::clone(&plan),
             },
         );
         plan
     }
 
-    /// Drop every cached plan. Called when the variation instance
-    /// changes: FeatureVariations can swap the lookups behind a feature.
+    /// Forget everything derived from the variation instance. Called
+    /// when the instance changes: FeatureVariations can swap the lookups
+    /// behind a feature, and every delta moves.
     pub(crate) fn clear_plans(&mut self) {
         self.plans
             .get_mut()
             .unwrap_or_else(|e| e.into_inner())
             .clear();
+        self.instance = OnceLock::new();
     }
 }
 

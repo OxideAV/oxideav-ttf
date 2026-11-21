@@ -64,7 +64,9 @@ pub mod tables;
 
 pub use agl::{glyph_name_to_char, glyph_name_to_codepoints};
 pub use collection::{CollectionHeader, TTC_MAGIC, is_collection};
-pub use shape::ShapedGlyph;
+pub use shape::{
+    Direction, MarkAnchors, PairAdjustment, RunGlyph, ShapeFeature, ShapeOptions, ShapedGlyph,
+};
 pub use shared::SharedFont;
 
 use std::sync::OnceLock;

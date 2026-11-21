@@ -78,6 +78,9 @@ const MAX_NESTED_LOOKUP_DEPTH: u8 = 8;
 pub struct GsubFeature {
     pub tag: [u8; 4],
     pub lookup_indices: Vec<u16>,
+    /// `true` for the LangSys *required* feature (`requiredFeatureIndex`):
+    /// one that applies whether or not its tag was asked for.
+    pub required: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -438,6 +441,7 @@ impl<'a> GsubTable<'a> {
                 into.push(GsubFeature {
                     tag,
                     lookup_indices: idxs,
+                    required: false,
                 });
                 return;
             }
@@ -470,11 +474,15 @@ impl<'a> GsubTable<'a> {
             into.push(GsubFeature {
                 tag,
                 lookup_indices: idxs,
+                required: false,
             });
         };
 
         if required != 0xFFFF {
             push_feature(required, &mut out);
+            if let Some(first) = out.first_mut() {
+                first.required = true;
+            }
         }
         for i in 0..feat_count {
             let fi = match read_u16(langsys, 6 + i * 2) {
@@ -812,62 +820,6 @@ impl<'a> GsubTable<'a> {
             }
         }
         None
-    }
-
-    /// Match one resolved Contextual (`chained == false`, LookupType 5)
-    /// or Chained Contexts (`chained == true`, LookupType 6) sub-table
-    /// at `pos` and, on a match, apply its SubstLookupRecords to `gids`
-    /// in place, widening `extent` over every edit. Returns whether a
-    /// rule matched. This is the per-sub-table step of
-    /// [`Self::apply_lookup_type_5`] / [`Self::apply_lookup_type_6`],
-    /// for callers that have already resolved the lookup's sub-tables.
-    /// `pos` must be in range.
-    pub(crate) fn apply_context_subtable_in_place(
-        &self,
-        chained: bool,
-        sub: &[u8],
-        gids: &mut Vec<u16>,
-        pos: usize,
-        extent: &mut EditExtent,
-    ) -> bool {
-        let Ok(format) = read_u16(sub, 0) else {
-            return false;
-        };
-        let matched = match (chained, format) {
-            (false, 1) => context_format1_match(sub, gids, pos),
-            (false, 2) => context_format2_match(sub, gids, pos),
-            (false, 3) => context_format3_match(sub, gids, pos),
-            (true, 1) => chain_context_format1_match(sub, gids, pos),
-            (true, 2) => chain_context_format2_match(sub, gids, pos),
-            (true, 3) => chain_context_format3_match(sub, gids, pos),
-            _ => None,
-        };
-        match matched {
-            Some(m) => {
-                self.apply_subst_records_in_place(gids, pos, &m, 0, extent);
-                true
-            }
-            None => false,
-        }
-    }
-
-    /// Apply Contextual (`chained == false`) / Chained Contexts
-    /// (`chained == true`) lookup `lookup_index` at `pos`, rewriting
-    /// `gids` in place. The in-place form of
-    /// [`Self::apply_lookup_type_5`] / [`Self::apply_lookup_type_6`].
-    pub(crate) fn apply_context_lookup_in_place(
-        &self,
-        chained: bool,
-        lookup_index: u16,
-        gids: &mut Vec<u16>,
-        pos: usize,
-        extent: &mut EditExtent,
-    ) -> bool {
-        if chained {
-            self.apply_chain_context_in_place(lookup_index, gids, pos, 0, extent)
-        } else {
-            self.apply_context_in_place(lookup_index, gids, pos, 0, extent)
-        }
     }
 
     fn apply_context_at(
@@ -1623,27 +1575,22 @@ pub(crate) fn reverse_chain_context_lookup(sub: &[u8], gids: &[u16], pos: usize)
 /// The part of a glyph run a contextual substitution rewrote, tracked
 /// while the run is edited in place.
 ///
-/// With `start` the position the rule matched at, the rewritten run
+/// With `pos` the position the rule matched at, the rewritten run
 /// `new` and the run before it `old` satisfy
-/// `new[..start] == old[..start]` and
+/// `new[..pos] == old[..pos]` and
 /// `new[end..] == old[end - delta..]`: everything outside
-/// `new[start..end]` is untouched.
+/// `new[pos..end]` is untouched.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct EditExtent {
-    pub(crate) start: usize,
+struct EditExtent {
     /// Exclusive end of the rewritten region, in the rewritten run.
-    pub(crate) end: usize,
+    end: usize,
     /// Rewritten length minus original length.
-    pub(crate) delta: isize,
+    delta: isize,
 }
 
 impl EditExtent {
-    pub(crate) fn starting_at(pos: usize) -> Self {
-        Self {
-            start: pos,
-            end: pos,
-            delta: 0,
-        }
+    fn starting_at(pos: usize) -> Self {
+        Self { end: pos, delta: 0 }
     }
 
     /// Note that `removed` glyphs at `at` were replaced by `inserted`

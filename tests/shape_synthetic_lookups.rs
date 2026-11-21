@@ -432,15 +432,12 @@ fn synthetic_lookups_fire_as_built() {
         // Glyph-pair kerning, second sub-table and first: "d e" pair.
         let shaped = shape(&font, "de");
         assert_eq!(shaped[0].x_advance, nominal(g.d) - 50);
-        // …and SinglePos format 2 on d and e (yPlacement / yAdvance in
-        // Coverage order).
-        let (d_values, e_values) = if g.d < g.e {
-            ((3, -4), (5, 6))
-        } else {
-            ((5, 6), (3, -4))
-        };
-        assert_eq!((shaped[0].y_offset, shaped[0].y_advance), d_values);
-        assert_eq!((shaped[1].y_offset, shaped[1].y_advance), e_values);
+        // …and SinglePos format 2 on d and e: yPlacement in Coverage
+        // order. Its yAdvance is "only used for vertical layout" and
+        // leaves a horizontal run alone.
+        let (d_placement, e_placement) = if g.d < g.e { (3, 5) } else { (5, 3) };
+        assert_eq!((shaped[0].y_offset, shaped[0].y_advance), (d_placement, 0));
+        assert_eq!((shaped[1].y_offset, shaped[1].y_advance), (e_placement, 0));
     }
 
     // Cursive + contextual positioning read on a GSUB-free variant, so
@@ -451,19 +448,35 @@ fn synthetic_lookups_fire_as_built() {
         let font = Font::from_bytes(&gpos_only).unwrap();
         let nominal = |gid: u16| font.glyph_advance(gid) as i32;
 
-        // Cursive attachment: b (exit 480,-30) then c (entry -15,5).
+        // Where glyph `i` of a shaped run is drawn: the pen (sum of the
+        // advances before it) plus its offset.
+        let origin = |shaped: &[ShapedGlyph], i: usize| {
+            let pen: i32 = shaped[..i].iter().map(|s| s.x_advance).sum();
+            (pen + shaped[i].x_offset, shaped[i].y_offset)
+        };
+        // Cursive attachment: b (exit 480,-30) then c (entry -15,5) —
+        // the two anchors land on the same point.
         let shaped = shape(&font, "bc");
+        let (b_at, c_at) = (origin(&shaped, 0), origin(&shaped, 1));
         assert_eq!(
-            (shaped[1].x_offset, shaped[1].y_offset),
-            (480 + 15, -30 - 5),
+            (b_at.0 + 480, b_at.1 - 30),
+            (c_at.0 - 15, c_at.1 + 5),
             "extension {extension}"
         );
+        // The first glyph stays where it was; the pen after the pair is
+        // where it would have been without the connection, moved by the
+        // distance the second glyph was pulled.
+        assert_eq!(b_at, (0, 0));
+        assert_eq!(shaped[0].x_advance, 480);
+        assert_eq!(shaped[1].x_advance, nominal(g.c) + 15);
         // a → c: a's exit (500, 40) meets c's entry (-15, 5).
         let shaped = shape(&font, "ac");
-        assert_eq!((shaped[1].x_offset, shaped[1].y_offset), (515, 35));
+        let (a_at, c_at) = (origin(&shaped, 0), origin(&shaped, 1));
+        assert_eq!((a_at.0 + 500, a_at.1 + 40), (c_at.0 - 15, c_at.1 + 5));
         // c has no exit: the chain breaks, a is not moved.
         let shaped = shape(&font, "ca");
         assert_eq!((shaped[1].x_offset, shaped[1].y_offset), (0, 0));
+        assert_eq!(shaped[0].x_advance, nominal(g.c));
 
         // Contextual positioning: in "xy" the y is adjusted twice — once
         // by the context rule's nested SinglePos, once by the SinglePos

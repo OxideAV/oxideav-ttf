@@ -7,7 +7,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `Font::shape_glyphs` — shape a run of glyphs with a per-glyph feature
+  mask (`RunGlyph`) against per-feature masks (`ShapeOptions`,
+  `ShapeFeature`), returning cluster-mapped positioned glyphs — and
+  `Font::shape_text`, the text form of the same request. `ShapeOptions`
+  also carries the run `Direction` (left to right, right to left with
+  the result in drawing order, top to bottom on `vmtx` / `VVAR`
+  advances), an alternate index per feature, and
+  `zero_mark_advances`.
+- Per-lookup queries at the current variation instance:
+  `Font::gsub_lookup_coverage` / `gsub_lookup_covers`,
+  `gpos_lookup_coverage` / `gpos_lookup_covers`, `gpos_pair_adjustment`
+  (`PairAdjustment`: every ValueRecord field of both glyphs),
+  `gpos_mark_base_anchors`, `gpos_mark_mark_anchors`,
+  `gpos_mark_ligature_anchors` (`MarkAnchors`),
+  `gpos_ligature_component_count`, `gpos_cursive_anchors`.
+- `GsubFeature::required` / `GposFeature::required` mark the language
+  system's required feature.
+
+### Changed
+
+- `Font::shape` runs on a rewritten GSUB / GPOS engine (see Fixed). Its
+  output changes wherever the old engine was wrong; plain Latin
+  ligature / kerning runs are unchanged.
+- A ValueRecord `yAdvance` no longer changes `y_advance` in a horizontal
+  run ("only used for vertical layout").
+
 ### Fixed
+
+- Mark-to-mark attachment was a bare anchor difference; it is now
+  resolved against the final position of the mark attached to, so
+  stacks of marks accumulate. Attachments are resolved after every
+  lookup has run, so later adjustments of a base carry its marks along.
+- Mark-to-ligature always used component 0. Ligature substitution now
+  records which component each stepped-over mark follows (through
+  ligatures of ligatures), and the mark attaches there; a mark with no
+  recorded component attaches to the last one.
+- Mark-to-base reaches the preceding base across other marks even when
+  the lookup does not set IGNORE_MARKS.
+- Cursive attachment adjusts advances so that entry and exit anchors
+  coincide, propagates the cross-stream shift along the chain, and
+  honours the RIGHT_TO_LEFT lookup flag (the last glyph keeps its
+  baseline).
+- GPOS ValueRecords and anchors follow their VariationIndex tables
+  through the GDEF item variation store, and nominal advances follow
+  `HVAR` (`VVAR` top to bottom), at the font's current axis position.
+- Pair adjustment applies every field of both ValueRecords (formats 1
+  and 2) instead of the first glyph's `xAdvance` alone, and a second
+  glyph with a ValueRecord is consumed by its pair.
+- Lookup flags (IGNORE_BASE_GLYPHS / IGNORE_LIGATURES / IGNORE_MARKS,
+  mark attachment class, mark filtering set) apply to every lookup type:
+  contextual and chained rules match their input, backtrack and
+  lookahead sequences over the glyphs the lookup does not ignore, as do
+  reverse-chaining and cursive lookups. Nested lookups use their own
+  flags.
+- After a nested lookup changes the length of a matched sequence,
+  `sequenceIndex` addresses the sequence as it now stands; contextual
+  lookups resume after the matched input sequence; nested lookups of a
+  contextual *positioning* rule may be of any positioning type.
+- The language system's required feature is applied without being
+  requested.
 
 - GSUB contextual substitution (LookupType 5) formats 1 and 2 read the
   SequenceRule / ClassSequenceRule record count from the wrong place
