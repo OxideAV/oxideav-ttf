@@ -4,9 +4,9 @@
 
 Pure-Rust TrueType font parser for the [oxideav](https://github.com/OxideAV)
 framework. Implements the sfnt container, the core OpenType tables, and a
-coherent GSUB / GPOS shaping engine (`Font::shape`) doing
-Latin/Cyrillic/Greek/CJK/Arabic shaping with positional forms, ligatures,
-kerning, and mark attachment.
+GSUB / GPOS shaping engine (`Font::shape`, `Font::shape_glyphs`) covering
+every lookup type: substitution, ligatures with component tracking, kerning,
+cursive and mark attachment, at the font's current variation instance.
 
 ## Supported tables
 
@@ -445,49 +445,76 @@ kerning, and mark attachment.
   VariationIndex delta from the BASE ItemVariationStore. The static
   accessors are unchanged and equal the `_var` results at the default
   instance.
-- **`Font::shape(text, script, lang, features)` — end-to-end OpenType
-  shaping.** The integration capstone over the GSUB / GPOS / GDEF
-  primitives above: it maps text to nominal glyphs through `cmap`, runs
-  the requested features' GSUB lookups, then their GPOS lookups,
-  returning a `Vec<ShapedGlyph>` carrying `glyph_id`, originating
-  `cluster` (input byte index, preserved across ligation and
-  multiple-substitution expansion), and `(x_offset, y_offset,
-  x_advance, y_advance)` in font design units (TT Y-up). Per the
-  common-table-format rules the *union* of lookups behind the active
-  features is applied **in LookupList order** (not feature order), so
-  lookups from different features interleave correctly. The GSUB stage
-  drives single / multiple / alternate / ligature / contextual /
-  chained-context / reverse-chained substitution; the GPOS stage seeds
-  advances from `hmtx` then layers single / pair-kern / cursive /
-  mark-to-base / mark-to-ligature / mark-to-mark / contextual /
-  chained-context positioning, accumulating placement and advance
-  deltas. Variation-instance-aware feature resolution is used so a
-  variable font shaped after `set_variation_coords` honours its
-  FeatureVariations substitutions. Lookup `lookupFlag` bits are honoured
-  through the shared §2 ("Common Table Formats") skip predicate
-  `Font::lookup_skips_glyph`: IGNORE_BASE_GLYPHS (`0x0002`),
-  IGNORE_LIGATURES (`0x0004`), IGNORE_MARKS (`0x0008`), the high-byte
-  MARK_ATTACHMENT_CLASS_FILTER (`0xFF00`), and USE_MARK_FILTERING_SET
-  (`0x0010`) all resolve against the GDEF GlyphClassDef /
-  MarkAttachClassDef / MarkGlyphSets structures
-  (`Font::{gsub,gpos}_lookup_mark_filtering_set` reads the trailing
-  `markFilteringSet` field at `6 + 2 * subTableCount`). The predicate
-  drives the multi-glyph match paths: a ligature lookup with
-  IGNORE_MARKS matches over the non-mark glyphs and keeps interspersed
-  combining marks (to re-anchor in GPOS) while a lookup without the flag
-  stays correctly blocked by an intervening mark, and GPOS pair-kerning +
-  cursive attachment pair the current glyph with the next *non-skipped*
-  glyph so a kern pair separated by an ignored mark still kerns. The
-  mark-to-base / mark-to-mark / mark-to-ligature attachment scans locate
-  the nearest *non-skipped* preceding attachment glyph through the same
-  predicate, so a `mkmk` lookup carrying a mark-attachment class or mark
-  filtering set binds only to glyphs in that class / set.
-  Validated against DejaVu Sans (Latin
-  `kern` advance reduction + `liga` ligation) and Noto Sans Arabic
-  (`init`/`medi`/`fina` joining + `mark` mark-to-base attachment).
-  General shaper — no script-specific glyph reordering (which the spec
-  places in the text-processing client); driven directly by the
-  requested feature set.
+- **Shaping: `Font::shape`, `Font::shape_text`, `Font::shape_glyphs`.**
+  One GSUB / GPOS engine behind three entries. `shape(text, script,
+  lang, features)` maps text through `cmap` and applies the features to
+  the whole run; `shape_text(text, &ShapeOptions)` adds a run direction
+  and per-feature settings; `shape_glyphs(&[RunGlyph], &ShapeOptions)`
+  takes glyphs a layout engine has already chosen, each with a caller
+  cluster value and a **feature mask**, and applies each feature where
+  its mask meets the glyph's — the hook for positional forms, syllable
+  phases and the like, which the specification leaves to the
+  text-processing client. All return `Vec<ShapedGlyph>`: `glyph_id`,
+  `cluster` (preserved across ligation and multiple-substitution
+  expansion) and `(x_offset, y_offset, x_advance, y_advance)` in font
+  design units, in drawing order.
+  - **Lookup order and features.** The union of the lookups behind the
+    requested features runs in LookupList order; the language system's
+    required feature always applies; FeatureVariations pick the lookups
+    of the current variation instance. With `kern` requested and no GPOS
+    `kern` feature for the language system, pairs come from the legacy
+    `kern` table.
+  - **Lookup flags.** IGNORE_BASE_GLYPHS / IGNORE_LIGATURES /
+    IGNORE_MARKS, the mark attachment class and the mark filtering set
+    (which supersedes the class; IGNORE_MARKS supersedes both) decide
+    which glyphs a lookup treats "as though [they] were not present":
+    every lookup type matches over the remaining glyphs — ligature
+    components, pair members, cursive neighbours, and the input,
+    backtrack and lookahead sequences of all three formats of
+    contextual and chained rules, and of reverse chaining. Nested
+    lookups use their own flags.
+  - **Contextual rules.** SequenceLookup records apply in the order
+    listed, each to the sequence as the previous ones left it (a
+    ligature shortens it, a multiple substitution lengthens it);
+    processing resumes after the matched input sequence, not after the
+    lookahead. Contextual positioning nests any positioning type.
+  - **Ligature components.** A ligature formed by GSUB remembers its
+    component count, and each mark the lookup stepped over the
+    component it follows (through ligatures of ligatures).
+    Mark-to-ligature attaches the mark to that component; marks on
+    different components of one ligature do not stack on each other.
+  - **Attachment.** Mark-to-base / -ligature / -mark attachments are
+    recorded and resolved once every lookup has run, against the final
+    position of the glyph attached to — stacks of marks accumulate, and
+    a base that is kerned, shifted or cursively moved later keeps its
+    marks. Cursive attachment makes each exit anchor coincide with the
+    next entry anchor, chains the cross-stream shift, and honours the
+    RIGHT_TO_LEFT flag (the last glyph of the chain stays on the
+    baseline).
+  - **Values.** Pair adjustment applies every field of both
+    ValueRecords (a second glyph with a record is consumed by its
+    pair); `xAdvance` acts in horizontal runs only, `yAdvance` in
+    vertical ones.
+  - **Variations.** At the font's current axis position, nominal
+    advances follow `HVAR` (`VVAR` for a top-to-bottom run) and every
+    ValueRecord field and Anchor follows its VariationIndex table
+    through the GDEF item variation store; a mark attachment rounds the
+    difference of its two (fractional) anchors once.
+  - **Directions.** `Direction::RightToLeft` returns the glyphs in
+    drawing order (reversed) with attachment and cursive offsets
+    computed for that order; `Direction::TopToBottom` advances down the
+    page on `vmtx` heights. `ShapeOptions::zero_mark_advances` keeps
+    GDEF marks from moving the pen.
+  - **Per-lookup queries** for an engine that drives lookups itself, at
+    the current variation instance: `gsub_lookup_coverage` /
+    `gsub_lookup_covers`, `gpos_lookup_coverage` / `gpos_lookup_covers`,
+    `gpos_pair_adjustment`, `gpos_mark_base_anchors`,
+    `gpos_mark_mark_anchors`, `gpos_mark_ligature_anchors`,
+    `gpos_ligature_component_count`, `gpos_cursive_anchors`.
+
+  No script-specific analysis happens here (joining, reordering,
+  normalisation): the caller expresses it through glyph order and
+  feature masks.
 - sbix `'dupe'` indirection chasing (`sbix_glyph_resolved`): walks
   the per-strike indirection chain up to `SBIX_MAX_DUPE_DEPTH` (= 8)
   hops with explicit cycle detection (two-glyph, self-loop, and
@@ -929,6 +956,28 @@ if let Some((replacement_gid, consumed)) = font.lookup_ligature(&[gid_f, gid_i])
 let gid_v = font.glyph_index('V').unwrap();
 let _ = font.lookup_kerning(gid_a, gid_v); // negative i16 in font units
 
+// Shaping: text in, positioned glyphs out.
+let shaped = font.shape("office", *b"latn", None, &[*b"liga", *b"kern"]);
+let _ = shaped.iter().map(|g| g.x_advance).sum::<i32>();
+
+// Shaping a glyph run with per-glyph feature masks, right to left:
+// `init` only on glyphs carrying bit 0, `fina` on bit 1.
+use oxideav_ttf::{Direction, RunGlyph, ShapeOptions};
+let options = ShapeOptions::new(*b"arab")
+    .with_direction(Direction::RightToLeft)
+    .with_masked_feature(*b"init", 0b01)
+    .with_masked_feature(*b"fina", 0b10)
+    .with_feature(*b"mark");
+let run = [
+    RunGlyph::new(gid_a, 0).with_mask(0b01),
+    RunGlyph::new(gid_v, 1).with_mask(0b10),
+];
+let _ = font.shape_glyphs(&run, &options); // drawing order, clusters 1, 0
+
+// What one lookup says, without shaping.
+let _ = font.gpos_pair_adjustment(0, gid_a, gid_v);
+let _ = font.gpos_mark_base_anchors(0, gid_a, gid_v).map(|a| a.offset);
+
 // GSUB feature-tagged lookups (Arabic positional forms, small-caps, …).
 // Discover which lookup indices implement `init` for script `arab`,
 // then apply LookupType 1 to a single glyph id.
@@ -1202,16 +1251,42 @@ if vfont.is_variable() {
 
 ## Shaping coverage
 
-All seven public GSUB lookup types (1 single, 2 multiple, 3 alternate,
-4 ligature, 5 contextual, 6 chained context, 8 reverse chained context)
-are implemented. GPOS covers LookupTypes 1 (single), 2 (pair),
-3 (cursive attachment), 4 (mark-to-base), 5 (mark-to-ligature),
-6 (mark-to-mark), and 8 (chained context with nested dispatch);
-LookupType 7 plays no shaping role of its own. ExtensionSubst (GSUB
-LookupType 7) and ExtensionPos (GPOS LookupType 9) wrappers are
-unwrapped transparently at both the sub-table and lookup level. Every
-base cmap subtable format (0, 2, 4, 6, 8, 10, 12, 13) plus the
-format-14 UVS sidecar is decoded.
+Every GSUB lookup type (1 single, 2 multiple, 3 alternate, 4 ligature,
+5 contextual, 6 chained contexts, 7 extension, 8 reverse chaining) and
+every GPOS lookup type (1 single, 2 pair, 3 cursive, 4 mark-to-base,
+5 mark-to-ligature, 6 mark-to-mark, 7 contextual, 8 chained contexts,
+9 extension) is applied, in all sub-table formats, with all lookup
+flags. Every base cmap subtable format (0, 2, 4, 6, 8, 10, 12, 13) plus
+the format-14 UVS sidecar is decoded.
+
+`tests/shape_conformance.rs` states the behaviour scenario by scenario
+on tables built from the specification's layouts (mark stacks, ligature
+components, cursive chains in both directions, both pair ValueRecords,
+variation deltas, each lookup flag, nested lookups and sequence-index
+semantics, feature masks, the queries). As a cross-check, the same
+synthetic fonts and the fixture / system fonts below were shaped by a
+black-box OpenType shaper and the drawn glyph positions compared:
+
+| Fonts | Runs | Glyphs compared | Agreeing |
+|---|---|---|---|
+| 71 synthetic fonts of the conformance suite | 372 | 1450 | 1442 |
+| Latin: Inter (6 instances), DejaVu Sans, Source Sans 3, Arial (2 styles), Microsoft Sans Serif, STIX Two Text (2 styles) | 13 | 1951 | 1951 |
+| Arabic / Urdu, right to left: Noto Sans Arabic, DejaVu Sans, SF Arabic (2 families, 5 instances), Arial, Times New Roman, Tahoma, Courier New, Microsoft Sans Serif, Arial Unicode | 22 | 1588 | 1578 |
+| Cursive Arabic / Urdu: Noto Nastaliq Urdu, DecoType Nastaleeq | 6 | 425 | 425 |
+
+The differences: in the synthetic set, two scenarios where a base is
+moved by a lookup that runs *after* the mark attachment (here the mark
+follows its base; the other shaper leaves the cross-stream part
+behind); in the Arabic set, one-unit differences of variation deltas
+on rounding ties, where the specification names no rounding rule.
+Compared but not counted above: Times New Roman (Latin), where both
+kern from the `kern` table and draw every glyph at the same place but
+split the value differently between the two glyphs' fields; and three
+fonts differing in one to five glyphs through a policy the
+specification leaves open (which glyphs count as zero-width marks;
+one mark-to-mark attachment the other shaper does not make). Not
+comparable: runs the other shaper routes through non-OpenType layout
+tables, and its Unicode normalisation of combining sequences.
 
 ## Performance: lazy table parsing
 
@@ -1298,27 +1373,41 @@ kept (`src/layout.rs`, `src/memo.rs`):
 - **Ligatures.** A candidate run stops at the lookup's longest component
   count, and a position whose next visible glyph is no ligature's second
   component is skipped outright.
-- **Contextual rewrites** edit the glyph run in place and report the extent
-  they touched; the buffer is reconciled against that extent, not against the
-  whole run.
+- **Contextual lookups** match directly on the glyph buffer and edit it in
+  place; a lookup whose every rule looks at a second glyph (the next input
+  glyph, or the first lookahead glyph) keeps the set of glyphs acceptable
+  there, like a ligature lookup's second components — and a run that holds
+  none of them skips the lookup altogether.
+- **Two-part digests.** A shape plan carries, per lookup, which glyph id
+  residues (modulo 64) and which of 64 glyph id blocks its first and second
+  glyph sets touch; a run whose own digest misses either dismisses the lookup
+  without visiting it. Inside a pass a position is tested against the residue
+  mask of the run's candidate glyphs before any table memory is touched.
+- **Mark filters.** A lookup with a mark filtering set or mark attachment
+  class derives the set of marks it keeps once; mark attachment sub-tables
+  carry flattened mark and base Coverage indices (held for the covered span
+  of glyph ids only).
 - **Memo tables** (lock-free, direct-mapped, allocated after a warm-up):
-  character → glyph id, glyph → advance, and per kerning lookup
-  `(left, right)` → adjustment.
+  character → glyph id, glyph → advance (and glyph → advance at the current
+  variation instance), and per kerning lookup `(left, right)` → adjustment
+  at the current instance. The variation tables are not read at the default
+  instance.
 - **No per-call allocation** beyond the returned `Vec`: the working buffers
   are recycled per thread.
 
-Output is unchanged. `tests/shape_corpus.rs` pins glyph ids, clusters,
-offsets and advances for curated Latin / Greek / Cyrillic / Arabic / Hebrew
-runs, 960 generated runs and three variable-font instances across the four
-fixture fonts, in a golden file written by the implementation profiled
-above; `tests/shape_synthetic_lookups.rs` covers the lookup types the
-fixtures lack with tables built byte by byte; and
+The accelerators never change the output. `tests/shape_corpus.rs` pins glyph
+ids, clusters, offsets and advances for curated Latin / Greek / Cyrillic /
+Arabic / Hebrew runs, 960 generated runs and three variable-font instances
+across the four fixture fonts in a golden file, on both paths;
+`tests/shape_synthetic_lookups.rs` and `tests/shape_conformance.rs` cover the
+lookup types the fixtures lack with tables built byte by byte; and
 `tests/shape_hostile_tables.rs` corrupts the GSUB / GPOS / GDEF tables of
 every fixture (unsorted Coverage, overlapping class ranges, dangling offsets,
 bogus lookup types) and requires the accelerated path and the plain table
 walk to agree on whatever results.
 
-`cargo bench --bench shaping` (release, Apple-silicon laptop shared with other
+The table below is the history of that first rework: `cargo bench --bench
+shaping` (release, Apple-silicon laptop shared with other
 builds; each figure is the median over five interleaved runs of the bench's
 median-of-15-batches figure, µs per call). "Run" shapes the text as one run,
 "words" shapes it one whitespace-separated word at a time; both on a `Font`
@@ -1375,6 +1464,43 @@ bytes for every lookup at every position, with identical results (the corpus
 is checked on both paths) — `latin_paragraph/inter` takes 2095 µs as one run
 and 397 µs word by word that way, `arabic_paragraph/noto` 203 µs and 42 µs
 (only the shape-plan cache remains).
+
+### The conformant engine
+
+The engine was then rewritten for correctness (deferred mark and cursive
+attachment, ligature components, skip-aware contextual matching, both pair
+ValueRecords, variation deltas — see "Shaping coverage"), which costs work the
+earlier engine did not do, and then tuned again. Same bench, both builds run
+alternately three times on a quiet machine, median of the three
+median-of-15-batches figures; µs per call, and ns per output glyph for the
+whole-run case:
+
+| Scenario | Run, before | Run, after | ns / glyph, before → after | Words, before | Words, after |
+|---|---|---|---|---|---|
+| `latin_paragraph/inter` (669 glyphs) | 7.39 | 5.70 | 11.0 → 8.5 | 12.03 | 11.58 |
+| `latin_paragraph/dejavu` (663 glyphs) | 5.00 | 5.08 | 7.5 → 7.7 | 9.79 | 10.81 |
+| `latin_rich/inter` (669 glyphs, 22 features) | 11.83 | 12.29 | 17.7 → 18.4 | 22.37 | 26.10 |
+| `liga_kern_heavy/inter` (354 glyphs) | 10.00 | 8.79 | 28.2 → 24.8 | 10.90 | 10.71 |
+| `liga_kern_heavy/dejavu` (330 glyphs) | 3.36 | 3.99 | 10.2 → 12.1 | 6.10 | 6.76 |
+| `latin_combining/dejavu` (47 glyphs) | 1.84 | 1.68 | 39.1 → 35.7 | 2.27 | 2.29 |
+| `arabic_paragraph/noto` (189 glyphs) | 3.39 | 4.17 | 17.9 → 22.1 | 4.57 | 6.15 |
+| `arabic_paragraph/dejavu` (191 glyphs) | 4.41 | 4.19 | 23.1 → 21.9 | 5.43 | 6.27 |
+| `cold_words/inter` (parse + first shape) | 14.68 | 16.19 | | | |
+| `cold_paragraph/inter` | 28.74 | 28.83 | | | |
+| `cold_paragraph/noto` | 10.27 | 12.23 | | | |
+
+"Before" is the engine that produced wrong positions for the cases listed in
+the changelog. The first correct version of the new engine took 1.9× its time
+on `latin_paragraph/inter` and 1.25× on `arabic_paragraph/noto`; the run-level
+rule-outs, the per-instance kerning memo and the mark-filter sets brought it
+back. Kerning-only Latin runs are now faster than before; Arabic pays about
+4 ns per glyph for attachments that are resolved against final positions, and
+short runs pay for the per-call bookkeeping of a longer lookup record. A
+variable font away from its default instance — which the earlier engine shaped
+with default-instance advances and values — takes 6.4 µs for
+`latin_paragraph/inter` at `wght` 700 against 5.9 µs at the default instance
+(same harness, best of 15 batches, three runs): advances through `HVAR` and
+kerning through its VariationIndex tables are both memoised per instance.
 
 ### Keeping a parsed font: `SharedFont`
 
@@ -1438,8 +1564,17 @@ array under-counted `numPoints`, now rejected per §5.3.3).
 
 ## Not yet supported
 
-- Bidi, Arabic shaping, Indic conjuncts, and other complex contextual
-  shaping beyond the GSUB/GPOS lookup coverage above.
+- Script-specific text analysis: bidi, joining-form selection, Indic /
+  USE syllable reordering, Unicode normalisation of combining sequences.
+  `Font::shape_glyphs` applies whatever the caller decides, through glyph
+  order and feature masks.
+- Advances of a variable font that has `gvar` but no `HVAR` (they live in
+  the `gvar` phantom points): such a font is shaped with its default
+  `hmtx` advances.
+- AAT layout tables (`morx`, `kerx`, …); only the legacy `kern` table is
+  used as a kerning fallback.
+- Device tables (ppem-specific pixel adjustments) in GPOS values and
+  anchors: shaping is in design units, where they contribute nothing.
 - TrueType bytecode *execution* (modern anti-aliasing at ≥ 16 px does not
   need it). The hinting tables themselves are surfaced raw for tooling and
   a downstream interpreter: `cvt ` through `Font::cvt_value` /

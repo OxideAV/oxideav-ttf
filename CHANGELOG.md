@@ -29,8 +29,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Shaping with `kern` requested falls back to the legacy `kern` table
   when the font's GPOS has no `kern` feature for the language system.
 
+### Performance
+
+- Shaping (whole-run, µs per call, before → after the rewrite):
+  `latin_paragraph/inter` 7.39 → 5.70, `liga_kern_heavy/inter` 10.00 →
+  8.79, `arabic_paragraph/dejavu` 4.41 → 4.19, `arabic_paragraph/noto`
+  3.39 → 4.17 (attachments are now resolved against final positions);
+  a variable font away from its default instance is shaped with `HVAR`
+  advances and varied kerning in 6.4 µs for the same Latin paragraph
+  (5.9 µs at the default instance).
+  Run-level rule-outs (a lookup whose rules all look at a second glyph
+  the run does not contain), two-part plan digests, per-instance kerning
+  and advance memos, per-lookup kept-mark sets, flattened mark
+  coverages. Details and the full table in the README.
+
 ### Changed
 
+- `Font::lookup_skips_glyph`: a mark filtering set supersedes the mark
+  attachment class of the same lookup flag (both were applied).
 - `Font::shape` runs on a rewritten GSUB / GPOS engine (see Fixed). Its
   output changes wherever the old engine was wrong; plain Latin
   ligature / kerning runs are unchanged.
