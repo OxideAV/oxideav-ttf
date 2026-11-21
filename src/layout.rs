@@ -295,7 +295,11 @@ pub(crate) struct SubAccel {
     /// well-formed Coverage table: Coverage index plus one per glyph (0:
     /// not covered) — the index of the glyph's substitute, AlternateSet
     /// or LigatureSet.
-    pub(crate) coverage_index: Option<Box<[u16]>>,
+    pub(crate) coverage_index: Option<CoverageIndex>,
+    /// GPOS mark attachment (LookupTypes 4 – 6) with a well-formed
+    /// second Coverage table (base, ligature or mark2 Coverage): its
+    /// flattened index.
+    pub(crate) second_index: Option<CoverageIndex>,
     /// PairPos only: the flattened glyph → value-record addressing.
     pub(crate) pair: PairAccel,
 }
@@ -318,7 +322,7 @@ pub(crate) enum PairAccel {
 /// the sub-table does not cover `g`.
 #[derive(Debug)]
 pub(crate) struct PairSets {
-    pub(crate) coverage_index: Box<[u16]>,
+    pub(crate) coverage_index: CoverageIndex,
 }
 
 impl PairSets {
@@ -391,6 +395,11 @@ pub(crate) struct LookupAccel {
     /// lookup's whole effect on a glyph pair is then one number, which
     /// `pair_memo` caches.
     pub(crate) plain_kerning: bool,
+    /// For a lookup whose flag qualifies which marks it ignores (a mark
+    /// filtering set or a mark attachment class): the marks it does
+    /// *not* ignore, built on first use (`None` inside: not derivable;
+    /// ask GDEF per glyph).
+    pub(crate) kept_marks: OnceLock<Option<GlyphSet>>,
     /// GPOS PairPos with `plain_kerning`: memo of the lookup's
     /// adjustment per `(left, right)` glyph pair at the current
     /// variation instance. Text repeats letter pairs heavily, so most
@@ -452,7 +461,9 @@ impl LookupAccel {
         let is_ligature = table == LayoutTable::Gsub && kind == 4;
         // Sub-table formats whose matcher is "Coverage index of the
         // current glyph, then index an array with it".
-        let wants_coverage_index = table == LayoutTable::Gsub && matches!(kind, 1 | 3 | 4);
+        let is_mark_attach = table == LayoutTable::Gpos && matches!(kind, 4..=6);
+        let wants_coverage_index =
+            (table == LayoutTable::Gsub && matches!(kind, 1 | 3 | 4)) || is_mark_attach;
         let is_pair = table == LayoutTable::Gpos && kind == 2;
 
         let glyph_set = || match filters {
@@ -533,6 +544,14 @@ impl LookupAccel {
                 first: sub_first,
                 first_is_exact,
                 coverage_index,
+                // Offset16 base / ligature / mark2 Coverage at byte 4.
+                second_index: match is_mark_attach && filters {
+                    true => read_u16(sub, 4)
+                        .ok()
+                        .and_then(|off| sub.get(off as usize..))
+                        .and_then(|cov| flatten_coverage(cov, num_glyphs)),
+                    false => None,
+                },
                 pair: match is_pair && filters {
                     true => PairClasses::build(sub, num_glyphs)
                         .map(PairAccel::Classes)
@@ -555,6 +574,7 @@ impl LookupAccel {
             },
             second_components: second,
             plain_kerning,
+            kept_marks: OnceLock::new(),
             pair_memo: Memo::with_bits(PAIR_MEMO_BITS),
         })
     }
@@ -1154,43 +1174,140 @@ impl LayoutCache {
     }
 }
 
-/// Flatten a well-formed Coverage table (§6.2.5) into one entry per
-/// glyph for glyph ids `0..num_glyphs`: Coverage index plus one, or 0
-/// for a glyph the table does not list. `None` when the table is not
+/// Where a flattened Coverage table puts a glyph.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Covered {
+    /// Not covered.
+    Miss,
+    /// Covered, at this Coverage index.
+    At(u16),
+    /// Not a glyph of the font: the flattened form does not say; search
+    /// the Coverage table.
+    Unknown,
+}
+
+/// A well-formed Coverage table (§6.2.5) flattened to an array: the
+/// Coverage index of each glyph, held for the span of glyph ids the
+/// table covers.
+#[derive(Debug)]
+pub(crate) struct CoverageIndex {
+    /// Glyph id of `slots[0]`.
+    first: u16,
+    /// Glyph count of the font: the flattened form answers below it.
+    limit: u32,
+    /// Coverage index plus one; 0 for a glyph that is not covered.
+    slots: Box<[u16]>,
+}
+
+impl CoverageIndex {
+    #[inline]
+    pub(crate) fn get(&self, gid: u16) -> Covered {
+        if gid as u32 >= self.limit {
+            return Covered::Unknown;
+        }
+        let slot = gid
+            .checked_sub(self.first)
+            .and_then(|at| self.slots.get(at as usize));
+        match slot {
+            Some(&slot) if slot != 0 => Covered::At(slot - 1),
+            _ => Covered::Miss,
+        }
+    }
+}
+
+/// Flatten a well-formed Coverage table for the glyph ids
+/// `0..num_glyphs`. `None` when the table is not
 /// [well-formed](coverage_is_well_formed) (a binary search over it would
 /// not be a plain membership test) or an index does not fit.
-fn flatten_coverage(cov: &[u8], num_glyphs: usize) -> Option<Box<[u16]>> {
+fn flatten_coverage(cov: &[u8], num_glyphs: usize) -> Option<CoverageIndex> {
     if !coverage_is_well_formed(cov) {
         return None;
     }
-    let mut out = vec![0u16; num_glyphs];
+    let format = read_u16(cov, 0).ok()?;
     let count = read_u16(cov, 2).ok()? as usize;
-    match read_u16(cov, 0).ok()? {
-        1 => {
-            for i in 0..count {
-                let glyph = read_u16(cov, 4 + i * 2).ok()? as usize;
-                if let Some(slot) = out.get_mut(glyph) {
-                    *slot = u16::try_from(i + 1).ok()?;
-                }
+    // Records are in increasing glyph order: the first and the last
+    // bound the covered span, cut to the glyphs of the font.
+    let span = match (format, count.checked_sub(1)) {
+        (1, Some(last)) => Some((read_u16(cov, 4).ok()?, read_u16(cov, 4 + last * 2).ok()?)),
+        (2, Some(last)) => Some((read_u16(cov, 4).ok()?, read_u16(cov, 6 + last * 6).ok()?)),
+        _ => None,
+    };
+    let limit = num_glyphs.min(u32::MAX as usize) as u32;
+    let Some((first, last)) = span.filter(|&(first, _)| (first as usize) < num_glyphs) else {
+        return Some(CoverageIndex {
+            first: 0,
+            limit,
+            slots: Box::new([]),
+        });
+    };
+    let last = (last as usize).min(num_glyphs - 1);
+    let mut slots = vec![0u16; last - first as usize + 1];
+    for i in 0..count {
+        let (start, end, start_index) = match format {
+            1 => {
+                let glyph = read_u16(cov, 4 + i * 2).ok()?;
+                (glyph, glyph, i)
             }
-        }
-        2 => {
-            for i in 0..count {
-                let off = 4 + i * 6;
-                let start = read_u16(cov, off).ok()?;
-                let end = read_u16(cov, off + 2).ok()?;
-                let start_index = read_u16(cov, off + 4).ok()? as usize;
-                for glyph in start..=end {
-                    let Some(slot) = out.get_mut(glyph as usize) else {
-                        break;
-                    };
-                    *slot = u16::try_from(start_index + (glyph - start) as usize + 1).ok()?;
-                }
+            _ => {
+                let at = 4 + i * 6;
+                (
+                    read_u16(cov, at).ok()?,
+                    read_u16(cov, at + 2).ok()?,
+                    read_u16(cov, at + 4).ok()? as usize,
+                )
             }
+        };
+        for glyph in start..=end {
+            let Some(slot) = slots.get_mut((glyph - first) as usize) else {
+                break;
+            };
+            *slot = u16::try_from(start_index + (glyph - start) as usize + 1).ok()?;
         }
-        _ => return None,
     }
-    Some(out.into_boxed_slice())
+    Some(CoverageIndex {
+        first,
+        limit,
+        slots: slots.into_boxed_slice(),
+    })
+}
+
+/// The marks a lookup does not ignore when its flag carries a mark
+/// filtering set ("skips over all mark glyphs not in the mark filtering
+/// set indicated") or, failing that, a mark attachment class ("skips
+/// over all marks not in the specified mark attachment class"): the
+/// members of that set or class, as GDEF defines them.
+///
+/// `None` when the GDEF data is not flat-readable (out-of-order
+/// records); the caller then asks GDEF glyph by glyph.
+pub(crate) fn kept_marks(
+    gdef: &crate::tables::gdef::GdefTable<'_>,
+    flags: u16,
+    mark_filtering_set: Option<u16>,
+    num_glyphs: usize,
+) -> Option<GlyphSet> {
+    let mut kept = GlyphSet::with_capacity(num_glyphs);
+    match mark_filtering_set {
+        Some(set) => {
+            // No such set: no mark is in it.
+            if let Some(coverage) = gdef.mark_glyph_set_coverage(set) {
+                if coverage.len() >= 4 && !coverage_is_well_formed(coverage) {
+                    return None;
+                }
+                kept.insert_coverage(coverage);
+            }
+        }
+        None => {
+            let class = flags >> 8;
+            // No MarkAttachClassDef: every mark is in class 0.
+            if let Some(class_def) = gdef.mark_attach_class_def_bytes() {
+                let classes = flatten_class_def(class_def, num_glyphs)?;
+                for (glyph, _) in classes.iter().enumerate().filter(|&(_, &c)| c == class) {
+                    kept.insert(glyph as u16);
+                }
+            }
+        }
+    }
+    Some(kept)
 }
 
 /// Flatten a ClassDef table (§6.2.6) into one class per glyph for glyph
@@ -1309,12 +1426,17 @@ mod tests {
         for cov in [&f1[..], &f2[..]] {
             let flat = flatten_coverage(cov, 50).unwrap();
             for g in 0..50u16 {
-                assert_eq!(
-                    flat[g as usize].checked_sub(1),
-                    coverage_lookup(cov, g),
-                    "gid {g}"
-                );
+                let expected = match coverage_lookup(cov, g) {
+                    Some(index) => Covered::At(index),
+                    None => Covered::Miss,
+                };
+                assert_eq!(flat.get(g), expected, "gid {g}");
             }
+            // Past the font's glyphs the flattened form does not answer.
+            assert_eq!(flat.get(50), Covered::Unknown);
+            assert_eq!(flat.get(u16::MAX), Covered::Unknown);
+            // Only the covered span is stored.
+            assert!(flat.slots.len() < 50);
         }
         assert!(flatten_coverage(&[0, 1, 0, 2, 0, 9, 0, 5], 50).is_none());
     }

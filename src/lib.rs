@@ -2705,7 +2705,8 @@ impl<'a> Font<'a> {
     ///
     /// `IGNORE_MARKS` subsumes both mark-specific filters (a lookup that
     /// already skips all marks ignores the mark-class / filtering-set
-    /// qualifiers). With no GDEF table the predicate degenerates to
+    /// qualifiers), and a mark filtering set supersedes the mark
+    /// attachment class. With no GDEF table the predicate degenerates to
     /// "never skip", matching the §2 requirement that a GlyphClassDef
     /// table be present whenever a skip bit is set.
     pub fn lookup_skips_glyph(
@@ -2732,15 +2733,15 @@ impl<'a> Font<'a> {
         // The two mark-class qualifiers only filter mark glyphs, and only
         // matter when IGNORE_MARKS has not already removed every mark.
         if is_mark {
-            let attach_class = (flags >> 8) & 0x00FF;
-            if attach_class != 0 && gdef.mark_attach_class(glyph_id) != attach_class {
-                return true;
-            }
-            if let Some(set) = mark_filtering_set
-                && !gdef.mark_glyph_set_contains(set, glyph_id)
-            {
-                return true;
-            }
+            // "If a mark filtering set is specified, this supersedes any
+            // mark attachment class indication in the lookup flag."
+            return match mark_filtering_set {
+                Some(set) => !gdef.mark_glyph_set_contains(set, glyph_id),
+                None => {
+                    let attach_class = (flags >> 8) & 0x00FF;
+                    attach_class != 0 && gdef.mark_attach_class(glyph_id) != attach_class
+                }
+            };
         }
         false
     }

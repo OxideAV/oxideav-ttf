@@ -12,7 +12,7 @@
 //! by whole pixels at one ppem, which has no font-unit equivalent, and
 //! contributes nothing.
 
-use crate::layout::{PairAccel, SubAccel};
+use crate::layout::{CoverageIndex, Covered, PairAccel, SubAccel};
 use crate::tables::device::resolve_device_delta;
 use crate::tables::gdef::{class_def_lookup, coverage_lookup};
 use crate::tables::mvar::ItemVariationStore;
@@ -227,9 +227,10 @@ pub(crate) fn pair_adjust(
     match rd16(sub, 0)? {
         1 => {
             let index = match accel.map(|a| &a.pair) {
-                Some(PairAccel::Sets(sets)) => match sets.coverage_index.get(first as usize) {
-                    Some(&slot) => slot.checked_sub(1)?,
-                    None => coverage_lookup(follow16(sub, 2)?, first)?,
+                Some(PairAccel::Sets(sets)) => match sets.coverage_index.get(first) {
+                    Covered::At(index) => index,
+                    Covered::Miss => return None,
+                    Covered::Unknown => coverage_lookup(follow16(sub, 2)?, first)?,
                 },
                 _ => coverage_lookup(follow16(sub, 2)?, first)?,
             } as usize;
@@ -349,10 +350,20 @@ impl MarkHit {
     }
 }
 
-/// `(class, anchor)` of `mark` from the MarkArray of a mark-attachment
-/// sub-table (mark Coverage offset at byte 2, MarkArray offset at 8).
-fn mark_record(sub: &[u8], mark: u16, var: &VarCtx<'_>) -> Option<(u16, (f32, f32))> {
-    let index = coverage_lookup(follow16(sub, 2)?, mark)? as usize;
+/// Coverage index of `gid` in the Coverage table whose offset is stored
+/// at byte `at` of `sub`, through `flat` when the table was flattened.
+#[inline]
+fn coverage_index(sub: &[u8], at: usize, flat: Option<&CoverageIndex>, gid: u16) -> Option<usize> {
+    match flat.map_or(Covered::Unknown, |index| index.get(gid)) {
+        Covered::At(index) => Some(index as usize),
+        Covered::Miss => None,
+        Covered::Unknown => coverage_lookup(follow16(sub, at)?, gid).map(usize::from),
+    }
+}
+
+/// `(class, anchor)` of the mark at mark-Coverage index `index`, from
+/// the MarkArray of a mark-attachment sub-table (offset at byte 8).
+fn mark_record(sub: &[u8], index: usize, var: &VarCtx<'_>) -> Option<(u16, (f32, f32))> {
     let array = follow16(sub, 8)?;
     if index >= rd16(array, 0)? as usize {
         return None;
@@ -369,6 +380,7 @@ fn mark_record(sub: &[u8], mark: u16, var: &VarCtx<'_>) -> Option<(u16, (f32, f3
 /// not covered or the target defines no anchor for the mark's class.
 pub(crate) fn mark_to_single(
     sub: &[u8],
+    accel: Option<&SubAccel>,
     mark: u16,
     target: u16,
     var: &VarCtx<'_>,
@@ -376,12 +388,15 @@ pub(crate) fn mark_to_single(
     if rd16(sub, 0)? != 1 {
         return None;
     }
-    let (class, mark_anchor) = mark_record(sub, mark, var)?;
+    // The cheaper test first: most marks meet a glyph the sub-table has
+    // no anchors for.
+    let target_index = coverage_index(sub, 4, accel.and_then(|a| a.second_index.as_ref()), target)?;
+    let mark_index = coverage_index(sub, 2, accel.and_then(|a| a.coverage_index.as_ref()), mark)?;
+    let (class, mark_anchor) = mark_record(sub, mark_index, var)?;
     let class_count = rd16(sub, 6)? as usize;
     if class as usize >= class_count {
         return None;
     }
-    let target_index = coverage_lookup(follow16(sub, 4)?, target)? as usize;
     let array = follow16(sub, 10)?;
     if target_index >= rd16(array, 0)? as usize {
         return None;
@@ -411,6 +426,7 @@ pub(crate) fn ligature_component_count(sub: &[u8], ligature: u16) -> Option<u16>
 /// the end is clamped to the last component.
 pub(crate) fn mark_to_ligature(
     sub: &[u8],
+    accel: Option<&SubAccel>,
     mark: u16,
     ligature: u16,
     component: impl FnOnce(u16) -> u16,
@@ -419,12 +435,18 @@ pub(crate) fn mark_to_ligature(
     if rd16(sub, 0)? != 1 {
         return None;
     }
-    let (class, mark_anchor) = mark_record(sub, mark, var)?;
+    let lig_index = coverage_index(
+        sub,
+        4,
+        accel.and_then(|a| a.second_index.as_ref()),
+        ligature,
+    )?;
+    let mark_index = coverage_index(sub, 2, accel.and_then(|a| a.coverage_index.as_ref()), mark)?;
+    let (class, mark_anchor) = mark_record(sub, mark_index, var)?;
     let class_count = rd16(sub, 6)? as usize;
     if class as usize >= class_count {
         return None;
     }
-    let lig_index = coverage_lookup(follow16(sub, 4)?, ligature)? as usize;
     let array = follow16(sub, 10)?;
     if lig_index >= rd16(array, 0)? as usize {
         return None;

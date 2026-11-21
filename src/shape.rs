@@ -324,9 +324,12 @@ struct SkipFilter<'f, 'a> {
     /// `false` when the lookup can never skip a glyph (no skip bit, no
     /// mark-attachment class, no filtering set, or no GDEF at all).
     active: bool,
-    /// Marks need the GDEF walker: a mark-attachment class or a mark
-    /// filtering set qualifies which marks are skipped.
-    marks_need_walker: bool,
+    /// A mark-attachment class or a mark filtering set qualifies which
+    /// marks are skipped.
+    marks_are_filtered: bool,
+    /// With `marks_are_filtered`: the marks that are *not* skipped, when
+    /// the lookup has that set flattened; otherwise GDEF is asked.
+    kept_marks: Option<&'f GlyphSet>,
 }
 
 impl<'f, 'a> SkipFilter<'f, 'a> {
@@ -340,7 +343,8 @@ impl<'f, 'a> SkipFilter<'f, 'a> {
             flags,
             mark_filtering_set,
             active,
-            marks_need_walker: flags & 0xFF00 != 0 || mark_filtering_set.is_some(),
+            marks_are_filtered: flags & 0xFF00 != 0 || mark_filtering_set.is_some(),
+            kept_marks: None,
         }
     }
 
@@ -359,10 +363,15 @@ impl<'f, 'a> SkipFilter<'f, 'a> {
             crate::tables::gdef::CLASS_LIGATURE => self.flags & 0x0004 != 0,
             crate::tables::gdef::CLASS_MARK => {
                 self.flags & 0x0008 != 0
-                    || (self.marks_need_walker
-                        && self
-                            .font
-                            .lookup_skips_glyph(self.flags, self.mark_filtering_set, gid))
+                    || (self.marks_are_filtered
+                        && match self.kept_marks {
+                            Some(kept) => !kept.contains(gid),
+                            None => self.font.lookup_skips_glyph(
+                                self.flags,
+                                self.mark_filtering_set,
+                                gid,
+                            ),
+                        })
             }
             _ => false,
         }
@@ -427,8 +436,24 @@ impl<'f, 'a> Engine<'f, 'a> {
     }
 
     #[inline]
-    fn skip_filter(&self, lookup: &LookupAccel) -> SkipFilter<'f, 'a> {
-        SkipFilter::new(self.font, lookup.flags, lookup.mark_filtering_set)
+    fn skip_filter(&self, lookup: &'f LookupAccel) -> SkipFilter<'f, 'a> {
+        let mut filter = SkipFilter::new(self.font, lookup.flags, lookup.mark_filtering_set);
+        // Which marks a filtering lookup keeps is the same for every
+        // run: derived once per lookup (accelerators on).
+        if filter.marks_are_filtered && filter.classes.is_some() && lookup.flags & 0x0008 == 0 {
+            filter.kept_marks = lookup
+                .kept_marks
+                .get_or_init(|| {
+                    crate::layout::kept_marks(
+                        self.font.gdef()?,
+                        lookup.flags,
+                        lookup.mark_filtering_set,
+                        self.font.maxp.num_glyphs as usize,
+                    )
+                })
+                .as_ref();
+        }
+        filter
     }
 
     /// `true` when GDEF classes `gid` as a mark.
@@ -583,13 +608,26 @@ impl<'s> RunGlyphs<'s> {
             || !planned.second_digest.intersects(&self.digest)
     }
 
-    /// `true` when `lookup` provably cannot act anywhere in the run: no
-    /// glyph of the run can start it, or — for a lookup whose every rule
-    /// looks at a second glyph — no glyph of the run can be that glyph.
+    /// Which glyphs of the run `lookup` can act on, as a mask of their
+    /// glyph id residues modulo 64 (a position whose glyph has another
+    /// residue cannot be a candidate). `0`: the lookup provably cannot
+    /// act anywhere in the run — no glyph of the run can start it, or,
+    /// for a lookup whose every rule looks at a second glyph, no glyph
+    /// of the run can be that glyph.
     #[inline]
-    fn rules_out(&self, lookup: &LookupAccel) -> bool {
-        let absent = |set: &GlyphSet| !self.distinct.iter().any(|&g| set.contains(g));
-        absent(&lookup.first) || lookup.second_components.as_ref().is_some_and(absent)
+    fn candidates(&self, lookup: &LookupAccel) -> u64 {
+        let first: &GlyphSet = &lookup.first;
+        let residues = self
+            .distinct
+            .iter()
+            .filter(|&&g| first.contains(g))
+            .fold(0, |residues, &g| residues | digest_bit(g));
+        match lookup.second_components.as_ref() {
+            Some(second) if residues != 0 && !self.distinct.iter().any(|&g| second.contains(g)) => {
+                0
+            }
+            _ => residues,
+        }
     }
 }
 
@@ -775,6 +813,7 @@ impl<'a> Font<'a> {
                 logging: false,
                 budget: 0,
                 last_lig_id: 0,
+                candidates: 0,
             }
             .run_all(&plan.gsub);
         }

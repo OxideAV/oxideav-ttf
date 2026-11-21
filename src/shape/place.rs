@@ -18,7 +18,7 @@
 use super::seq::{self, View};
 use super::wire::{self, Adjust, VarCtx};
 use super::{Direction, Engine, RunGlyphs, ShapedGlyph, SkipFilter, WorkGlyph, mask_allows};
-use crate::layout::{LookupAccel, PlanLookup};
+use crate::layout::{LookupAccel, PlanLookup, digest_bit};
 
 /// "No glyph" in an [`Attach`] link.
 const UNLINKED: u32 = u32::MAX;
@@ -88,7 +88,8 @@ impl<'f, 'a> Place<'_, 'f, 'a> {
             let Some(lookup) = self.eng.lookup(planned.index) else {
                 continue;
             };
-            if run.rules_out(lookup) {
+            let candidates = run.candidates(lookup);
+            if candidates == 0 {
                 continue;
             }
             let skip = self.eng.skip_filter(lookup);
@@ -97,13 +98,16 @@ impl<'f, 'a> Place<'_, 'f, 'a> {
                 && planned.mask == 0
                 && self.direction != Direction::TopToBottom
             {
-                self.plain_kerning_pass(lookup, &skip);
+                self.plain_kerning_pass(lookup, &skip, candidates);
                 continue;
             }
             let mut i = 0usize;
             while i < self.buf.len() {
                 let glyph = self.buf[i];
-                if lookup.first.contains(glyph.gid)
+                // The residue mask first: no memory touched for most
+                // glyphs the lookup cannot act on.
+                if candidates & digest_bit(glyph.gid) != 0
+                    && lookup.first.contains(glyph.gid)
                     && mask_allows(planned.mask, glyph.mask)
                     && !skip.skips(glyph.gid)
                 {
@@ -124,12 +128,20 @@ impl<'f, 'a> Place<'_, 'f, 'a> {
     /// A pair-adjustment lookup that only ever changes the first glyph's
     /// x-advance: one memoised number per glyph pair (at the current
     /// variation instance).
-    fn plain_kerning_pass(&mut self, lookup: &'f LookupAccel, skip: &SkipFilter<'f, 'a>) {
+    fn plain_kerning_pass(
+        &mut self,
+        lookup: &'f LookupAccel,
+        skip: &SkipFilter<'f, 'a>,
+        candidates: u64,
+    ) {
         let eng = self.eng;
         let var = self.var;
         for i in 0..self.buf.len() {
             let left = self.buf[i].gid;
-            if !lookup.first.contains(left) || skip.skips(left) {
+            if candidates & digest_bit(left) == 0
+                || !lookup.first.contains(left)
+                || skip.skips(left)
+            {
                 continue;
             }
             let Some(j) = skip.next(self.buf, i) else {
@@ -249,8 +261,9 @@ impl<'f, 'a> Place<'_, 'f, 'a> {
             4 => {
                 let j = self.preceding_non_mark(skip, i)?;
                 let base = self.buf[j].gid;
-                let hit =
-                    subs.find_map(|s| wire::mark_to_single(eng.sub_bytes(s), gid, base, &var))?;
+                let hit = subs.find_map(|s| {
+                    wire::mark_to_single(eng.sub_bytes(s), Some(s), gid, base, &var)
+                })?;
                 self.attach_mark(i, j, hit);
                 Some(i + 1)
             }
@@ -263,6 +276,7 @@ impl<'f, 'a> Place<'_, 'f, 'a> {
                 let hit = subs.find_map(|s| {
                     wire::mark_to_ligature(
                         eng.sub_bytes(s),
+                        Some(s),
                         gid,
                         ligature.gid,
                         // A mark with no recorded component follows the
@@ -292,8 +306,9 @@ impl<'f, 'a> Place<'_, 'f, 'a> {
                 {
                     return None;
                 }
-                let hit = subs
-                    .find_map(|s| wire::mark_to_single(eng.sub_bytes(s), gid, under.gid, &var))?;
+                let hit = subs.find_map(|s| {
+                    wire::mark_to_single(eng.sub_bytes(s), Some(s), gid, under.gid, &var)
+                })?;
                 self.attach_mark(i, j, hit);
                 Some(i + 1)
             }

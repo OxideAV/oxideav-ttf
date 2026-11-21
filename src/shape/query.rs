@@ -247,7 +247,7 @@ impl<'a> Font<'a> {
             .subs
             .iter()
             .filter(|s| s.first.contains(mark))
-            .find_map(|s| wire::mark_to_single(eng.sub_bytes(s), mark, target, &var))
+            .find_map(|s| wire::mark_to_single(eng.sub_bytes(s), Some(s), mark, target, &var))
             .map(anchors)
     }
 
@@ -274,7 +274,7 @@ impl<'a> Font<'a> {
                 if component >= wire::ligature_component_count(bytes, ligature)? {
                     return None;
                 }
-                wire::mark_to_ligature(bytes, mark, ligature, |_| component, &var)
+                wire::mark_to_ligature(bytes, Some(s), mark, ligature, |_| component, &var)
             })
             .map(anchors)
     }

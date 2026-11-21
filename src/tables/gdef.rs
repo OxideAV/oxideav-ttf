@@ -316,44 +316,28 @@ impl<'a> GdefTable<'a> {
     /// Returns `false` if the font has no MarkGlyphSets sub-table or
     /// the set index is out of range.
     pub fn mark_glyph_set_contains(&self, set_index: u16, glyph_id: u16) -> bool {
-        let sub = match self.mark_glyph_set_sub() {
-            Some(s) => s,
-            None => return false,
-        };
+        self.mark_glyph_set_coverage(set_index)
+            .is_some_and(|cov| coverage_lookup(cov, glyph_id).is_some())
+    }
+
+    /// The Coverage table of mark glyph set `set_index`, when the
+    /// MarkGlyphSets table has one.
+    pub(crate) fn mark_glyph_set_coverage(&self, set_index: u16) -> Option<&[u8]> {
+        let sub = self.mark_glyph_set_sub()?;
         // u16 format (must be 1), u16 markGlyphSetCount, Offset32
-        // coverageOffsets[markGlyphSetCount]. The "format" byte is
-        // pinned at 1 in the spec; reject anything else.
-        if sub.len() < 4 {
-            return false;
+        // coverageOffsets[markGlyphSetCount] — "the array of offsets for
+        // the Coverage tables uses Offset32, not Offset16".
+        if read_u16(sub, 0).ok()? != 1 || set_index >= read_u16(sub, 2).ok()? {
+            return None;
         }
-        let format = match read_u16(sub, 0) {
-            Ok(v) => v,
-            Err(_) => return false,
-        };
-        if format != 1 {
-            return false;
-        }
-        let count = match read_u16(sub, 2) {
-            Ok(v) => v as usize,
-            Err(_) => return false,
-        };
-        if set_index as usize >= count {
-            return false;
-        }
-        // Note: spec calls out Offset32, not Offset16.
-        let cov_off_pos = 4 + set_index as usize * 4;
-        if sub.len() < cov_off_pos + 4 {
-            return false;
-        }
-        let cov_off = match read_u32(sub, cov_off_pos) {
-            Ok(v) => v as usize,
-            Err(_) => return false,
-        };
-        let cov = match sub.get(cov_off..) {
-            Some(s) => s,
-            None => return false,
-        };
-        coverage_lookup(cov, glyph_id).is_some()
+        let cov_off = read_u32(sub, 4 + set_index as usize * 4).ok()? as usize;
+        sub.get(cov_off..)
+    }
+
+    /// The MarkAttachClassDef table bytes, when the header carries a
+    /// non-NULL offset in range.
+    pub(crate) fn mark_attach_class_def_bytes(&self) -> Option<&'a [u8]> {
+        self.bytes.get(self.mark_attach_class_def_off? as usize..)
     }
 
     fn mark_glyph_set_sub(&self) -> Option<&[u8]> {

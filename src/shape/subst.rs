@@ -20,7 +20,8 @@
 
 use super::seq::{self, View};
 use super::{Engine, LookupScratch, RunGlyphs, SkipFilter, WorkGlyph, mask_allows};
-use crate::layout::{LookupAccel, PlanLookup, SubAccel};
+use crate::layout::digest_bit;
+use crate::layout::{Covered, LookupAccel, PlanLookup, SubAccel};
 use crate::tables::gsub;
 
 /// A change of buffer length, recorded while a contextual lookup is
@@ -51,25 +52,39 @@ pub(super) struct Subst<'s, 'r, 'f, 'a> {
     pub(super) budget: u32,
     /// Identifier of the most recently formed ligature (0: none yet).
     pub(super) last_lig_id: u16,
+    /// Residue mask of the glyphs the lookup being applied can act on
+    /// (see `RunGlyphs::candidates`), widened by every glyph written
+    /// during the pass.
+    pub(super) candidates: u64,
 }
 
-/// Where a sub-table's flattened Coverage puts a glyph.
-enum Flat {
-    /// Not covered: the sub-table does not apply.
-    Miss,
-    /// Covered, at this Coverage index.
-    At(u16),
-    /// No flattened Coverage: search the Coverage table.
-    Unknown,
-}
-
+/// Where a sub-table's flattened Coverage puts a glyph
+/// (`Covered::Unknown` also when the sub-table has no flattened form).
 #[inline]
-fn flat_index(sub: &SubAccel, gid: u16) -> Flat {
-    match sub.coverage_index.as_deref().map(|ci| ci.get(gid as usize)) {
-        Some(Some(0)) => Flat::Miss,
-        Some(Some(&slot)) => Flat::At(slot - 1),
-        // Not flattened, or a glyph id beyond the flattened range.
-        Some(None) | None => Flat::Unknown,
+fn flat_index(sub: &SubAccel, gid: u16) -> Covered {
+    match sub.coverage_index.as_ref() {
+        Some(index) => index.get(gid),
+        None => Covered::Unknown,
+    }
+}
+
+impl<'f> Engine<'f, '_> {
+    /// Single substitution (GSUB LookupType 1) of `gid`: the first
+    /// sub-table that covers it answers.
+    #[inline]
+    fn single_substitute(&self, lookup: &'f LookupAccel, gid: u16) -> Option<u16> {
+        lookup
+            .subs
+            .iter()
+            .filter(|s| s.first.contains(gid))
+            .find_map(|s| {
+                let bytes = self.sub_bytes(s);
+                match flat_index(s, gid) {
+                    Covered::Miss => None,
+                    Covered::At(index) => gsub::single_subst_covered(bytes, gid, index),
+                    Covered::Unknown => gsub::single_subst_lookup(bytes, gid),
+                }
+            })
     }
 }
 
@@ -83,7 +98,8 @@ impl<'f, 'a> Subst<'_, '_, 'f, 'a> {
             let Some(lookup) = self.eng.lookup(planned.index) else {
                 continue;
             };
-            if self.run.rules_out(lookup) {
+            self.candidates = self.run.candidates(lookup);
+            if self.candidates == 0 {
                 continue;
             }
             let skip = self.eng.skip_filter(lookup);
@@ -91,10 +107,23 @@ impl<'f, 'a> Subst<'_, '_, 'f, 'a> {
                 self.reverse_pass(lookup, &skip, planned.mask);
                 continue;
             }
+            if lookup.kind == 1 && planned.mask == 0 && !skip.active {
+                // Single substitution of the whole run: nothing to
+                // match around the glyph, nothing to skip.
+                for i in 0..self.buf.len() {
+                    let gid = self.buf[i].gid;
+                    if self.is_candidate(lookup, gid)
+                        && let Some(substitute) = self.eng.single_substitute(lookup, gid)
+                    {
+                        self.set_gid(i, substitute);
+                    }
+                }
+                continue;
+            }
             let mut i = 0usize;
             while i < self.buf.len() {
                 let glyph = self.buf[i];
-                if lookup.first.contains(glyph.gid)
+                if self.is_candidate(lookup, glyph.gid)
                     && mask_allows(planned.mask, glyph.mask)
                     && !skip.skips(glyph.gid)
                 {
@@ -119,7 +148,7 @@ impl<'f, 'a> Subst<'_, '_, 'f, 'a> {
         let eng = self.eng;
         for i in (0..self.buf.len()).rev() {
             let glyph = self.buf[i];
-            if !lookup.first.contains(glyph.gid)
+            if !self.is_candidate(lookup, glyph.gid)
                 || !mask_allows(mask, glyph.mask)
                 || skip.skips(glyph.gid)
             {
@@ -160,14 +189,7 @@ impl<'f, 'a> Subst<'_, '_, 'f, 'a> {
         let mut subs = lookup.subs.iter().filter(|s| s.first.contains(gid));
         match lookup.kind {
             1 => {
-                let substitute = subs.find_map(|s| {
-                    let bytes = eng.sub_bytes(s);
-                    match flat_index(s, gid) {
-                        Flat::Miss => None,
-                        Flat::At(index) => gsub::single_subst_covered(bytes, gid, index),
-                        Flat::Unknown => gsub::single_subst_lookup(bytes, gid),
-                    }
-                })?;
+                let substitute = eng.single_substitute(lookup, gid)?;
                 self.set_gid(i, substitute);
                 Some(i + 1)
             }
@@ -180,9 +202,11 @@ impl<'f, 'a> Subst<'_, '_, 'f, 'a> {
                 let substitute = subs.find_map(|s| {
                     let bytes = eng.sub_bytes(s);
                     match flat_index(s, gid) {
-                        Flat::Miss => None,
-                        Flat::At(index) => gsub::alternate_subst_covered(bytes, index, alternate),
-                        Flat::Unknown => gsub::alternate_subst_lookup(bytes, gid, alternate),
+                        Covered::Miss => None,
+                        Covered::At(index) => {
+                            gsub::alternate_subst_covered(bytes, index, alternate)
+                        }
+                        Covered::Unknown => gsub::alternate_subst_lookup(bytes, gid, alternate),
                     }
                 })?;
                 self.set_gid(i, substitute);
@@ -194,10 +218,26 @@ impl<'f, 'a> Subst<'_, '_, 'f, 'a> {
         }
     }
 
+    /// `true` when the current lookup may act on `gid`: first the
+    /// residue mask of the pass (no memory touched), then the lookup's
+    /// first-glyph set.
+    #[inline]
+    fn is_candidate(&self, lookup: &LookupAccel, gid: u16) -> bool {
+        self.candidates & digest_bit(gid) != 0 && lookup.first.contains(gid)
+    }
+
     #[inline]
     fn set_gid(&mut self, i: usize, gid: u16) {
         self.buf[i].gid = gid;
+        self.wrote(gid);
+    }
+
+    /// A glyph entered the buffer: the run summary and the candidate
+    /// mask of the pass in progress learn it.
+    #[inline]
+    fn wrote(&mut self, gid: u16) {
         self.run.add(gid);
+        self.candidates |= digest_bit(gid);
     }
 
     /// Replace the glyph at `i` by `sequence` (multiple substitution).
@@ -224,7 +264,7 @@ impl<'f, 'a> Subst<'_, '_, 'f, 'a> {
                 tail.iter().map(|&gid| WorkGlyph { gid, ..source }),
             );
             for &gid in tail {
-                self.run.add(gid);
+                self.wrote(gid);
             }
             if self.logging {
                 self.sc.edits.push(Edit::Inserted {
@@ -304,9 +344,9 @@ impl<'f, 'a> Subst<'_, '_, 'f, 'a> {
             .find_map(|s| {
                 let bytes = eng.sub_bytes(s);
                 match flat_index(s, first) {
-                    Flat::Miss => None,
-                    Flat::At(index) => gsub::ligature_subst_covered(bytes, index, cand_gids),
-                    Flat::Unknown => gsub::ligature_subst_lookup(bytes, cand_gids),
+                    Covered::Miss => None,
+                    Covered::At(index) => gsub::ligature_subst_covered(bytes, index, cand_gids),
+                    Covered::Unknown => gsub::ligature_subst_lookup(bytes, cand_gids),
                 }
             })?;
         if consumed == 0 || consumed > cand_idx.len() {
